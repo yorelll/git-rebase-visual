@@ -30,7 +30,7 @@ import {
   pushRefspec,
 } from "../git/pushGuard";
 import { splitTrailers, applyTrailers } from "../git/message";
-import { stashPush, stashPop, commitIndex, commitAll } from "../git/worktree";
+import { stashPush, stashPopBySha, commitIndex, commitAll } from "../git/worktree";
 import { LockStore } from "../lock/lockStore";
 import {
   generateMessage,
@@ -43,8 +43,11 @@ import {
   getLlmConfig,
   getLlmExtras,
   getPushRefspecTemplate,
+  getAutoStash,
   isLlmConfigured,
 } from "../config";
+
+const PENDING_STASH_KEY = "gitRebaseVisual.pendingStash";
 
 interface FromWebview {
   type: string;
@@ -92,6 +95,13 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     this.root = root;
 
     const rebaseInProgress = await isRebaseInProgress(root);
+
+    // Desync recovery: if we auto-stashed for a rebase that has since finished
+    // (possibly continued/aborted outside this UI, e.g. in a terminal), restore
+    // the stash now. A stash the user already popped is detected and cleared.
+    if (!rebaseInProgress && this.getPendingStash(root)) {
+      await this.popPendingStash(root, root);
+    }
 
     // During a rebase HEAD is detached; resolve the range against the branch
     // being rebased so we still show meaningful commits instead of "no upstream".
@@ -170,7 +180,7 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
       return;
     }
     // While a rebase is paused, only allow read/continue/abort/copy actions.
-    const mutating = ["reorder", "drop", "rebaseTo", "apply", "rebaseAndPush"];
+    const mutating = ["reorder", "drop", "rebaseTo", "apply"];
     if (cwd && mutating.includes(m.type) && (await isRebaseInProgress(cwd))) {
       vscode.window.showWarningMessage(
         "变基进行中，请先在面板顶部 Continue 或 Abort。"
@@ -233,19 +243,21 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
         case "apply":
           await this.apply(cwd!, m.mode, m.hash, m.message, m.thenEdit === true);
           break;
-        case "rebaseAndPush":
-          await this.rebaseAndPush(cwd!, m.hash);
-          break;
         case "continueRebase": {
           const r = await continueRebase(cwd!);
           if (!r.ok && !r.stopped) {
             vscode.window.showErrorMessage(r.message);
+          }
+          // Restore the auto-stash once the rebase is fully done.
+          if (!(await isRebaseInProgress(cwd!))) {
+            await this.popPendingStash(cwd!, this.root!);
           }
           await this.refresh();
           break;
         }
         case "abortRebase":
           await abortRebase(cwd!);
+          await this.popPendingStash(cwd!, this.root!);
           await this.refresh();
           break;
       }
@@ -276,39 +288,107 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     return resolveBase(cwd, oldest);
   }
 
+  // ---- pending-stash tracking (per repo, survives reloads) ---------------
+
+  private getPendingStash(root: string): string | undefined {
+    const map = this.ctx.workspaceState.get<Record<string, string>>(
+      PENDING_STASH_KEY,
+      {}
+    );
+    return map[root];
+  }
+
+  private async setPendingStash(root: string, sha: string): Promise<void> {
+    const map = this.ctx.workspaceState.get<Record<string, string>>(
+      PENDING_STASH_KEY,
+      {}
+    );
+    map[root] = sha;
+    await this.ctx.workspaceState.update(PENDING_STASH_KEY, map);
+  }
+
+  private async clearPendingStash(root: string): Promise<void> {
+    const map = this.ctx.workspaceState.get<Record<string, string>>(
+      PENDING_STASH_KEY,
+      {}
+    );
+    if (map[root]) {
+      delete map[root];
+      await this.ctx.workspaceState.update(PENDING_STASH_KEY, map);
+    }
+  }
+
+  /**
+   * Restores a previously auto-stashed change set (identified by sha), called
+   * after a rebase fully finishes or the user Continues/Aborts. Robust to the
+   * user having already popped it manually elsewhere (gone => clear silently).
+   */
+  private async popPendingStash(cwd: string, root: string): Promise<void> {
+    const sha = this.getPendingStash(root);
+    if (!sha) {
+      return;
+    }
+    const res = await stashPopBySha(cwd, sha);
+    await this.clearPendingStash(root);
+    if (res.gone) {
+      return; // user already restored it — nothing to do
+    }
+    if (!res.ok) {
+      vscode.window.showWarningMessage(
+        `恢复自动 stash 时有冲突：${res.message}。stash 仍保留，请手动解决后 git stash pop。`
+      );
+    } else {
+      vscode.window.showInformationMessage("已恢复自动 stash 的改动。");
+    }
+  }
+
+  /**
+   * Ensures a clean tree for a rebase. Returns true if the operation may
+   * proceed. In auto-stash mode a dirty tree is stashed (recorded as pending so
+   * it is popped on completion / Continue / Abort). In manual mode a dirty tree
+   * blocks the operation with a warning.
+   */
+  private async prepareCleanTree(cwd: string, root: string): Promise<boolean> {
+    if (!(await isDirty(cwd))) {
+      return true;
+    }
+    if (!getAutoStash()) {
+      vscode.window.showWarningMessage(
+        "工作区/暂存区有未提交内容，无法执行该操作。请先自行 git stash（或在设置中开启 autoStash）后再试。"
+      );
+      return false;
+    }
+    const sha = await stashPush(cwd);
+    if (sha) {
+      await this.setPendingStash(root, sha);
+    }
+    return true;
+  }
+
   private async runRebase(
     cwd: string,
     plan: { items: RebaseItem[]; newMessage?: string; onto?: RebaseBase }
   ): Promise<void> {
-    // Auto-stash a dirty worktree so the rebase can start on a clean tree.
-    const stashed = (await isDirty(cwd)) ? await stashPush(cwd) : false;
+    const root = this.root!;
+    if (!(await this.prepareCleanTree(cwd, root))) {
+      return;
+    }
 
     const onto = plan.onto ?? (await this.computeBase(cwd));
     const outcome = await executeRebase(cwd, { ...plan, onto });
 
     if (!outcome.ok && !outcome.stopped) {
       vscode.window.showErrorMessage(`变基失败：${outcome.message}`);
+      // Rebase did not apply; restore the stash immediately.
+      await this.popPendingStash(cwd, root);
     } else if (outcome.stopped) {
       vscode.window.showWarningMessage(
-        "变基已暂停（冲突或 edit 停靠）。请解决后在面板 Continue 或 Abort。"
+        "变基已暂停（冲突或 edit 停靠）。你的改动已自动 stash，将在 Continue/Abort 后自动恢复。"
       );
-    }
-
-    // Only pop when the rebase fully finished; a paused rebase can't take the
-    // stash back yet (tell the user so they can pop manually).
-    if (stashed) {
-      if (outcome.ok && !outcome.stopped) {
-        const pop = await stashPop(cwd);
-        if (!pop.ok) {
-          vscode.window.showWarningMessage(
-            `已自动 stash 你的改动，但恢复时有冲突：${pop.message}。请手动 git stash pop。`
-          );
-        }
-      } else {
-        vscode.window.showWarningMessage(
-          "你的未提交改动已被自动 stash。完成/取消变基后请执行 git stash pop 恢复。"
-        );
-      }
+      // Keep the pending stash; it is popped on Continue/Abort.
+    } else {
+      // Completed cleanly — restore now.
+      await this.popPendingStash(cwd, root);
     }
   }
 
@@ -439,35 +519,50 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  private async rebaseAndPush(cwd: string, hash: string): Promise<void> {
+  /**
+   * Pushes the current branch (HEAD). A plain push — the user rebases / edits
+   * beforehand as needed, then pushes. Applies the lock guard over the range
+   * @{upstream}..HEAD and supports a normal or review (refs/for/*) refspec.
+   */
+  public async pushBranch(): Promise<void> {
+    const cwd = this.cwd();
+    if (!cwd) {
+      return;
+    }
+    if (await isRebaseInProgress(cwd)) {
+      vscode.window.showWarningMessage("变基进行中，请先 Continue 或 Abort 再推送。");
+      return;
+    }
     const up = await getUpstream(cwd);
     if (!up) {
       vscode.window.showErrorMessage("当前分支未配置 upstream。");
       return;
     }
+
+    // Lock guard: reject if any locked commit is in @{upstream}..HEAD.
     const blocked = await lockedInPush(
       cwd,
-      hash,
+      "HEAD",
       this.locks.lockedHashes(this.root!),
       this.locks.lockedPatchIds(this.root!)
     );
     if (blocked.length > 0) {
       const short = blocked.map((h) => h.slice(0, 7)).join(", ");
       vscode.window.showErrorMessage(
-        `推送被拒绝：推送范围包含被锁定的 commit（${short}）。请将此 commit 移到锁定 commit 之前再推送。`
+        `推送被拒绝：推送范围包含被锁定的 commit（${short}）。请将其移出推送范围（拖到你要推送的提交之后，或先 drop）再推送。`
       );
       return;
     }
 
     // Decide the refspec: normal branch push, or a configured review push.
     const template = getPushRefspecTemplate();
-    let refspec = resolveRefspec(up, hash, "");
-    let label = `普通推送到 ${up.ref}`;
+    let refspec = resolveRefspec(up, "HEAD", "");
+    let label = `推送到 ${up.ref}`;
     if (template.trim()) {
       const choice = await vscode.window.showQuickPick(
         [
-          { label: "普通推送", detail: `${hash.slice(0, 7)} → refs/heads/${up.branch}`, kind: "normal" },
-          { label: "评审推送", detail: resolveRefspec(up, hash, template), kind: "review" },
+          { label: "普通推送", detail: `HEAD → refs/heads/${up.branch}`, kind: "normal" },
+          { label: "评审推送", detail: resolveRefspec(up, "HEAD", template), kind: "review" },
           { label: "自定义 refspec…", detail: "手动输入", kind: "custom" },
         ] as any,
         { placeHolder: "选择推送方式" }
@@ -476,17 +571,17 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
         return;
       }
       if ((choice as any).kind === "review") {
-        refspec = resolveRefspec(up, hash, template);
+        refspec = resolveRefspec(up, "HEAD", template);
         label = `评审推送 (${refspec})`;
       } else if ((choice as any).kind === "custom") {
         const input = await vscode.window.showInputBox({
-          prompt: "输入 refspec（可用 ${tip} / ${branch} 占位符）",
+          prompt: "输入 refspec（可用 ${tip} / ${branch} 占位符，${tip} 解析为 HEAD）",
           value: template,
         });
         if (!input) {
           return;
         }
-        refspec = resolveRefspec(up, hash, input);
+        refspec = resolveRefspec(up, "HEAD", input);
         label = `自定义推送 (${refspec})`;
       }
     }

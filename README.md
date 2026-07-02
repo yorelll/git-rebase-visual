@@ -36,7 +36,6 @@
 |--------|------|
 | **复制 commit hash** | 复制完整 hash 到剪贴板 |
 | **变基到此 commit** | 将此 commit 标记为 `edit`，rebase 停靠在此，便于在此点做改动（见「变基进行中」） |
-| **变基到此 commit 并 push** | 把历史推进到此 commit 并推送（含锁定检查、可选评审 refspec，见下文） |
 | **更改此 commit message** | 弹窗编辑 message，仅改该 commit 的 message，其余不变 |
 | **更改 message 并变基至此** | 改完 message 后 rebase 停靠在此 commit |
 | **为此 commit 生成 AI message** | 调用大模型根据该 commit 的 diff 生成 message（需先配置，见下文） |
@@ -64,15 +63,25 @@
 - 有冲突时，在编辑器解决并 `git add` 后点 **Continue**；想放弃点 **Abort**。
 - 暂停期间无法发起新的变基操作，需先 Continue 或 Abort。
 
-### 7. 脏工作区自动 stash
-应用 reword / 变基时，若工作区有未提交改动，插件会**自动 stash**、变基完成后自动 `stash pop`。若变基暂停（冲突/edit 停靠），stash 会保留，并提示你完成后手动 `git stash pop`。
+### 7. 推送（顶部 Push 按钮）
+面板顶部工具栏有 **Push** 按钮，执行**普通推送**（推送当前分支 HEAD）：
+- 推送前做锁定检查（范围 `@{upstream}..HEAD`）：若含被锁定 commit 则拒绝。
+- 若配置了 `push.refspecTemplate`，弹出选择：**普通推送 / 评审推送 / 自定义 refspec…**。
+- 典型用法：先用「变基到此 commit」停靠并修改、Continue 完成，再点 **Push**。推送与变基解耦，避免 Gerrit 因「无改动」拒绝合并式推送。
 
-### 8. commit 锁定（防误推他人提交）
+### 8. 脏工作区自动 stash（可切换）
+`gitRebaseVisual.autoStash`（默认开启）控制变基时对未提交改动的处理：
+- **自动（默认）**：变基前自动 stash，变基**完全结束后**（或你点 Continue / Abort 后）自动恢复。若变基暂停（冲突 / edit 停靠），stash 会保留、**不会**中途 pop，待你 Continue/Abort 时再恢复——避免基于中间状态 pop 导致冲突。
+- **手动**（关闭 autoStash）：若工作区/暂存区有内容导致无法变基，直接弹警告，请你自行 `git stash` 后再操作。
+
+> 恢复采用 stash 的**提交 sha** 作为标识（不依赖会被变基改写的 commit hash）。若你在终端自行 continue 并 pop 了 stash，插件下次刷新时会检测到该 stash 已不存在并静默清理，不会重复 pop，避免状态不同步。
+
+### 9. commit 锁定（防误推他人提交）
 典型场景：你 cherry-pick 了别人的 commit A 作为依赖，在其之上写了自己的 B、C。推送时不应把别人的 A 一起推出去。
 
 - 右键 A → **锁定 commit**（出现 🔒、左侧橙色条）。
-- 之后执行 **变基到此 commit 并 push**，若推送范围里**包含**被锁定的 commit，会被**拒绝**并提示。
-- 解决办法：把你要推的 commit 拖到锁定 commit **之前**（前提是无依赖），使推送范围不再包含它，再推送。
+- 点顶部 **Push** 时，若推送范围（`@{upstream}..HEAD`）里**包含**被锁定的 commit，会被**拒绝**并提示。
+- 解决办法：把锁定的 commit 移出推送范围（拖到你要推送的提交之后，或先 drop），再推送。
 - 锁定采用 **git patch-id** 作为标识（并保留 hash 作为后备）。patch-id 在 cherry-pick / rebase 后保持稳定，因此**即使 commit hash 因变基而改变、或被 cherry-pick 到别处，锁定依然生效**，不会「莫名解锁」。
 - 锁定状态持久化在插件全局状态里，**切换分支再切回、重载窗口都保持一致**。删除某锁定 commit（drop）会一并清除其锁定。
 
@@ -92,7 +101,8 @@
 | `gitRebaseVisual.llm.model` | `fast` | 模型名，如 `fast`、`expert` |
 | `gitRebaseVisual.llm.skillPath` | `""` | 一个 markdown 文件的绝对路径；每次生成 message 都会把它作为规则发给模型，用于定制 message 风格 |
 | `gitRebaseVisual.diffMaxChars` | `12000` | 发给模型的 diff 最大字符数，超出截断 |
-| `gitRebaseVisual.push.refspecTemplate` | `""` | 评审推送的 refspec 模板，例如 `${tip}:refs/for/master`。占位符：`${tip}`（要推送的 commit）、`${branch}`（upstream 分支名）。设置后，推送时会让你选择推送方式；留空则为普通分支推送 |
+| `gitRebaseVisual.push.refspecTemplate` | `""` | 评审推送的 refspec 模板，例如 `HEAD:refs/for/master`。占位符：`${tip}`（解析为 HEAD）、`${branch}`（upstream 分支名）。设置后，推送时会让你选择推送方式；留空则为普通分支推送 |
+| `gitRebaseVisual.autoStash` | `true` | 变基前是否自动 stash 脏工作区并在结束后恢复。关闭则改为手动模式：脏工作区会阻止变基并提示你自行 stash |
 
 ### AI 生成 commit message 使用步骤
 1. 填好 `llm.baseUrl` 与 `llm.apiKey`（未填时相关菜单/按钮为灰）。
@@ -104,8 +114,9 @@
 > 若 skill 要求你提供链接等信息，模型可能会先要求补充——把这些内容填进 **补充信息给 AI** 再重新生成即可。
 
 ### 推送方式（普通 / 评审）
-- 未配置 `push.refspecTemplate` 时，**变基到此 commit 并 push** 执行普通分支推送（`<tip>:refs/heads/<branch>`，带 `--force-with-lease`）。
-- 配置了模板后，推送时弹出选择：**普通推送 / 评审推送（按模板，如 `refs/for/master`）/ 自定义 refspec…**。
+- 顶部 **Push** 按钮执行普通推送（推送 HEAD）。
+- 未配置 `push.refspecTemplate` 时为普通分支推送（`HEAD:refs/heads/<branch>`，带 `--force-with-lease`）。
+- 配置了模板后，推送时弹出选择：**普通推送 / 评审推送（按模板，如 `HEAD:refs/for/master`）/ 自定义 refspec…**。
 - 推送到评审 ref（`refs/for/*`、`refs/drafts/*`）时**不加** `--force-with-lease`（这类 ref 无 force 语义）。
 
 ---

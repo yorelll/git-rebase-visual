@@ -13,6 +13,9 @@ export function activate(context: vscode.ExtensionContext): void {
     ),
     vscode.commands.registerCommand("gitRebaseVisual.refresh", () =>
       provider.refresh()
+    ),
+    vscode.commands.registerCommand("gitRebaseVisual.push", () =>
+      provider.pushBranch()
     )
   );
 }

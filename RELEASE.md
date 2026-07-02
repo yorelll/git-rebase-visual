@@ -95,6 +95,6 @@ code --install-extension git-rebase-visual-<version>.vsix
   - 悬停查看完整 message + 变更统计，可复制。
   - Compose 弹窗：原始 message 对比、AI 补充信息输入、`Change-Id`/`Signed-off-by` trailer 自动保留。
   - AI 生成 message（批量模式）；支持为暂存区 / 工作区改动生成 message 并提交。
-  - 应用变基时对脏工作区自动 stash / pop。
-  - 可配置评审推送 refspec（如 `refs/for/master`），推送时可动态选择普通 / 评审 / 自定义。
+  - 脏工作区处理：`autoStash`（默认）自动 stash，并在变基完全结束 / Continue / Abort 后按 stash sha 恢复（兼容 hash 改写与外部 continue/pop 的状态同步）；可切换为手动模式（阻止并提示自行 stash）。
+  - 顶部 Push 按钮：普通推送当前分支（与变基解耦，避免 Gerrit 因无改动拒绝），含锁定检查；可配置评审推送 refspec（如 `HEAD:refs/for/master`），推送时动态选择普通 / 评审 / 自定义。
   - 编辑器进程使用 `process.execPath`，兼容 vscode-server / 远程（PATH 无 `node` 亦可）。

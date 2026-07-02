@@ -43,6 +43,10 @@ export function getPushRefspecTemplate(): string {
     .get<string>("push.refspecTemplate", "");
 }
 
+export function getAutoStash(): boolean {
+  return vscode.workspace.getConfiguration(SECTION).get<boolean>("autoStash", true);
+}
+
 export function isLlmConfigured(): boolean {
   const cfg = getLlmConfig();
   return cfg.baseUrl.trim().length > 0 && cfg.apiKey.trim().length > 0;

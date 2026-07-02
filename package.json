@@ -39,14 +39,25 @@
         "title": "Refresh",
         "category": "Git Rebase",
         "icon": "$(refresh)"
+      },
+      {
+        "command": "gitRebaseVisual.push",
+        "title": "Push",
+        "category": "Git Rebase",
+        "icon": "$(repo-push)"
       }
     ],
     "menus": {
       "view/title": [
         {
+          "command": "gitRebaseVisual.push",
+          "when": "view == gitRebaseVisual.commits",
+          "group": "navigation@1"
+        },
+        {
           "command": "gitRebaseVisual.refresh",
           "when": "view == gitRebaseVisual.commits",
-          "group": "navigation"
+          "group": "navigation@2"
         }
       ]
     },
@@ -102,7 +113,12 @@
         "gitRebaseVisual.push.refspecTemplate": {
           "type": "string",
           "default": "",
-          "description": "Optional refspec template for review pushes (e.g. '${tip}:refs/for/master'). Placeholders: ${tip}, ${branch}. When set, pushing offers a choice between a normal push and this review push. Leave empty for normal branch pushes."
+          "description": "Optional refspec template for review pushes (e.g. 'HEAD:refs/for/master'). Placeholders: ${tip} (resolves to HEAD), ${branch}. When set, pushing offers a choice between a normal push and this review push. Leave empty for normal branch pushes."
+        },
+        "gitRebaseVisual.autoStash": {
+          "type": "boolean",
+          "default": true,
+          "description": "When true, automatically stash a dirty working tree before a rebase and restore it after the rebase finishes (or after you Continue/Abort). When false, operations that need a clean tree are blocked with a warning asking you to stash manually."
         }
       }
     }

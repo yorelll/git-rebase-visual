@@ -225,7 +225,6 @@
       { label: "复制 commit hash", action: () => send("copyHash", c) },
       { sep: true },
       { label: "变基到此 commit", action: () => send("rebaseTo", c) },
-      { label: "变基到此 commit 并 push", action: () => send("rebaseAndPush", c) },
       { sep: true },
       {
         label: "更改此 commit message",
@@ -294,35 +293,41 @@
   // ---- hover tooltip ------------------------------------------------------
 
   let tipTimer = null;
+  let tipHideTimer = null;
   let tipHash = null;
   let tipAnchor = null;
   let tipOverTip = false;
 
   function scheduleTooltip(c, row) {
-    cancelTooltip();
+    // Cancel any pending open/hide, then arm a fresh open. Do NOT null tipHash
+    // here — the incoming detail response is matched against it.
+    if (tipTimer) clearTimeout(tipTimer);
+    if (tipHideTimer) clearTimeout(tipHideTimer);
     tipHash = c.hash;
     tipAnchor = row;
     tipTimer = setTimeout(() => {
       vscode.postMessage({ type: "requestDetail", hash: c.hash });
-    }, 450);
+    }, 400);
   }
 
-  function cancelTooltip(hash) {
+  function cancelTooltip() {
     if (tipTimer) {
       clearTimeout(tipTimer);
       tipTimer = null;
     }
-    // Delay hide so the mouse can move into the tooltip (to copy).
-    setTimeout(() => {
+    // Delay the hide so the mouse can travel into the tooltip (to copy).
+    if (tipHideTimer) clearTimeout(tipHideTimer);
+    tipHideTimer = setTimeout(() => {
       if (!tipOverTip) {
         hideTooltip();
       }
-    }, 120);
+    }, 200);
   }
 
   function hideTooltip() {
     tooltipEl.classList.add("hidden");
     tipHash = null;
+    tipAnchor = null;
   }
 
   function showDetail(d) {
