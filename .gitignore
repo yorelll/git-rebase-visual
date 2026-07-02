@@ -1,0 +1,11 @@
+# dependencies & build output
+node_modules/
+dist/
+*.vsix
+
+# local test repositories / scratch
+test/
+
+# editor / tooling local state
+.superpowers/
+.claude/

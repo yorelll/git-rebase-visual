@@ -1,0 +1,121 @@
+{
+  "name": "git-rebase-visual",
+  "displayName": "Git Rebase Visual",
+  "description": "Visual interactive rebase: drag to reorder commits, reword, lock, and AI-generated commit messages.",
+  "version": "0.1.0",
+  "publisher": "local",
+  "icon": "media/extension-icon.png",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "SCM Providers",
+    "Other"
+  ],
+  "activationEvents": [],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "gitRebaseVisual",
+          "title": "Git Rebase",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "gitRebaseVisual": [
+        {
+          "type": "webview",
+          "id": "gitRebaseVisual.commits",
+          "name": "Commits"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "gitRebaseVisual.refresh",
+        "title": "Refresh",
+        "category": "Git Rebase",
+        "icon": "$(refresh)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "gitRebaseVisual.refresh",
+          "when": "view == gitRebaseVisual.commits",
+          "group": "navigation"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Git Rebase Visual",
+      "properties": {
+        "gitRebaseVisual.commitRange": {
+          "type": "string",
+          "enum": [
+            "upstream",
+            "mainBranch",
+            "recentN",
+            "all"
+          ],
+          "default": "upstream",
+          "description": "Which commits to show. upstream: @{upstream}..HEAD; mainBranch: <mainBranch>..HEAD; recentN: last N commits; all: entire branch history."
+        },
+        "gitRebaseVisual.mainBranch": {
+          "type": "string",
+          "default": "main",
+          "description": "Base branch used when commitRange is 'mainBranch'."
+        },
+        "gitRebaseVisual.recentCount": {
+          "type": "number",
+          "default": 20,
+          "description": "Number of commits to show when commitRange is 'recentN'."
+        },
+        "gitRebaseVisual.llm.baseUrl": {
+          "type": "string",
+          "default": "",
+          "description": "OpenAI-compatible API base URL (e.g. https://host/openai-compatible/v1)."
+        },
+        "gitRebaseVisual.llm.apiKey": {
+          "type": "string",
+          "default": "",
+          "description": "API key for the OpenAI-compatible endpoint."
+        },
+        "gitRebaseVisual.llm.model": {
+          "type": "string",
+          "default": "fast",
+          "description": "Model name to use for commit message generation (e.g. fast, expert)."
+        },
+        "gitRebaseVisual.llm.skillPath": {
+          "type": "string",
+          "default": "",
+          "description": "Absolute path to a skill markdown file loaded into every LLM request to guide commit message style."
+        },
+        "gitRebaseVisual.diffMaxChars": {
+          "type": "number",
+          "default": 12000,
+          "description": "Maximum characters of a commit diff sent to the LLM before truncation."
+        },
+        "gitRebaseVisual.push.refspecTemplate": {
+          "type": "string",
+          "default": "",
+          "description": "Optional refspec template for review pushes (e.g. '${tip}:refs/for/master'). Placeholders: ${tip}, ${branch}. When set, pushing offers a choice between a normal push and this review push. Leave empty for normal branch pushes."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "node esbuild.js",
+    "watch": "node esbuild.js --watch",
+    "vscode:prepublish": "npm run compile"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "esbuild": "^0.20.0",
+    "typescript": "^5.4.0"
+  }
+}
