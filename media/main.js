@@ -380,9 +380,12 @@
     const r = tipAnchor.getBoundingClientRect();
     const tw = tooltipEl.offsetWidth;
     const th = tooltipEl.offsetHeight;
+    // Always anchor below the row; if it would overflow the viewport bottom,
+    // clamp it downward (the tooltip scrolls internally) instead of flipping
+    // above the row — flipping up would cover the commit list and block clicks.
     let top = r.bottom + 4;
-    if (top + th > window.innerHeight) {
-      top = Math.max(4, r.top - th - 4);
+    if (top + th > window.innerHeight - 4) {
+      top = Math.max(4, window.innerHeight - th - 4);
     }
     tooltipEl.style.left = Math.max(4, Math.min(r.left, window.innerWidth - tw - 4)) + "px";
     tooltipEl.style.top = top + "px";
