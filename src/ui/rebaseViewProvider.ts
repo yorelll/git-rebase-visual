@@ -30,7 +30,13 @@ import {
   pushRefspec,
 } from "../git/pushGuard";
 import { splitTrailers, applyTrailers } from "../git/message";
-import { stashPush, stashPopBySha, commitIndex, commitAll } from "../git/worktree";
+import {
+  stashPush,
+  stashPopBySha,
+  stashPopManual,
+  commitIndex,
+  commitAll,
+} from "../git/worktree";
 import { LockStore } from "../lock/lockStore";
 import {
   generateMessage,
@@ -348,21 +354,24 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
    * it is popped on completion / Continue / Abort). In manual mode a dirty tree
    * blocks the operation with a warning.
    */
-  private async prepareCleanTree(cwd: string, root: string): Promise<boolean> {
+  private async prepareCleanTree(
+    cwd: string,
+    root: string
+  ): Promise<{ proceed: boolean; stashed: boolean }> {
     if (!(await isDirty(cwd))) {
-      return true;
+      return { proceed: true, stashed: false };
     }
     if (!getAutoStash()) {
       vscode.window.showWarningMessage(
-        "工作区/暂存区有未提交内容，无法执行该操作。请先自行 git stash（或在设置中开启 autoStash）后再试。"
+        "工作区/暂存区有未提交内容，无法执行该操作。请先点顶部 Stash 按钮或自行 git stash（或在设置中开启 autoStash）后再试。"
       );
-      return false;
+      return { proceed: false, stashed: false };
     }
     const sha = await stashPush(cwd);
     if (sha) {
       await this.setPendingStash(root, sha);
     }
-    return true;
+    return { proceed: true, stashed: !!sha };
   }
 
   private async runRebase(
@@ -370,7 +379,8 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     plan: { items: RebaseItem[]; newMessage?: string; onto?: RebaseBase }
   ): Promise<void> {
     const root = this.root!;
-    if (!(await this.prepareCleanTree(cwd, root))) {
+    const prep = await this.prepareCleanTree(cwd, root);
+    if (!prep.proceed) {
       return;
     }
 
@@ -379,14 +389,19 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
 
     if (!outcome.ok && !outcome.stopped) {
       vscode.window.showErrorMessage(`变基失败：${outcome.message}`);
-      // Rebase did not apply; restore the stash immediately.
-      await this.popPendingStash(cwd, root);
+      // Rebase did not apply; restore the stash immediately (silent if none).
+      if (prep.stashed) {
+        await this.popPendingStash(cwd, root);
+      }
     } else if (outcome.stopped) {
+      // Keep the pending stash; it is popped on Continue/Abort. Only mention
+      // the stash when we actually created one.
       vscode.window.showWarningMessage(
-        "变基已暂停（冲突或 edit 停靠）。你的改动已自动 stash，将在 Continue/Abort 后自动恢复。"
+        prep.stashed
+          ? "变基已暂停（冲突或 edit 停靠）。你的改动已自动 stash，将在 Continue/Abort 后自动恢复。"
+          : "变基已暂停（冲突或 edit 停靠）。请解决后在面板 Continue 或 Abort。"
       );
-      // Keep the pending stash; it is popped on Continue/Abort.
-    } else {
+    } else if (prep.stashed) {
       // Completed cleanly — restore now.
       await this.popPendingStash(cwd, root);
     }
@@ -517,6 +532,40 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     } catch {
       // ignore hover detail failures
     }
+  }
+
+  /** Manual stash of the working tree (default naming). For user-stash mode. */
+  public async stashChanges(): Promise<void> {
+    const cwd = this.cwd();
+    if (!cwd) {
+      return;
+    }
+    if (!(await isDirty(cwd))) {
+      vscode.window.showInformationMessage("工作区干净，无需 stash。");
+      return;
+    }
+    const sha = await stashPush(cwd);
+    if (sha) {
+      vscode.window.showInformationMessage("已 stash 未提交的改动。");
+    }
+    await this.refresh();
+  }
+
+  /** Manual pop of the most recent stash. */
+  public async popChanges(): Promise<void> {
+    const cwd = this.cwd();
+    if (!cwd) {
+      return;
+    }
+    const res = await stashPopManual(cwd);
+    if (res.empty) {
+      vscode.window.showInformationMessage("没有可恢复的 stash。");
+    } else if (!res.ok) {
+      vscode.window.showWarningMessage(`git stash pop 有冲突：${res.message}`);
+    } else {
+      vscode.window.showInformationMessage("已恢复最近一次 stash。");
+    }
+    await this.refresh();
   }
 
   /**

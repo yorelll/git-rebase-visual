@@ -170,13 +170,15 @@
     row.addEventListener("dragover", (e) => {
       e.preventDefault();
       clearDropMarkers();
-      row.classList.add("drop-before");
+      const after = isAfter(e, row);
+      row.classList.add(after ? "drop-after" : "drop-before");
     });
     row.addEventListener("drop", (e) => {
       e.preventDefault();
-      row.classList.remove("drop-before");
+      const after = isAfter(e, row);
+      clearDropMarkers();
       if (dragHash && dragHash !== c.hash) {
-        reorder(dragHash, c.hash);
+        reorder(dragHash, c.hash, after);
       }
     });
 
@@ -194,19 +196,28 @@
 
   function clearDropMarkers() {
     document
-      .querySelectorAll(".commit.drop-before")
-      .forEach((el) => el.classList.remove("drop-before"));
+      .querySelectorAll(".commit.drop-before, .commit.drop-after")
+      .forEach((el) => el.classList.remove("drop-before", "drop-after"));
+  }
+
+  // True when the cursor is in the lower half of the row (insert AFTER it).
+  function isAfter(e, row) {
+    const r = row.getBoundingClientRect();
+    return e.clientY > r.top + r.height / 2;
   }
 
   // ---- reorder ------------------------------------------------------------
 
-  function reorder(fromHash, beforeHash) {
+  function reorder(fromHash, targetHash, after) {
     const order = state.commits.map((c) => c.hash);
     const fromIdx = order.indexOf(fromHash);
     if (fromIdx >= 0) {
       order.splice(fromIdx, 1);
     }
-    const targetIdx = order.indexOf(beforeHash);
+    let targetIdx = order.indexOf(targetHash);
+    if (after) {
+      targetIdx += 1; // insert below the target (enables moving to the very end)
+    }
     order.splice(targetIdx, 0, fromHash);
 
     const byHash = new Map(state.commits.map((c) => [c.hash, c]));
@@ -335,15 +346,26 @@
       return;
     }
     tooltipEl.innerHTML = "";
+
     const meta = document.createElement("div");
     meta.className = "tip-meta";
-    meta.textContent = `${d.author} · ${d.relDate} (${d.absDate})`;
+    const author = document.createElement("span");
+    author.className = "tip-author";
+    author.textContent = d.author;
+    const date = document.createElement("span");
+    date.className = "tip-date";
+    date.textContent = `${d.relDate} · ${d.absDate}`;
+    meta.appendChild(author);
+    meta.appendChild(date);
+
     const stat = document.createElement("div");
     stat.className = "tip-stat";
-    stat.textContent = `${d.hash.slice(0, 10)}   ${d.stat || ""}`;
+    stat.textContent = `${d.hash.slice(0, 10)}${d.stat ? "  ·  " + d.stat : ""}`;
+
     const msg = document.createElement("pre");
     msg.className = "tip-msg";
     msg.textContent = d.message;
+
     const copy = document.createElement("button");
     copy.className = "link-btn";
     copy.textContent = "复制完整 message";

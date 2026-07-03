@@ -46,6 +46,18 @@ export async function stashPopBySha(
   return { ok: res.code === 0, gone: false, message: (res.stderr || res.stdout).trim() };
 }
 
+/** Pops the most recent stash (stash@{0}). Reports empty when none exist. */
+export async function stashPopManual(
+  cwd: string
+): Promise<{ ok: boolean; empty: boolean; message: string }> {
+  const list = await runGit(["stash", "list"], { cwd });
+  if (!list.stdout.trim()) {
+    return { ok: false, empty: true, message: "" };
+  }
+  const res = await runGit(["stash", "pop"], { cwd });
+  return { ok: res.code === 0, empty: false, message: (res.stderr || res.stdout).trim() };
+}
+
 /** Creates a commit from the current index with the given message. */
 export async function commitIndex(cwd: string, message: string): Promise<void> {
   await git(["commit", "-m", message], { cwd });

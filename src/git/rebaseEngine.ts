@@ -122,15 +122,25 @@ export async function executeRebase(
 
   cleanup(tmp);
 
+  // An `edit` stop makes git exit 0 while the rebase is still in progress, so
+  // exit code alone is not enough — always check whether a rebase is paused.
+  const stillInProgress = await isStopped(cwd);
+  if (stillInProgress) {
+    return {
+      ok: false,
+      stopped: true,
+      message: (res.stdout || res.stderr).trim() || "Rebase paused.",
+    };
+  }
+
   if (res.code === 0) {
     return { ok: true, stopped: false, message: "Rebase completed." };
   }
 
-  // Non-zero: could be a conflict/stopped rebase or a hard failure.
-  const stopped = await isStopped(cwd);
+  // Non-zero and not paused: a hard failure.
   return {
     ok: false,
-    stopped,
+    stopped: false,
     message: (res.stderr || res.stdout).trim(),
   };
 }

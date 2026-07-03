@@ -16,6 +16,12 @@ export function activate(context: vscode.ExtensionContext): void {
     ),
     vscode.commands.registerCommand("gitRebaseVisual.push", () =>
       provider.pushBranch()
+    ),
+    vscode.commands.registerCommand("gitRebaseVisual.stash", () =>
+      provider.stashChanges()
+    ),
+    vscode.commands.registerCommand("gitRebaseVisual.stashPop", () =>
+      provider.popChanges()
     )
   );
 }

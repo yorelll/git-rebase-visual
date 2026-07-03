@@ -45,6 +45,18 @@
         "title": "Push",
         "category": "Git Rebase",
         "icon": "$(repo-push)"
+      },
+      {
+        "command": "gitRebaseVisual.stash",
+        "title": "Stash Changes",
+        "category": "Git Rebase",
+        "icon": "$(archive)"
+      },
+      {
+        "command": "gitRebaseVisual.stashPop",
+        "title": "Pop Stash",
+        "category": "Git Rebase",
+        "icon": "$(inbox)"
       }
     ],
     "menus": {
@@ -55,9 +67,19 @@
           "group": "navigation@1"
         },
         {
-          "command": "gitRebaseVisual.refresh",
+          "command": "gitRebaseVisual.stash",
           "when": "view == gitRebaseVisual.commits",
           "group": "navigation@2"
+        },
+        {
+          "command": "gitRebaseVisual.stashPop",
+          "when": "view == gitRebaseVisual.commits",
+          "group": "navigation@3"
+        },
+        {
+          "command": "gitRebaseVisual.refresh",
+          "when": "view == gitRebaseVisual.commits",
+          "group": "navigation@4"
         }
       ]
     },
