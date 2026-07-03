@@ -25,10 +25,14 @@
 所有操作都通过**拖拽**或**右键菜单**触发。
 
 ### 1. 拖拽重排
-直接拖动某个 commit 到目标位置松手，即可重排提交顺序（松手即时生效，后台自动执行 rebase）。
+直接拖动某个 commit 到目标位置松手，即可重排提交顺序（松手即时生效，后台自动执行 rebase）。拖动时按光标落在目标行的**上半区 / 下半区**决定插入到其**前 / 后**（对应蓝色上/下指示线），因此可以把某个 commit 拖到**列表最末位**（落在最后一行的下半区）。
 
 ### 2. 悬停查看详情
-鼠标悬停在某个 commit 上约 0.45 秒，会弹出浮层显示：作者、相对时间与绝对时间、`hash + 变更统计（files changed / insertions / deletions）`、以及**完整 commit message**。浮层里有 **复制完整 message** 按钮，鼠标可移入浮层再点击复制。
+鼠标悬停在某个 commit 上约 0.4 秒，会弹出浮层：
+- 顶部：**作者**（加粗）+ 相对/绝对时间（浅灰，带分隔线）。
+- 灰底小徽章：`hash + 变更统计（files changed / insertions / deletions）`。
+- **完整 commit message**：放在带左侧强调边框的独立框里，与元信息层次分明、可选中。
+- **复制完整 message** 按钮：鼠标可移入浮层再点击复制。
 
 ### 3. 右键菜单
 
@@ -63,16 +67,22 @@
 - 有冲突时，在编辑器解决并 `git add` 后点 **Continue**；想放弃点 **Abort**。
 - 暂停期间无法发起新的变基操作，需先 Continue 或 Abort。
 
-### 7. 推送（顶部 Push 按钮）
-面板顶部工具栏有 **Push** 按钮，执行**普通推送**（推送当前分支 HEAD）：
-- 推送前做锁定检查（范围 `@{upstream}..HEAD`）：若含被锁定 commit 则拒绝。
-- 若配置了 `push.refspecTemplate`，弹出选择：**普通推送 / 评审推送 / 自定义 refspec…**。
-- 典型用法：先用「变基到此 commit」停靠并修改、Continue 完成，再点 **Push**。推送与变基解耦，避免 Gerrit 因「无改动」拒绝合并式推送。
+### 7. 顶部工具栏（Push / Stash / Pop / Refresh）
+面板顶部工具栏提供：
+- **Push**：**普通推送**（推送当前分支 HEAD）。
+  - 推送前做锁定检查（范围 `@{upstream}..HEAD`）：若含被锁定 commit 则拒绝。
+  - 若配置了 `push.refspecTemplate`，弹出选择：**普通推送 / 评审推送 / 自定义 refspec…**。
+  - 典型用法：先用「变基到此 commit」停靠并修改、Continue 完成，再点 **Push**。推送与变基解耦，避免 Gerrit 因「无改动」拒绝合并式推送。
+- **Stash**（archive 图标）：把当前未提交改动 `git stash push -u`（默认命名）。
+- **Pop**（inbox 图标）：`git stash pop` 恢复最近一次 stash。
+- **Refresh**：刷新列表。
+
+> Stash / Pop 按钮主要用于**手动 stash 模式**（见下）：你自行 stash 后再执行变基相关操作，完成后再 pop。
 
 ### 8. 脏工作区自动 stash（可切换）
 `gitRebaseVisual.autoStash`（默认开启）控制变基时对未提交改动的处理：
-- **自动（默认）**：变基前自动 stash，变基**完全结束后**（或你点 Continue / Abort 后）自动恢复。若变基暂停（冲突 / edit 停靠），stash 会保留、**不会**中途 pop，待你 Continue/Abort 时再恢复——避免基于中间状态 pop 导致冲突。
-- **手动**（关闭 autoStash）：若工作区/暂存区有内容导致无法变基，直接弹警告，请你自行 `git stash` 后再操作。
+- **自动（默认）**：变基前自动 stash，变基**完全结束后**（或你点 Continue / Abort 后）自动恢复。若变基暂停（冲突 / edit 停靠），stash 会保留、**不会**中途 pop，待你 Continue/Abort 时再恢复——避免基于中间状态 pop 导致冲突。仅在确实做了 stash 时才提示/恢复，工作区干净时不会有多余通知。
+- **手动**（关闭 autoStash）：若工作区/暂存区有内容导致无法变基，直接弹警告，请你用顶部 **Stash** 按钮或自行 `git stash` 后再操作，完成后用 **Pop** 恢复。
 
 > 恢复采用 stash 的**提交 sha** 作为标识（不依赖会被变基改写的 commit hash）。若你在终端自行 continue 并 pop 了 stash，插件下次刷新时会检测到该 stash 已不存在并静默清理，不会重复 pop，避免状态不同步。
 
