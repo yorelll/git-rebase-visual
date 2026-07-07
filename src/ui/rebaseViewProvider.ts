@@ -8,6 +8,7 @@ import {
   isRebaseInProgress,
   rebaseStoppedSha,
   rebasingBranch,
+  currentBranch,
   repoRoot,
   fullMessage,
   commitDetail,
@@ -569,28 +570,37 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
   }
 
   /**
-   * Pushes the current branch (HEAD). A plain push — the user rebases / edits
-   * beforehand as needed, then pushes. Applies the lock guard over the range
-   * @{upstream}..HEAD and supports a normal or review (refs/for/*) refspec.
+   * Pushes the current HEAD. A plain push — the user rebases / edits beforehand
+   * as needed, then pushes. Allowed even during a rebase (e.g. to push a commit
+   * made at an `edit` stop): HEAD is detached then, so the upstream is resolved
+   * via the branch being rebased. Applies the lock guard over `<upstream>..HEAD`
+   * and supports a normal or review (refs/for/*) refspec.
    */
   public async pushBranch(): Promise<void> {
     const cwd = this.cwd();
     if (!cwd) {
       return;
     }
-    if (await isRebaseInProgress(cwd)) {
-      vscode.window.showWarningMessage("变基进行中，请先 Continue 或 Abort 再推送。");
+    // Determine the branch whose upstream we push to. Mid-rebase HEAD is
+    // detached, so fall back to the branch being rebased.
+    const inProgress = await isRebaseInProgress(cwd);
+    const branch = inProgress
+      ? await rebasingBranch(cwd)
+      : await currentBranch(cwd);
+    if (!branch) {
+      vscode.window.showErrorMessage("无法确定当前分支（HEAD detached 且非变基状态）。");
       return;
     }
-    const up = await getUpstream(cwd);
+    const up = await getUpstream(cwd, branch);
     if (!up) {
-      vscode.window.showErrorMessage("当前分支未配置 upstream。");
+      vscode.window.showErrorMessage(`分支 ${branch} 未配置 upstream。`);
       return;
     }
 
-    // Lock guard: reject if any locked commit is in @{upstream}..HEAD.
+    // Lock guard: reject if any locked commit is in <upstream>..HEAD.
     const blocked = await lockedInPush(
       cwd,
+      up.ref,
       "HEAD",
       this.locks.lockedHashes(this.root!),
       this.locks.lockedPatchIds(this.root!)

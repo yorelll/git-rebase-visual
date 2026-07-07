@@ -7,10 +7,17 @@ export interface UpstreamInfo {
   ref: string; // e.g. origin/main
 }
 
-/** Resolves the upstream remote/branch for HEAD, or undefined when unset. */
-export async function getUpstream(cwd: string): Promise<UpstreamInfo | undefined> {
+/**
+ * Resolves the upstream remote/branch for the given branch ref (defaults to
+ * HEAD). Pass an explicit branch name when HEAD is detached (e.g. mid-rebase),
+ * since `HEAD@{upstream}` cannot resolve in a detached state.
+ */
+export async function getUpstream(
+  cwd: string,
+  branchRef: string = "HEAD"
+): Promise<UpstreamInfo | undefined> {
   const res = await runGit(
-    ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
+    ["rev-parse", "--abbrev-ref", "--symbolic-full-name", `${branchRef}@{upstream}`],
     { cwd }
   );
   if (res.code !== 0) {
@@ -30,10 +37,14 @@ export async function getUpstream(cwd: string): Promise<UpstreamInfo | undefined
 
 /**
  * Returns the commit hashes that would be published by pushing up to `tip`:
- * the range @{upstream}..tip (full hashes, any order).
+ * the range `<upstreamRef>..tip` (full hashes, any order).
  */
-export async function pushRange(cwd: string, tip: string): Promise<string[]> {
-  const out = await git(["rev-list", `@{upstream}..${tip}`], { cwd });
+export async function pushRange(
+  cwd: string,
+  upstreamRef: string,
+  tip: string
+): Promise<string[]> {
+  const out = await git(["rev-list", `${upstreamRef}..${tip}`], { cwd });
   return out ? out.split("\n").map((l) => l.trim()).filter(Boolean) : [];
 }
 
@@ -44,6 +55,7 @@ export async function pushRange(cwd: string, tip: string): Promise<string[]> {
  */
 export async function lockedInPush(
   cwd: string,
+  upstreamRef: string,
   tip: string,
   lockedHashes: Set<string>,
   lockedPatchIds: Set<string>
@@ -51,7 +63,7 @@ export async function lockedInPush(
   if (lockedHashes.size === 0 && lockedPatchIds.size === 0) {
     return [];
   }
-  const range = await pushRange(cwd, tip);
+  const range = await pushRange(cwd, upstreamRef, tip);
   const blocked: string[] = [];
   for (const h of range) {
     if (lockedHashes.has(h)) {

@@ -69,10 +69,11 @@
 
 ### 7. 顶部工具栏（Push / Stash / Pop / Refresh）
 面板顶部工具栏提供：
-- **Push**：**普通推送**（推送当前分支 HEAD）。
-  - 推送前做锁定检查（范围 `@{upstream}..HEAD`）：若含被锁定 commit 则拒绝。
+- **Push**：**普通推送**（推送当前 HEAD）。
+  - 推送前做锁定检查（范围 `<upstream>..HEAD`）：若含被锁定 commit 则拒绝。
   - 若配置了 `push.refspecTemplate`，弹出选择：**普通推送 / 评审推送 / 自定义 refspec…**。
-  - 典型用法：先用「变基到此 commit」停靠并修改、Continue 完成，再点 **Push**。推送与变基解耦，避免 Gerrit 因「无改动」拒绝合并式推送。
+  - **变基过程中也可推送**：例如用「变基到此 commit」停靠后，在该 commit 上改代码并 commit，可直接点 **Push** 推送这个 commit（此时 HEAD 处于 detached，插件会用正在变基的分支解析其 upstream）。锁定检查依然生效——**不允许推送越过被锁定的 commit**。
+  - 推送与变基解耦，避免 Gerrit 因「无改动」拒绝合并式推送。
 - **Stash**（archive 图标）：把当前未提交改动 `git stash push -u`（默认命名）。
 - **Pop**（inbox 图标）：`git stash pop` 恢复最近一次 stash。
 - **Refresh**：刷新列表。
