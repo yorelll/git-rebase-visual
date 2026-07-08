@@ -440,6 +440,9 @@
     // Result box: prefill with original body for a commit edit; empty otherwise.
     dialogText.value = m.mode === "commit" ? m.original || "" : "";
 
+    // Always start with a fresh, enabled generate button.
+    resetGenerateBtn();
+
     // Preserved trailers
     if (m.trailers && m.trailers.length > 0) {
       trailerText.textContent = m.trailers;
@@ -518,6 +521,9 @@
       case "genError":
         resetGenerateBtn();
         dialogTitle.textContent = "AI 生成失败：" + m.message;
+        break;
+      case "genCancelled":
+        resetGenerateBtn();
         break;
       case "detail":
         showDetail(m);

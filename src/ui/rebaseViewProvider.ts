@@ -476,6 +476,7 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
                 : await getWorkingDiff(cwd);
             if (!diff.trim()) {
               toast("warn", "没有可用于生成的改动。");
+              this.post({ type: "genCancelled" });
               return;
             }
             text = await generateFromDiff(diff, getLlmConfig(), opts, ctrl.signal);
@@ -483,6 +484,8 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
           this.post({ type: "genResult", text: text || "" });
         } catch (e: any) {
           if (ctrl.signal.aborted) {
+            // User cancelled — reset the dialog's generate button.
+            this.post({ type: "genCancelled" });
             return;
           }
           this.post({ type: "genError", message: String(e.message ?? e) });
