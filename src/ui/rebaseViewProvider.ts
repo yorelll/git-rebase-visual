@@ -728,8 +728,9 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
  * gives consistent auto-dismissal for all plugin messages. Fire-and-forget.
  */
 function toast(level: "info" | "warn" | "error", message: string, ms = 10000): void {
-  const icon =
-    level === "error" ? "$(error)" : level === "warn" ? "$(warning)" : "$(check)";
+  // Progress-notification titles do not parse `$(codicon)` syntax, so use plain
+  // Unicode glyphs for the severity prefix.
+  const icon = level === "error" ? "✕" : level === "warn" ? "⚠" : "✓";
   void vscode.window.withProgress(
     {
       location: vscode.ProgressLocation.Notification,
