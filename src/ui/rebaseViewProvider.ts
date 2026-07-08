@@ -202,11 +202,11 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
           break;
         case "copyHash":
           await vscode.env.clipboard.writeText(m.hash);
-          vscode.window.showInformationMessage(`已复制 ${m.hash}`);
+          toast("info", `已复制 ${m.hash}`);
           break;
         case "copyText":
           await vscode.env.clipboard.writeText(m.text ?? "");
-          vscode.window.showInformationMessage("已复制到剪贴板");
+          toast("info", "已复制到剪贴板");
           break;
         case "requestDetail":
           await this.sendDetail(cwd!, m.hash);
@@ -253,7 +253,7 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
         case "continueRebase": {
           const r = await continueRebase(cwd!);
           if (!r.ok && !r.stopped) {
-            vscode.window.showErrorMessage(r.message);
+            toast("error", r.message);
           }
           // Restore the auto-stash once the rebase is fully done.
           if (!(await isRebaseInProgress(cwd!))) {
@@ -269,7 +269,7 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
           break;
       }
     } catch (e: any) {
-      vscode.window.showErrorMessage(String(e.message ?? e));
+      toast("error", String(e.message ?? e));
       await this.refresh();
     }
   }
@@ -341,11 +341,12 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
       return; // user already restored it — nothing to do
     }
     if (!res.ok) {
-      vscode.window.showWarningMessage(
+      toast(
+        "warn",
         `恢复自动 stash 时有冲突：${res.message}。stash 仍保留，请手动解决后 git stash pop。`
       );
     } else {
-      vscode.window.showInformationMessage("已恢复自动 stash 的改动。");
+      toast("info", "已恢复自动 stash 的改动。");
     }
   }
 
@@ -363,7 +364,8 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
       return { proceed: true, stashed: false };
     }
     if (!getAutoStash()) {
-      vscode.window.showWarningMessage(
+      toast(
+        "warn",
         "工作区/暂存区有未提交内容，无法执行该操作。请先点顶部 Stash 按钮或自行 git stash（或在设置中开启 autoStash）后再试。"
       );
       return { proceed: false, stashed: false };
@@ -389,7 +391,7 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     const outcome = await executeRebase(cwd, { ...plan, onto });
 
     if (!outcome.ok && !outcome.stopped) {
-      vscode.window.showErrorMessage(`变基失败：${outcome.message}`);
+      toast("error", `变基失败：${outcome.message}`);
       // Rebase did not apply; restore the stash immediately (silent if none).
       if (prep.stashed) {
         await this.popPendingStash(cwd, root);
@@ -397,7 +399,8 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     } else if (outcome.stopped) {
       // Keep the pending stash; it is popped on Continue/Abort. Only mention
       // the stash when we actually created one.
-      vscode.window.showWarningMessage(
+      toast(
+        "warn",
         prep.stashed
           ? "变基已暂停（冲突或 edit 停靠）。你的改动已自动 stash，将在 Continue/Abort 后自动恢复。"
           : "变基已暂停（冲突或 edit 停靠）。请解决后在面板 Continue 或 Abort。"
@@ -417,7 +420,7 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     ai: boolean
   ): Promise<void> {
     if (ai && !isLlmConfigured()) {
-      vscode.window.showErrorMessage(
+      toast("error", 
         "请先在设置中配置 gitRebaseVisual.llm.baseUrl 与 apiKey。"
       );
       return;
@@ -449,7 +452,7 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     extra: string
   ): Promise<void> {
     if (!isLlmConfigured()) {
-      vscode.window.showErrorMessage("请先配置 LLM。");
+      toast("error", "请先配置 LLM。");
       return;
     }
     await vscode.window.withProgress(
@@ -472,7 +475,7 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
                 ? await getStagedDiff(cwd)
                 : await getWorkingDiff(cwd);
             if (!diff.trim()) {
-              vscode.window.showWarningMessage("没有可用于生成的改动。");
+              toast("warn", "没有可用于生成的改动。");
               return;
             }
             text = await generateFromDiff(diff, getLlmConfig(), opts, ctrl.signal);
@@ -518,10 +521,10 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
       }
     } else if (mode === "staged") {
       await commitIndex(cwd, message.replace(/\s+$/, "") + "\n");
-      vscode.window.showInformationMessage("已用生成的 message 提交暂存区改动。");
+      toast("info", "已用生成的 message 提交暂存区改动。");
     } else if (mode === "working") {
       await commitAll(cwd, message.replace(/\s+$/, "") + "\n");
-      vscode.window.showInformationMessage("已暂存并提交工作区改动。");
+      toast("info", "已暂存并提交工作区改动。");
     }
     await this.refresh();
   }
@@ -542,12 +545,12 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
       return;
     }
     if (!(await isDirty(cwd))) {
-      vscode.window.showInformationMessage("工作区干净，无需 stash。");
+      toast("info", "工作区干净，无需 stash。");
       return;
     }
     const sha = await stashPush(cwd);
     if (sha) {
-      vscode.window.showInformationMessage("已 stash 未提交的改动。");
+      toast("info", "已 stash 未提交的改动。");
     }
     await this.refresh();
   }
@@ -560,11 +563,11 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     }
     const res = await stashPopManual(cwd);
     if (res.empty) {
-      vscode.window.showInformationMessage("没有可恢复的 stash。");
+      toast("info", "没有可恢复的 stash。");
     } else if (!res.ok) {
-      vscode.window.showWarningMessage(`git stash pop 有冲突：${res.message}`);
+      toast("warn", `git stash pop 有冲突：${res.message}`);
     } else {
-      vscode.window.showInformationMessage("已恢复最近一次 stash。");
+      toast("info", "已恢复最近一次 stash。");
     }
     await this.refresh();
   }
@@ -588,12 +591,12 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
       ? await rebasingBranch(cwd)
       : await currentBranch(cwd);
     if (!branch) {
-      vscode.window.showErrorMessage("无法确定当前分支（HEAD detached 且非变基状态）。");
+      toast("error", "无法确定当前分支（HEAD detached 且非变基状态）。");
       return;
     }
     const up = await getUpstream(cwd, branch);
     if (!up) {
-      vscode.window.showErrorMessage(`分支 ${branch} 未配置 upstream。`);
+      toast("error", `分支 ${branch} 未配置 upstream。`);
       return;
     }
 
@@ -607,7 +610,7 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     );
     if (blocked.length > 0) {
       const short = blocked.map((h) => h.slice(0, 7)).join(", ");
-      vscode.window.showErrorMessage(
+      toast("error", 
         `推送被拒绝：推送范围包含被锁定的 commit（${short}）。请将其移出推送范围（拖到你要推送的提交之后，或先 drop）再推送。`
       );
       return;
@@ -654,7 +657,7 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
       return;
     }
     await pushRefspec(cwd, up, refspec);
-    vscode.window.showInformationMessage(`已推送：${refspec} → ${up.remote}`);
+    toast("info", `已推送：${refspec} → ${up.remote}`);
     await this.refresh();
   }
 
@@ -716,6 +719,25 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
 </body>
 </html>`;
   }
+}
+
+/**
+ * Shows a non-modal notification that auto-dismisses after `ms` (default 10s).
+ * VSCode keeps warning/error toasts open until dismissed, so we render them as
+ * a progress notification with a codicon prefix and resolve on a timer — this
+ * gives consistent auto-dismissal for all plugin messages. Fire-and-forget.
+ */
+function toast(level: "info" | "warn" | "error", message: string, ms = 10000): void {
+  const icon =
+    level === "error" ? "$(error)" : level === "warn" ? "$(warning)" : "$(check)";
+  void vscode.window.withProgress(
+    {
+      location: vscode.ProgressLocation.Notification,
+      title: `${icon} ${message}`,
+      cancellable: true,
+    },
+    () => new Promise<void>((resolve) => setTimeout(resolve, ms))
+  );
 }
 
 function getNonce(): string {
