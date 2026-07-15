@@ -58,13 +58,17 @@ export async function stashPopManual(
   return { ok: res.code === 0, empty: false, message: (res.stderr || res.stdout).trim() };
 }
 
-/** Creates a commit from the current index with the given message. */
+/**
+ * Creates a commit from the current index with the given message. Uses -s so a
+ * Signed-off-by trailer is added (matching a normal `git commit -s`); the
+ * repo's commit-msg hook still appends Change-Id as usual.
+ */
 export async function commitIndex(cwd: string, message: string): Promise<void> {
-  await git(["commit", "-m", message], { cwd });
+  await git(["commit", "-s", "-m", message], { cwd });
 }
 
-/** Stages all changes then commits with the given message. */
+/** Stages all changes then commits with the given message (signed off). */
 export async function commitAll(cwd: string, message: string): Promise<void> {
   await git(["add", "-A"], { cwd });
-  await git(["commit", "-m", message], { cwd });
+  await git(["commit", "-s", "-m", message], { cwd });
 }
