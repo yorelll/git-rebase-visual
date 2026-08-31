@@ -45,6 +45,7 @@
 | **更改此 commit message** | 弹窗编辑 message，仅改该 commit 的 message，其余不变 |
 | **更改 message 并变基至此** | 改完 message 后 rebase 停靠在此 commit |
 | **为此 commit 生成 AI message** | 调用大模型根据该 commit 的 diff 生成 message（需先配置，见下文） |
+| **将暂存区文件添加到此 commit** | 将当前暂存区追加到选中 commit，自动重放其后的提交；会改写该 commit 及其后的历史（见下文） |
 | **锁定 commit / 解除锁定** | 锁定他人的提交，防止把它推送出去（见下文） |
 | **删除 commit** | 从历史中移除该 commit（drop） |
 
@@ -57,7 +58,15 @@
 - **保留的 trailer**：若原 message 结尾含 `Change-Id:` / `Signed-off-by:` 等 trailer，会被单独识别并**只读展示**；应用时自动保留、不被修改（`IPCSDK-xxxx` 之类的行仍算正文，可编辑）。
 - **应用 / 取消**：应用即写回该 commit（reword），并保留 trailer。
 
-### 5. 为未提交的改动生成 message 并提交
+### 5. 将暂存区文件添加到已有 commit
+先通过 VSCode 源代码管理（或 `git add`）把要追加的文件放入暂存区，再右键目标 commit → **将暂存区文件添加到此 commit**。
+
+- 插件会用原 message 执行 `git commit --amend --no-edit`，随后自动重放目标 commit 之后的提交；因此目标 commit 和其后的 hash 会变化。
+- 若有未暂存改动，插件会临时 stash 并在完成后恢复；只有操作开始时已暂存的内容会被追加。
+- 发生冲突或无法自动重放时，Git 保持可恢复状态并提示错误；请在 VSCode/终端解决后执行 `git rebase --continue` 或 `git rebase --abort`。
+- 因为操作改写历史，已推送的分支通常需要后续使用插件的 Push（`--force-with-lease`）更新远端。
+
+### 6. 为未提交的改动生成 message 并提交
 当工作区有未提交改动、且已配置 LLM 时，面板顶部出现 **未提交的改动** 区，提供：
 - **为暂存区生成并提交**：基于 `git diff --cached` 生成 message，确认后 `git commit`（仅提交暂存内容）。
 - **为工作区生成并提交**：基于 `git diff HEAD` 生成 message，确认后 `git add -A && git commit`。

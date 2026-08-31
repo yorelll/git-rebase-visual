@@ -33,7 +33,10 @@ import {
 import { splitTrailers, applyTrailers } from "../git/message";
 import {
   stashPush,
+  stashPushKeepIndex,
   stashPopBySha,
+  stashApplyIndexBySha,
+  stashDropBySha,
   stashPopManual,
   commitIndex,
   commitAll,
@@ -55,6 +58,12 @@ import {
 } from "../config";
 
 const PENDING_STASH_KEY = "gitRebaseVisual.pendingStash";
+const PENDING_APPEND_KEY = "gitRebaseVisual.pendingAppend";
+
+interface PendingAppend {
+  changeStash: string;
+  unstagedStash?: string;
+}
 
 interface FromWebview {
   type: string;
@@ -108,6 +117,9 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     // the stash now. A stash the user already popped is detected and cleared.
     if (!rebaseInProgress && this.getPendingStash(root)) {
       await this.popPendingStash(root, root);
+    }
+    if (!rebaseInProgress && this.getPendingAppend(root)) {
+      await this.restorePendingAppend(root, root);
     }
 
     // During a rebase HEAD is detached; resolve the range against the branch
@@ -187,7 +199,7 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
       return;
     }
     // While a rebase is paused, only allow read/continue/abort/copy actions.
-    const mutating = ["reorder", "drop", "rebaseTo", "apply"];
+    const mutating = ["reorder", "drop", "rebaseTo", "apply", "appendStaged"];
     if (cwd && mutating.includes(m.type) && (await isRebaseInProgress(cwd))) {
       vscode.window.showWarningMessage(
         "变基进行中，请先在面板顶部 Continue 或 Abort。"
@@ -244,6 +256,9 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
         case "openCompose":
           await this.openCompose(cwd!, m.mode, m.hash, m.thenEdit === true, m.ai === true);
           break;
+        case "appendStaged":
+          await this.appendStagedToCommit(cwd!, m.hash);
+          break;
         case "generate":
           await this.generate(cwd!, m.mode, m.hash, m.extra ?? "");
           break;
@@ -258,6 +273,7 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
           // Restore the auto-stash once the rebase is fully done.
           if (!(await isRebaseInProgress(cwd!))) {
             await this.popPendingStash(cwd!, this.root!);
+            await this.restorePendingAppend(cwd!, this.root!);
           }
           await this.refresh();
           break;
@@ -265,6 +281,7 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
         case "abortRebase":
           await abortRebase(cwd!);
           await this.popPendingStash(cwd!, this.root!);
+          await this.restorePendingAppend(cwd!, this.root!, true);
           await this.refresh();
           break;
       }
@@ -325,6 +342,33 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  private getPendingAppend(root: string): PendingAppend | undefined {
+    return this.ctx.workspaceState.get<Record<string, PendingAppend>>(
+      PENDING_APPEND_KEY,
+      {}
+    )[root];
+  }
+
+  private async setPendingAppend(root: string, pending: PendingAppend): Promise<void> {
+    const map = this.ctx.workspaceState.get<Record<string, PendingAppend>>(
+      PENDING_APPEND_KEY,
+      {}
+    );
+    map[root] = pending;
+    await this.ctx.workspaceState.update(PENDING_APPEND_KEY, map);
+  }
+
+  private async clearPendingAppend(root: string): Promise<void> {
+    const map = this.ctx.workspaceState.get<Record<string, PendingAppend>>(
+      PENDING_APPEND_KEY,
+      {}
+    );
+    if (map[root]) {
+      delete map[root];
+      await this.ctx.workspaceState.update(PENDING_APPEND_KEY, map);
+    }
+  }
+
   /**
    * Restores a previously auto-stashed change set (identified by sha), called
    * after a rebase fully finishes or the user Continues/Aborts. Robust to the
@@ -348,6 +392,44 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     } else {
       toast("info", "已恢复自动 stash 的改动。");
     }
+  }
+
+  /** Restores stashes recorded while appending staged changes to a commit. */
+  private async restorePendingAppend(
+    cwd: string,
+    root: string,
+    restoreOriginalIndex = false
+  ): Promise<void> {
+    const pending = this.getPendingAppend(root);
+    if (!pending) {
+      return;
+    }
+    if (restoreOriginalIndex) {
+      const restore = await stashApplyIndexBySha(cwd, pending.changeStash);
+      if (!restore.gone && !restore.ok) {
+        toast("warn", `恢复原始暂存区时有冲突：${restore.message}。stash 仍保留，请手动恢复。`);
+        return;
+      }
+    }
+    if (pending.unstagedStash) {
+      const restore = await stashPopBySha(cwd, pending.unstagedStash);
+      if (!restore.gone && !restore.ok) {
+        toast("warn", `恢复未暂存改动时有冲突：${restore.message}。stash 仍保留，请手动恢复。`);
+        return;
+      }
+    }
+    await stashDropBySha(cwd, pending.changeStash);
+    await this.clearPendingAppend(root);
+  }
+
+  /** Restores the original snapshot when setup failed before a pending record. */
+  private async restoreAppendSnapshot(cwd: string, sha: string): Promise<void> {
+    const restore = await stashApplyIndexBySha(cwd, sha);
+    if (!restore.gone && !restore.ok) {
+      toast("warn", `恢复原始改动时有冲突：${restore.message}。stash 仍保留，请手动恢复。`);
+      return;
+    }
+    await stashDropBySha(cwd, sha);
   }
 
   /**
@@ -408,6 +490,100 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     } else if (prep.stashed) {
       // Completed cleanly — restore now.
       await this.popPendingStash(cwd, root);
+    }
+  }
+
+  /**
+   * Adds the current index to a selected commit. Git's equivalent is stopping
+   * an interactive rebase at that commit, amending it, then replaying the later
+   * commits. The original staged snapshot and any unrelated worktree changes
+   * are restored safely around the rebase.
+   */
+  private async appendStagedToCommit(cwd: string, hash: string): Promise<void> {
+    const status = await workingStatus(cwd);
+    if (!status.hasStaged) {
+      toast("warn", "暂存区没有可添加的文件。");
+      return;
+    }
+
+    const commit = this.commits.find((c) => c.hash === hash);
+    if (!commit) {
+      throw new Error("找不到目标 commit，请刷新后重试。");
+    }
+
+    const confirm = await vscode.window.showWarningMessage(
+      `将暂存区文件追加到 ${commit.shortHash} “${commit.subject}”？这会改写该 commit 及其后的历史。`,
+      { modal: true },
+      "追加"
+    );
+    if (confirm !== "追加") {
+      return;
+    }
+
+    // A rebase cannot start with a dirty tree. Saving the complete snapshot
+    // first lets us restore the original index only after Git reaches the edit
+    // stop. This avoids accidentally including later commit changes in amend.
+    const changeStash = await stashPush(cwd);
+    if (!changeStash) {
+      toast("warn", "暂存区没有可添加的文件。");
+      return;
+    }
+
+    let restoredForAmend = false;
+    try {
+      const outcome = await executeRebase(cwd, {
+        items: this.itemsWith((h) => (h === hash ? "edit" : undefined)),
+        onto: await this.computeBase(cwd),
+      });
+      if (!outcome.stopped) {
+        throw new Error(outcome.message || "未能在目标 commit 停靠，已取消追加操作。");
+      }
+
+      const stoppedAt = await rebaseStoppedSha(cwd);
+      if (stoppedAt !== hash) {
+        throw new Error("目标 commit 未停靠，已取消追加操作。");
+      }
+
+      const restore = await stashApplyIndexBySha(cwd, changeStash);
+      if (restore.gone || !restore.ok) {
+        throw new Error(
+          restore.gone
+            ? "暂存的改动已不存在，无法追加到目标 commit。"
+            : `恢复暂存区失败：${restore.message}`
+        );
+      }
+
+      await git(["commit", "--amend", "--no-edit"], { cwd });
+      restoredForAmend = true;
+
+      // The amend consumed the index. If the user also had worktree-only
+      // changes, move only those aside before Git replays following commits.
+      const unstagedStash = status.hasUnstaged
+        ? await stashPushKeepIndex(cwd)
+        : undefined;
+      await this.setPendingAppend(this.root!, { changeStash, unstagedStash });
+      const continued = await continueRebase(cwd);
+      if (!continued.ok) {
+        throw new Error(continued.message || "继续变基失败。");
+      }
+      await this.restorePendingAppend(cwd, this.root!);
+      toast("info", `已将暂存区文件追加到 ${commit.shortHash}。`);
+    } catch (e) {
+      const inProgress = await isRebaseInProgress(cwd);
+      if (inProgress) {
+        // Preserve the paused rebase so the user can resolve a replay conflict
+        // with the existing Continue / Abort controls.
+        if (!restoredForAmend) {
+          toast("warn", "追加已暂停；请解决冲突后 Continue 或 Abort。原始改动仍保存在 stash 中。");
+        }
+      } else if (!restoredForAmend) {
+        await this.restoreAppendSnapshot(cwd, changeStash);
+      }
+      throw e;
+    } finally {
+      if (!(await isRebaseInProgress(cwd))) {
+        await this.refresh();
+      }
     }
   }
 

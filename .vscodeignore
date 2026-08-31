@@ -13,3 +13,4 @@ node_modules/
 esbuild.js
 tsconfig.json
 RELEASE.md
+docs/

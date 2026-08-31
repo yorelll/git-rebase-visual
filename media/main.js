@@ -253,6 +253,11 @@
         action: () =>
           vscode.postMessage({ type: "openCompose", mode: "commit", hash: c.hash, ai: true, thenEdit: false }),
       },
+      {
+        label: "将暂存区文件添加到此 commit",
+        disabled: !state.hasStaged || state.rebaseInProgress,
+        action: () => send("appendStaged", c),
+      },
       { sep: true },
       c.locked
         ? { label: "解除锁定", action: () => send("unlock", c) }

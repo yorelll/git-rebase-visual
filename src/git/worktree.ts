@@ -8,10 +8,20 @@ import { git, runGit } from "./gitRunner";
  * other commit hashes, and robust if the user creates other stashes).
  */
 export async function stashPush(cwd: string): Promise<string | undefined> {
-  const res = await runGit(
-    ["stash", "push", "--include-untracked", "-m", "git-rebase-visual auto-stash"],
-    { cwd }
-  );
+  return stash(cwd, ["--include-untracked"], "git-rebase-visual auto-stash");
+}
+
+/** Stashes unstaged changes while leaving the existing index intact. */
+export async function stashPushKeepIndex(cwd: string): Promise<string | undefined> {
+  return stash(cwd, ["--keep-index", "--include-untracked"], "git-rebase-visual preserve-unstaged");
+}
+
+async function stash(
+  cwd: string,
+  options: string[],
+  message: string
+): Promise<string | undefined> {
+  const res = await runGit(["stash", "push", ...options, "-m", message], { cwd });
   if (res.code !== 0 || /No local changes to save/i.test(res.stdout + res.stderr)) {
     return undefined;
   }
@@ -44,6 +54,27 @@ export async function stashPopBySha(
   }
   const res = await runGit(["stash", "pop", `stash@{${idx}}`], { cwd });
   return { ok: res.code === 0, gone: false, message: (res.stderr || res.stdout).trim() };
+}
+
+/** Applies a stash's original index without dropping its recovery copy. */
+export async function stashApplyIndexBySha(
+  cwd: string,
+  sha: string
+): Promise<{ ok: boolean; gone: boolean; message: string }> {
+  const idx = await stashIndexBySha(cwd, sha);
+  if (idx < 0) {
+    return { ok: false, gone: true, message: "stash no longer present" };
+  }
+  const res = await runGit(["stash", "apply", "--index", `stash@{${idx}}`], { cwd });
+  return { ok: res.code === 0, gone: false, message: (res.stderr || res.stdout).trim() };
+}
+
+/** Removes a stash by its stable commit sha. */
+export async function stashDropBySha(cwd: string, sha: string): Promise<void> {
+  const idx = await stashIndexBySha(cwd, sha);
+  if (idx >= 0) {
+    await git(["stash", "drop", `stash@{${idx}}`], { cwd });
+  }
 }
 
 /** Pops the most recent stash (stash@{0}). Reports empty when none exist. */
