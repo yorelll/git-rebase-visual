@@ -81,19 +81,19 @@
 - 本地执行 `npm run test:coverage`：在上述测试基础上输出 Node 测试覆盖率报告。
 - 推送版本标签触发 Release 时，GitHub Actions 会依次执行类型检查、覆盖率测试、VSIX 打包、VSIX 内容检查以及 RELEASE.md 版本记录检查；任一步失败都不会创建 Release。
 
-### 6. 为未提交的改动生成 message 并提交
+### 7. 为未提交的改动生成 message 并提交
 当工作区有未提交改动、且已配置 LLM 时，面板顶部出现 **未提交的改动** 区，提供：
 - **为暂存区生成并提交**：基于 `git diff --cached` 生成 message，确认后 `git commit`（仅提交暂存内容）。
 - **为工作区生成并提交**：基于 `git diff HEAD` 生成 message，确认后 `git add -A && git commit`。
 
-### 6. 变基进行中（暂停状态）
+### 8. 变基进行中（暂停状态）
 当选择「变基到此 commit」或发生冲突时，rebase 会**暂停**：
 - 面板顶部出现黄色横幅 **变基进行中** + **Continue / Abort** 按钮。
 - 暂停所在的 commit 行会**高亮**并显示 `⏸ 停在此` 徽章。
 - 有冲突时，在编辑器解决并 `git add` 后点 **Continue**；想放弃点 **Abort**。
 - 暂停期间无法发起新的变基操作，需先 Continue 或 Abort。
 
-### 7. 顶部工具栏（Push / Stash / Pop / Refresh）
+### 9. 顶部工具栏（Push / Stash / Pop / Refresh）
 面板顶部工具栏提供：
 - **Push**：**普通推送**（推送当前 HEAD）。
   - 推送前做锁定检查（范围 `<upstream>..HEAD`）：若含被锁定 commit 则拒绝。
@@ -106,14 +106,14 @@
 
 > Stash / Pop 按钮主要用于**手动 stash 模式**（见下）：你自行 stash 后再执行变基相关操作，完成后再 pop。
 
-### 8. 脏工作区自动 stash（可切换）
+### 10. 脏工作区自动 stash（可切换）
 `gitRebaseVisual.autoStash`（默认开启）控制变基时对未提交改动的处理：
 - **自动（默认）**：变基前自动 stash，变基**完全结束后**（或你点 Continue / Abort 后）自动恢复。若变基暂停（冲突 / edit 停靠），stash 会保留、**不会**中途 pop，待你 Continue/Abort 时再恢复——避免基于中间状态 pop 导致冲突。仅在确实做了 stash 时才提示/恢复，工作区干净时不会有多余通知。
 - **手动**（关闭 autoStash）：若工作区/暂存区有内容导致无法变基，直接弹警告，请你用顶部 **Stash** 按钮或自行 `git stash` 后再操作，完成后用 **Pop** 恢复。
 
 > 恢复采用 stash 的**提交 sha** 作为标识（不依赖会被变基改写的 commit hash）。若你在终端自行 continue 并 pop 了 stash，插件下次刷新时会检测到该 stash 已不存在并静默清理，不会重复 pop，避免状态不同步。
 
-### 9. commit 锁定（防误推他人提交）
+### 11. commit 锁定（防误推他人提交）
 典型场景：你 cherry-pick 了别人的 commit A 作为依赖，在其之上写了自己的 B、C。推送时不应把别人的 A 一起推出去。
 
 - 右键 A → **锁定 commit**（出现 🔒、左侧橙色条）。
@@ -137,6 +137,7 @@
 | `gitRebaseVisual.llm.apiKey` | `""` | API key |
 | `gitRebaseVisual.llm.model` | `fast` | 模型名，如 `fast`、`expert` |
 | `gitRebaseVisual.llm.skillPath` | `""` | 一个 markdown 文件的绝对路径；每次生成 message 都会把它作为规则发给模型，用于定制 message 风格 |
+| `gitRebaseVisual.llm.timeoutMs` | `120000` | 等待 LLM 响应的最长时间（毫秒），超时后自动取消请求 |
 | `gitRebaseVisual.diffMaxChars` | `12000` | 发给模型的 diff 最大字符数，超出截断 |
 | `gitRebaseVisual.push.refspecTemplate` | `""` | 评审推送的 refspec 模板，例如 `HEAD:refs/for/master`。占位符：`${tip}`（解析为 HEAD）、`${branch}`（upstream 分支名）。设置后，推送时会让你选择推送方式；留空则为普通分支推送 |
 | `gitRebaseVisual.autoStash` | `true` | 变基前是否自动 stash 脏工作区并在结束后恢复。关闭则改为手动模式：脏工作区会阻止变基并提示你自行 stash |
