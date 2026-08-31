@@ -239,6 +239,12 @@ export async function isDirty(cwd: string): Promise<boolean> {
   return res.stdout.trim().length > 0;
 }
 
+/** Returns paths that Git marks as unresolved in the index. */
+export async function conflictedFiles(cwd: string): Promise<string[]> {
+  const res = await runGit(["diff", "--name-only", "--diff-filter=U"], { cwd });
+  return res.stdout.split("\n").map((path) => path.trim()).filter(Boolean);
+}
+
 /**
  * Computes a stable patch-id for a commit's diff. The patch-id stays the same
  * across cherry-pick and rebase (as long as the diff is unchanged), so it is a

@@ -104,6 +104,13 @@ code --install-extension git-rebase-visual-<version>.vsix
 
 ### 更新记录
 
+- **0.3.0** — P1 体验、可靠性与诊断增强：
+  - AI message 改为流式生成；新增 `llm.timeoutMs`（默认 120 秒）、用户取消和安全的认证/限流/服务端错误提示。
+  - Push 显示可取消进度；新增 **Git Rebase Visual** OutputChannel 记录 push 与 provider 操作失败摘要。
+  - 暂存状态通过文件事件与节流 index 轮询自动刷新，终端 `git add` 后无需手动 Refresh 即可使用相关菜单。
+  - 删除 commit 前增加目标与历史重写确认；rebase edit 停靠横幅显示当前目标和 Continue/Abort 指引。
+  - 新增 LLM HTTP mock 覆盖流式 SSE、畸形事件、deadline、取消与错误脱敏；完整测试套件扩展至 25 项。
+
 - **0.2.1** — 历史编辑安全性、恢复可靠性与发布质量修复：
   - 历史重排和 commit 操作增加互斥与 refresh 快照版本控制，避免并发操作或旧刷新结果改写当前状态。
   - 后端校验来自 Webview 的 commit hash 及拖拽顺序，阻止过期/残缺列表导致的静默历史改写。

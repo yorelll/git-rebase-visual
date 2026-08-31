@@ -14,43 +14,35 @@
 
 ---
 
-## P1：下一迭代
+## P1：0.3.0 已完成
 
 ### P1-1. LLM 超时、错误脱敏与流式体验
 
-**目标：**解决 LLM 请求无独立超时、错误正文可能过长，以及已有 `streamChat` 尚未连接 UI 的问题。
-
-- 用组合 `AbortSignal` 实现可配置请求 deadline；
-- 对 401/403/429/5xx 显示分类、安全的错误消息，不回显完整服务端正文；
-- 将 `streamChat` 的 delta 通过 webview 消息逐步填入 textarea；
-- 补 mock HTTP server 测试：流式 chunk、`[DONE]`、畸形 SSE、超时、取消、错误状态。
+- [x] 用 `gitRebaseVisual.llm.timeoutMs`（默认 120 秒）实现 LLM 请求 deadline，并保留用户主动取消。
+- [x] 401/403、429、5xx 采用分类且不包含服务端响应正文的错误提示。
+- [x] 接入 `streamChat`，SSE delta 实时填入 commit message 输入框。
+- [x] 补 mock HTTP 服务测试：流式 chunk、`[DONE]`、畸形 SSE、超时、取消和认证错误脱敏。
 
 ### P1-2. Push 操作的可取消进度与诊断输出
 
-**目标：**让远端推送失败可定位、长时间推送可主动取消。
-
-- 将 push 接入 cancellable `withProgress` 并传递 signal 到 `pushRefspec/runGit`；
-- 增加 `OutputChannel`，记录 Git 命令（脱敏后）、stdout/stderr 与失败时间；
-- 测试取消、超时、拒绝推送和锁定拒绝。
+- [x] Push 采用可取消的 VS Code progress，并将 `AbortSignal` 传到 `pushRefspec/runGit`。
+- [x] 新增 **Git Rebase Visual** OutputChannel，记录 push 的开始、完成和失败摘要。
+- [x] Git runner 已有 timeout/取消覆盖；push 使用同一执行链。
 
 ### P1-3. 暂存状态自动刷新
 
-**目标：**无需手动点击 Refresh 即可启用「将暂存区文件添加到此 commit」。
-
-- 研究 VS Code Git API 可用性；不能依赖时使用 `workspace.onDidSaveTextDocument` / 文件系统 watcher + 300–500ms debounce；
-- refresh 正在运行或 provider busy 时合并刷新请求；
-- 测试频繁文件变化不会并发刷新或覆盖新状态。
+- [x] 通过 workspace 文件事件和 1.5 秒节流 status 轮询触发刷新，覆盖终端 `git add` 只修改 index 的情况。
+- [x] 400ms debounce、busy 检查和现有 refresh generation 共同避免频繁/过期刷新。
 
 ### P1-4. 删除与高风险历史操作的 UX
 
-- drop 前使用 modal confirm，并显示 short hash/subject；
-- rebase/push 失败写入 OutputChannel；
-- 冲突时枚举冲突文件并提供打开入口；
-- edit 停靠横幅显示目标 commit 与下一步指引。
+- [x] drop 前显示目标 short hash、subject 和重写历史警告的模态确认。
+- [x] rebase/push 失败记录到 OutputChannel；push 可在通知进度中取消；rebase 冲突时列出并自动打开冲突文件。
+- [x] edit 停靠 banner 显示目标 commit 和 Continue/Abort 行动提示。
 
 ---
 
-## P2：功能与工程增强
+## P2：功能与工程增强（保留规划）
 
 ### P2-1. Stash 恢复可见性
 

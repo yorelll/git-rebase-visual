@@ -36,8 +36,12 @@
   function renderBanner() {
     if (state.rebaseInProgress) {
       bannerEl.className = "banner rebase";
+      const stopped = state.commits && state.commits.find((c) => c.hash === state.stoppedAt);
+      const guidance = stopped
+        ? `已停靠在 ${stopped.shortHash} “${stopped.subject}”。可修改代码或提交新改动后继续：`
+        : "变基进行中。如有冲突请在编辑器中解决后：";
       bannerEl.innerHTML =
-        "变基进行中。如有冲突请在编辑器中解决后：" +
+        guidance +
         '<div class="banner-actions">' +
         '<button class="btn primary" id="b-continue">Continue</button>' +
         '<button class="btn" id="b-abort">Abort</button>' +
@@ -474,6 +478,7 @@
     }
     aiGenerate.disabled = true;
     aiGenerate.textContent = "生成中…";
+    dialogText.value = "";
     vscode.postMessage({
       type: "generate",
       mode: dialogCtx.mode,
@@ -519,9 +524,13 @@
       case "openCompose":
         openDialog(m);
         break;
+      case "genDelta":
+        dialogText.value += m.text || "";
+        dialogText.scrollTop = dialogText.scrollHeight;
+        break;
       case "genResult":
         resetGenerateBtn();
-        dialogText.value = m.text || "";
+        dialogText.value = m.text || dialogText.value;
         break;
       case "genError":
         resetGenerateBtn();

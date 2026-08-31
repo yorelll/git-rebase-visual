@@ -29,11 +29,16 @@ export function getLlmConfig(): LlmConfig {
   };
 }
 
-export function getLlmExtras(): { skillPath: string; diffMaxChars: number } {
+export function getLlmExtras(): {
+  skillPath: string;
+  diffMaxChars: number;
+  timeout: number;
+} {
   const c = vscode.workspace.getConfiguration(SECTION);
   return {
     skillPath: c.get<string>("llm.skillPath", ""),
     diffMaxChars: c.get<number>("diffMaxChars", 12000),
+    timeout: Math.max(1000, c.get<number>("llm.timeoutMs", 120000)),
   };
 }
 

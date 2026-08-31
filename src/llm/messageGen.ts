@@ -1,6 +1,6 @@
 import * as fs from "fs";
 import { git } from "../git/gitRunner";
-import { chat, ChatMessage, LlmConfig } from "./client";
+import { ChatMessage, LlmConfig, LlmRequestOptions, streamChat } from "./client";
 
 const BASE_PROMPT = `You are an expert software engineer writing a git commit message.
 Given the diff of a single commit, produce a concise, conventional commit message.
@@ -80,9 +80,10 @@ export async function generateFromDiff(
   diff: string,
   cfg: LlmConfig,
   opts: { skillPath: string; diffMaxChars: number; extraInfo?: string },
-  signal?: AbortSignal
+  onDelta: (chunk: string) => void,
+  requestOptions: LlmRequestOptions = {}
 ): Promise<string> {
-  return chat(cfg, buildMessages(diff, opts), signal);
+  return streamChat(cfg, buildMessages(diff, opts), onDelta, requestOptions);
 }
 
 /** Convenience: generate a message for an existing commit. */
@@ -91,8 +92,11 @@ export async function generateMessage(
   hash: string,
   cfg: LlmConfig,
   opts: { skillPath: string; diffMaxChars: number; extraInfo?: string },
-  signal?: AbortSignal
+  onDelta: (chunk: string) => void,
+  requestOptions: LlmRequestOptions = {}
 ): Promise<string> {
   const diff = await getCommitDiff(cwd, hash);
-  return generateFromDiff(diff, cfg, opts, signal);
+  return generateFromDiff(diff, cfg, opts, onDelta, requestOptions);
 }
+
+export { buildMessages };

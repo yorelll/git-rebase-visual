@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import * as fs from "fs";
 import * as path from "path";
-import { currentBranch, getCommits, isRebaseInProgress, rebaseStoppedSha, resolveRange, workingStatus } from "../src/git/commitLog";
+import { conflictedFiles, currentBranch, getCommits, isRebaseInProgress, rebaseStoppedSha, resolveRange, workingStatus } from "../src/git/commitLog";
 import { resolveBase } from "../src/git/rebaseEngine";
 import { createRepo, commitFile, git, removeRepo } from "./helpers/gitTestRepo";
 
@@ -31,6 +31,13 @@ test("commit queries preserve newest-first order and calculate a rebase base", a
     revRange: "-n 1 HEAD",
     hasBase: false,
   });
+});
+
+test("conflictedFiles returns no paths in a clean repository", async (t) => {
+  const cwd = createRepo();
+  t.after(() => removeRepo(cwd));
+  commitFile(cwd, "one.txt", "one\n", "initial");
+  assert.deepEqual(await conflictedFiles(cwd), []);
 });
 
 test("rebase state helpers find an edit stop via absolute Git paths", async (t) => {

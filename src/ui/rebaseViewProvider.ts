@@ -14,6 +14,7 @@ import {
   commitDetail,
   workingStatus,
   isDirty,
+  conflictedFiles,
 } from "../git/commitLog";
 import {
   executeRebase,
@@ -79,14 +80,43 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
   private commits: Commit[] = [];
   private root?: string;
   private busy = false;
+  private refreshQueued = false;
   private refreshGeneration = 0;
+  private refreshTimer?: NodeJS.Timeout;
+  private statusPoller?: NodeJS.Timeout;
+  private statusPollerStarted = false;
+  private readonly output: vscode.OutputChannel;
 
   constructor(
     private readonly ctx: vscode.ExtensionContext,
     private readonly locks: LockStore
-  ) {}
+  ) {
+    this.output = vscode.window.createOutputChannel("Git Rebase Visual");
+    ctx.subscriptions.push(this.output);
+    ctx.subscriptions.push(
+      vscode.workspace.onDidChangeTextDocument(() => this.scheduleRefresh()),
+      vscode.workspace.onDidCreateFiles(() => this.scheduleRefresh()),
+      vscode.workspace.onDidDeleteFiles(() => this.scheduleRefresh()),
+      vscode.workspace.onDidRenameFiles(() => this.scheduleRefresh()),
+      vscode.workspace.onDidSaveTextDocument(() => this.scheduleRefresh()),
+      new vscode.Disposable(() => {
+        if (this.refreshTimer) {
+          clearTimeout(this.refreshTimer);
+        }
+        if (this.statusPoller) {
+          clearInterval(this.statusPoller);
+        }
+      })
+    );
+  }
 
   resolveWebviewView(view: vscode.WebviewView): void {
+    if (!this.statusPollerStarted) {
+      // Git updates its index without changing workspace files. Poll only after
+      // the view opens, with a debounce to avoid repeated status commands.
+      this.statusPollerStarted = true;
+      this.statusPoller = setInterval(() => this.scheduleRefresh(), 1500);
+    }
     this.view = view;
     view.webview.options = {
       enableScripts: true,
@@ -101,6 +131,27 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
 
   private cwd(): string | undefined {
     return this.root ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  }
+
+  private scheduleRefresh(): void {
+    if (this.refreshTimer) {
+      clearTimeout(this.refreshTimer);
+    }
+    this.refreshTimer = setTimeout(() => {
+      this.refreshTimer = undefined;
+      if (this.busy) {
+        this.refreshQueued = true;
+      } else if (this.view) {
+        void this.refresh();
+      }
+    }, 400);
+  }
+
+  private log(operation: string, message: string): void {
+    const safe = message
+      .replace(/(https?:\/\/)[^\s/@]+@/gi, "$1***@")
+      .replace(/(authorization:\s*bearer\s+)\S+/gi, "$1***");
+    this.output.appendLine(`[${new Date().toISOString()}] ${operation}: ${safe}`);
   }
 
   public async refresh(): Promise<void> {
@@ -251,6 +302,10 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
         await this.handleMessage(m);
       } finally {
         this.busy = false;
+        if (this.refreshQueued) {
+          this.refreshQueued = false;
+          void this.refresh();
+        }
       }
       return;
     }
@@ -305,6 +360,15 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
           await this.handleReorder(cwd!, m.order as string[]);
           break;
         case "drop": {
+          const commit = this.commits.find((c) => c.hash === m.hash)!;
+          const confirm = await vscode.window.showWarningMessage(
+            `删除 ${commit.shortHash} “${commit.subject}”？此操作会改写其后的提交历史。`,
+            { modal: true },
+            "删除"
+          );
+          if (confirm !== "删除") {
+            return;
+          }
           const pid = await this.locks.computePatchId(cwd!, m.hash);
           await this.runRebase(cwd!, {
             items: this.itemsWith((h) => (h === m.hash ? "drop" : undefined)),
@@ -364,7 +428,9 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
           break;
       }
     } catch (e: any) {
-      toast("error", String(e.message ?? e));
+      const message = String(e.message ?? e);
+      this.log(m.type, `失败 ${message}`);
+      toast("error", message);
       await this.refresh();
     }
   }
@@ -564,6 +630,7 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     const outcome = await executeRebase(cwd, { ...plan, onto });
 
     if (!outcome.ok && !outcome.stopped) {
+      this.log("rebase", `失败 ${outcome.message}`);
       toast("error", `变基失败：${outcome.message}`);
       // Rebase did not apply; restore the stash immediately (silent if none).
       if (prep.stashed) {
@@ -572,12 +639,23 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     } else if (outcome.stopped) {
       // Keep the pending stash; it is popped on Continue/Abort. Only mention
       // the stash when we actually created one.
+      const conflicts = await conflictedFiles(cwd);
+      const conflictHint = conflicts.length
+        ? `冲突文件：${conflicts.join("、")}。`
+        : "";
+      this.log("rebase", outcome.message || "变基已暂停");
       toast(
         "warn",
-        prep.stashed
+        (prep.stashed
           ? "变基已暂停（冲突或 edit 停靠）。你的改动已自动 stash，将在 Continue/Abort 后自动恢复。"
-          : "变基已暂停（冲突或 edit 停靠）。请解决后在面板 Continue 或 Abort。"
+          : "变基已暂停（冲突或 edit 停靠）。请解决后在面板 Continue 或 Abort。") + conflictHint
       );
+      for (const file of conflicts) {
+        void vscode.workspace.openTextDocument(vscode.Uri.file(path.join(cwd, file))).then(
+          (document) => vscode.window.showTextDocument(document),
+          () => undefined
+        );
+      }
     } else if (prep.stashed) {
       // Completed cleanly — restore now.
       await this.popPendingStash(cwd, root);
@@ -746,9 +824,12 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
         token.onCancellationRequested(() => ctrl.abort());
         try {
           let text: string;
-          const opts = { ...getLlmExtras(), extraInfo: extra };
+          const { timeout, ...extras } = getLlmExtras();
+          const opts = { ...extras, extraInfo: extra };
+          const onDelta = (chunk: string) => this.post({ type: "genDelta", text: chunk });
+          const requestOptions = { signal: ctrl.signal, timeout };
           if (mode === "commit" && hash) {
-            text = await generateMessage(cwd, hash, getLlmConfig(), opts, ctrl.signal);
+            text = await generateMessage(cwd, hash, getLlmConfig(), opts, onDelta, requestOptions);
           } else {
             const diff =
               mode === "staged"
@@ -759,7 +840,7 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
               this.post({ type: "genCancelled" });
               return;
             }
-            text = await generateFromDiff(diff, getLlmConfig(), opts, ctrl.signal);
+            text = await generateFromDiff(diff, getLlmConfig(), opts, onDelta, requestOptions);
           }
           this.post({ type: "genResult", text: text || "" });
         } catch (e: any) {
@@ -863,6 +944,23 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
    * and supports a normal or review (refs/for/*) refspec.
    */
   public async pushBranch(): Promise<void> {
+    if (this.busy) {
+      toast("warn", "上一个操作尚未完成，请稍候。");
+      return;
+    }
+    this.busy = true;
+    try {
+      await this.pushBranchInternal();
+    } finally {
+      this.busy = false;
+      if (this.refreshQueued) {
+        this.refreshQueued = false;
+        void this.refresh();
+      }
+    }
+  }
+
+  private async pushBranchInternal(): Promise<void> {
     const cwd = this.cwd();
     if (!cwd) {
       return;
@@ -939,7 +1037,30 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     if (confirm !== "Push") {
       return;
     }
-    await pushRefspec(cwd, up, refspec);
+
+    await vscode.window.withProgress(
+      {
+        location: vscode.ProgressLocation.Notification,
+        title: `推送中：${refspec} → ${up.remote}`,
+        cancellable: true,
+      },
+      async (_progress, token) => {
+        const controller = new AbortController();
+        token.onCancellationRequested(() => controller.abort());
+        this.log("push", `开始 ${up.remote} ${refspec}`);
+        try {
+          await pushRefspec(cwd, up, refspec, controller.signal);
+          this.log("push", `完成 ${up.remote} ${refspec}`);
+        } catch (error: any) {
+          const message = String(error.message ?? error);
+          this.log("push", `失败 ${message}`);
+          if (controller.signal.aborted) {
+            throw new Error("推送已取消。");
+          }
+          throw error;
+        }
+      }
+    );
     toast("info", `已推送：${refspec} → ${up.remote}`);
     await this.refresh();
   }

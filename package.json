@@ -132,6 +132,12 @@
           "default": "",
           "description": "Absolute path to a skill markdown file loaded into every LLM request to guide commit message style."
         },
+        "gitRebaseVisual.llm.timeoutMs": {
+          "type": "number",
+          "default": 120000,
+          "minimum": 1000,
+          "description": "Maximum time in milliseconds to wait for an LLM response before cancelling it."
+        },
         "gitRebaseVisual.diffMaxChars": {
           "type": "number",
           "default": 12000,

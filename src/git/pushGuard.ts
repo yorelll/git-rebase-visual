@@ -109,7 +109,8 @@ export function resolveRefspec(
 export async function pushRefspec(
   cwd: string,
   up: UpstreamInfo,
-  refspec: string
+  refspec: string,
+  signal?: AbortSignal
 ): Promise<void> {
   const isReview = /:refs\/(for|drafts)\//.test(refspec);
   const args = ["push"];
@@ -117,5 +118,5 @@ export async function pushRefspec(
     args.push(`--force-with-lease=${up.branch}`);
   }
   args.push(up.remote, refspec);
-  await git(args, { cwd });
+  await git(args, { cwd, signal });
 }

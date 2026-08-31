@@ -1,6 +1,6 @@
 # Git Rebase Visual — 功能、架构与测试总结
 
-> 当前基线：v0.2.0 后续整改工作树。本文同步描述现有功能、核心保护机制、测试体系和发布门禁。
+> 当前基线：v0.3.0 P1 功能开发工作树。本文同步描述现有功能、核心保护机制、测试体系和发布门禁。
 
 ## 1. 项目定位
 
@@ -23,9 +23,11 @@ Webview (media/main.js)
 | 拖拽重排 | 通过 scripted interactive rebase 重排 oldest-first todo；后端验证 webview 提交集合完整，防止缺项导致静默 drop。 |
 | edit / reword / drop | 在原生 rebase 中执行；暂停时提供 Continue / Abort。 |
 | commit 锁定 | 使用稳定 `patch-id`，重排/cherry-pick 后仍能识别同一修改；push 前阻止包含锁定 commit 的范围。 |
-| AI message | 对 commit、暂存区或工作区 diff 生成可编辑消息；保留常见 trailer。 |
+| AI message | 对 commit、暂存区或工作区 diff 流式生成可编辑消息；保留常见 trailer，支持取消与可配置 deadline。 |
 | stash | autoStash 以 stash commit SHA 持久化定位，避免 `stash@{0}` 因外部操作漂移。 |
-| push | 普通分支使用 `--force-with-lease`；可选评审 refspec；rebase edit 停靠时仍可推送。 |
+| push | 普通分支使用 `--force-with-lease`；可选评审 refspec；可取消进度和 OutputChannel 诊断；rebase edit 停靠时仍可推送。 |
+| 自动状态同步 | 文件事件与节流 index 轮询自动刷新 staged/unstaged 状态，终端 `git add` 后无需手动刷新。 |
+| 危险操作 UX | drop 前显示 commit 与历史改写确认；edit 停靠横幅展示目标和 Continue/Abort 指引。 |
 | staged append | 目标 commit `edit` 停靠后恢复初始 index，`--amend --no-edit`，再重放其后的提交。 |
 
 ## 3. 「将暂存区文件添加到此 commit」事务
@@ -70,9 +72,9 @@ src/
 │  ├─ pushGuard.ts                 upstream/refspec/锁定范围检查
 │  └─ seq-editor.js                Git 调用的 sequence editor
 ├─ lock/lockStore.ts               patch-id 持久化锁
-├─ llm/client.ts                   OpenAI-compatible chat / streamChat
-├─ llm/messageGen.ts               diff 和提示词构造
-└─ ui/rebaseViewProvider.ts        webview 协调、状态机、历史操作
+├─ llm/client.ts                   OpenAI-compatible chat / streamChat、deadline、错误脱敏
+├─ llm/messageGen.ts               diff 和提示词构造、流式生成入口
+└─ ui/rebaseViewProvider.ts        webview 协调、状态机、历史操作、OutputChannel、自动刷新
 
 media/main.js                      webview DOM、拖拽、菜单、弹窗
 .github/workflows/release.yml      tag 发布门禁与 GitHub Release
@@ -91,6 +93,9 @@ media/main.js                      webview DOM、拖拽、菜单、弹窗
 | Git 集成 | `test/commitLog.integration.test.ts` | staged/unstaged 状态、commit 顺序、absolute git-path、edit stop |
 | Git 集成 | `test/worktree.integration.test.ts` | stash apply/pop/drop、keep-index、外部删除 stash |
 | 功能集成 | `test/appendStaged.integration.test.ts` | staged append、amend、后续重放、未暂存恢复、stash 清理 |
+| LLM HTTP mock | `test/llmClient.test.ts` | SSE delta/`[DONE]`/畸形事件、deadline、取消、错误正文脱敏 |
+
+当前测试套件含 26 项测试。
 
 命令：
 
@@ -116,11 +121,11 @@ npm run package         # 编译并生成 VSIX
 
 任一环节失败均不会发布。
 
-## 7. 已知后续工作
+## 7. 已知后续工作（P2 规划）
 
-- 为 LLM fetch 增加产品化超时、错误脱敏与流式 UI；
-- 为 Push 提供可取消进度与 OutputChannel 诊断；
-- 以节流的 SCM/文件监听更新 staged 状态；
-- 多根工作区、列表虚拟化、provider 模块拆分、SecretStorage 和完整 l10n。
+- 多根工作区、列表虚拟化、provider 模块拆分、SecretStorage 和完整 l10n；
+- append/stash 恢复可见性与一键打开 stash 列表；
+- squash/fixup、多选、搜索、diff 比较、撤销和多远端；
+- 大仓库 patch-id 缓存、结构化变更统计和性能基准；
 
 详细结论、已修复项与未修改原因见 [`../review/review-report.md`](../review/review-report.md)。

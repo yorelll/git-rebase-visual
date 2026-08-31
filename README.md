@@ -67,6 +67,14 @@
 - 若有未暂存改动，插件会临时 stash 并在完成后恢复；只有操作开始时已暂存的内容会被追加。
 - 发生冲突或无法自动重放时，Git 保持可恢复状态并提示错误；请在 VSCode/终端解决后执行 `git rebase --continue` 或 `git rebase --abort`。
 
+### 6. 流式 AI message、Push 诊断与实时状态
+
+- **流式 AI message**：AI 生成结果会随着 SSE 响应逐步填入 message 输入框；可在 VS Code 通知中取消。`llm.timeoutMs`（默认 120000）可限制单次生成的最长等待时间。
+- **安全错误提示**：LLM 认证失败、限流和服务端错误会显示分类提示，不会把服务端响应正文展示到界面中。
+- **可取消 Push**：Push 显示可取消进度；Push 或其他 provider 操作失败时，可在 VS Code 的 **Output → Git Rebase Visual** 查看诊断摘要。
+- **自动刷新暂存状态**：通过 VS Code 源代码管理或终端 `git add` 暂存文件后，面板会自动更新菜单状态；无需手动点击 Refresh。
+- **危险操作确认**：删除 commit 前会显示目标 commit 与历史重写确认；edit 停靠横幅会明确显示当前目标及 Continue / Abort 下一步。
+
 ### 测试与发布校验
 
 - 本地执行 `npm run test`：运行逻辑、边界和真实 Git 临时仓库集成测试。
