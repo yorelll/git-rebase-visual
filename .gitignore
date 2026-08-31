@@ -4,8 +4,12 @@ dist/
 *.vsix
 
 # local test repositories / scratch
-test/
+# Test source is versioned; transient fixture repositories remain ignored.
+test/tarot-flow/
 
 # editor / tooling local state
 .superpowers/
 .claude/
+.codegraph/
+pic_ref/
+coverage/

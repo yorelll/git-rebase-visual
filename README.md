@@ -62,9 +62,16 @@
 先通过 VSCode 源代码管理（或 `git add`）把要追加的文件放入暂存区，再右键目标 commit → **将暂存区文件添加到此 commit**。
 
 - 插件会用原 message 执行 `git commit --amend --no-edit`，随后自动重放目标 commit 之后的提交；因此目标 commit 和其后的 hash 会变化。
+- 被锁定的 commit 不允许追加，须先明确解除锁定，避免修改依赖提交后绕过推送保护。
+- 若目标 commit 已包含在 upstream 中，确认弹窗会明确提示：操作会改写已推送历史，完成后需要用插件的 Push（`--force-with-lease`）更新远端。
 - 若有未暂存改动，插件会临时 stash 并在完成后恢复；只有操作开始时已暂存的内容会被追加。
 - 发生冲突或无法自动重放时，Git 保持可恢复状态并提示错误；请在 VSCode/终端解决后执行 `git rebase --continue` 或 `git rebase --abort`。
-- 因为操作改写历史，已推送的分支通常需要后续使用插件的 Push（`--force-with-lease`）更新远端。
+
+### 测试与发布校验
+
+- 本地执行 `npm run test`：运行逻辑、边界和真实 Git 临时仓库集成测试。
+- 本地执行 `npm run test:coverage`：在上述测试基础上输出 Node 测试覆盖率报告。
+- 推送版本标签触发 Release 时，GitHub Actions 会依次执行类型检查、覆盖率测试、VSIX 打包、VSIX 内容检查以及 RELEASE.md 版本记录检查；任一步失败都不会创建 Release。
 
 ### 6. 为未提交的改动生成 message 并提交
 当工作区有未提交改动、且已配置 LLM 时，面板顶部出现 **未提交的改动** 区，提供：

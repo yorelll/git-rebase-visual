@@ -36,8 +36,31 @@ jobs:
             exit 1
           }
 
+      - name: Run type checks and logic, boundary, and Git integration tests
+        run: npm run test:release
+
       - name: Build and package VSIX
         run: npm run package
+
+      - name: Verify packaged VSIX
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          test -f "git-rebase-visual-$version.vsix"
+          unzip -l "git-rebase-visual-$version.vsix" | grep -q 'extension/dist/extension.js'
+          unzip -l "git-rebase-visual-$version.vsix" | grep -q 'extension/dist/seq-editor.js'
+          unzip -l "git-rebase-visual-$version.vsix" | grep -q 'extension/media/main.js'
+          unzip -l "git-rebase-visual-$version.vsix" | grep -q 'extension/package.json'
+          ! unzip -l "git-rebase-visual-$version.vsix" | grep -q 'extension/src/'
+          ! unzip -l "git-rebase-visual-$version.vsix" | grep -q 'extension/test/'
+          ! unzip -l "git-rebase-visual-$version.vsix" | grep -q 'extension/docs/'
+          ! unzip -l "git-rebase-visual-$version.vsix" | grep -q 'extension/node_modules/'
+
+      - name: Check release notes are documented
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          grep -q -- "**$version**" RELEASE.md
 
       - name: Create GitHub release
         env:

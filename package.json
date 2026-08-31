@@ -153,6 +153,10 @@
   "scripts": {
     "compile": "node esbuild.js",
     "watch": "node esbuild.js --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test test/**/*.test.ts",
+    "test:coverage": "tsx --test --experimental-test-coverage test/**/*.test.ts",
+    "test:release": "npm run typecheck && npm run test:coverage",
     "vscode:prepublish": "npm run compile",
     "package": "vsce package --no-dependencies"
   },
@@ -161,6 +165,7 @@
     "@types/vscode": "^1.85.0",
     "@vscode/vsce": "^3.2.1",
     "esbuild": "^0.20.0",
+    "tsx": "^4.20.0",
     "typescript": "^5.4.0"
   }
 }

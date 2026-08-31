@@ -17,6 +17,7 @@ const TRAILER_RE = new RegExp(
   `^(${TRAILER_KEYS.join("|")}):\\s`,
   "i"
 );
+const GENERIC_TRAILER_RE = /^[A-Za-z0-9-]+:\s+\S/;
 
 export interface SplitMessage {
   body: string; // editable header/body
@@ -33,12 +34,14 @@ export function splitTrailers(message: string): SplitMessage {
   let firstTrailer = lines.length;
   // Walk upward while lines are trailers or blank; require at least one trailer.
   let sawTrailer = false;
+  let crossedBlank = false;
   for (let i = lines.length - 1; i >= 0; i--) {
     const line = lines[i];
     if (line.trim() === "") {
+      crossedBlank = true;
       continue; // blanks allowed within the trailing block
     }
-    if (TRAILER_RE.test(line)) {
+    if (TRAILER_RE.test(line) || (sawTrailer && !crossedBlank && GENERIC_TRAILER_RE.test(line))) {
       firstTrailer = i;
       sawTrailer = true;
     } else {
@@ -67,10 +70,11 @@ export function applyTrailers(editedBody: string, originalMessage: string): stri
   if (!trailers) {
     return body + "\n";
   }
-  // Skip re-appending trailers already present in the edited body.
-  const editedTrailers = splitTrailers(editedBody).trailers;
-  if (editedTrailers) {
-    return body + "\n";
+  // If the edited text itself ends in recognized trailers, it deliberately
+  // replaces the original trailer block. Otherwise append the preserved block.
+  const edited = splitTrailers(editedBody);
+  if (edited.trailers) {
+    return `${edited.body}\n\n${edited.trailers}\n`;
   }
   return `${body}\n\n${trailers}\n`;
 }

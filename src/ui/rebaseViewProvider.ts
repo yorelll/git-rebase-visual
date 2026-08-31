@@ -23,7 +23,7 @@ import {
   RebaseItem,
   RebaseBase,
 } from "../git/rebaseEngine";
-import { git } from "../git/gitRunner";
+import { git, runGit } from "../git/gitRunner";
 import {
   getUpstream,
   lockedInPush,
@@ -63,6 +63,8 @@ const PENDING_APPEND_KEY = "gitRebaseVisual.pendingAppend";
 interface PendingAppend {
   changeStash: string;
   unstagedStash?: string;
+  /** Original target SHA; distinguishes an external abort from a completed replay. */
+  targetHash?: string;
 }
 
 interface FromWebview {
@@ -76,6 +78,8 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
   private view?: vscode.WebviewView;
   private commits: Commit[] = [];
   private root?: string;
+  private busy = false;
+  private refreshGeneration = 0;
 
   constructor(
     private readonly ctx: vscode.ExtensionContext,
@@ -100,13 +104,23 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
   }
 
   public async refresh(): Promise<void> {
+    const generation = ++this.refreshGeneration;
+    const isCurrent = () => generation === this.refreshGeneration;
+    const postCurrent = (msg: any) => {
+      if (isCurrent()) {
+        this.post(msg);
+      }
+    };
     const folder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
     if (!folder) {
-      return this.post({ type: "state", error: "No workspace folder open." });
+      return postCurrent({ type: "state", error: "No workspace folder open." });
     }
     const root = await repoRoot(folder);
     if (!root) {
-      return this.post({ type: "state", error: "Not a git repository." });
+      return postCurrent({ type: "state", error: "Not a git repository." });
+    }
+    if (!isCurrent()) {
+      return;
     }
     this.root = root;
 
@@ -119,7 +133,14 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
       await this.popPendingStash(root, root);
     }
     if (!rebaseInProgress && this.getPendingAppend(root)) {
-      await this.restorePendingAppend(root, root);
+      const pending = this.getPendingAppend(root)!;
+      const targetRewritten = pending.targetHash
+        ? (await runGit(["merge-base", "--is-ancestor", pending.targetHash, "HEAD"], { cwd: root })).code !== 0
+        : true;
+      await this.restorePendingAppend(root, root, !targetRewritten);
+    }
+    if (!isCurrent()) {
+      return;
     }
 
     // During a rebase HEAD is detached; resolve the range against the branch
@@ -127,13 +148,14 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     const tipRef = rebaseInProgress ? await rebasingBranch(root) : undefined;
     const range = await resolveRange(root, getRangeConfig(), tipRef ?? "HEAD");
     if ("error" in range) {
-      return this.post({ type: "state", error: range.error, rebaseInProgress });
+      return postCurrent({ type: "state", error: range.error, rebaseInProgress });
     }
 
+    let commits: Commit[];
     try {
-      this.commits = await getCommits(root, range.revRange);
+      commits = await getCommits(root, range.revRange);
     } catch (e: any) {
-      return this.post({ type: "state", error: String(e.message ?? e), rebaseInProgress });
+      return postCurrent({ type: "state", error: String(e.message ?? e), rebaseInProgress });
     }
 
     const stoppedAt = rebaseInProgress ? await rebaseStoppedSha(root) : undefined;
@@ -144,7 +166,7 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     const lockedHashes = this.locks.lockedHashes(root);
     const lockedPatchIds = this.locks.lockedPatchIds(root);
     const lockedFlags = new Map<string, boolean>();
-    for (const c of this.commits) {
+    for (const c of commits) {
       let isLocked = lockedHashes.has(c.hash);
       if (!isLocked && hasLocks && lockedPatchIds.size > 0) {
         const pid = await this.locks.computePatchId(root, c.hash);
@@ -154,10 +176,14 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     }
 
     const status = await workingStatus(root);
+    if (!isCurrent()) {
+      return;
+    }
+    this.commits = commits;
 
     // Send oldest-first (root at top, newest at bottom) for a natural timeline.
-    const ordered = [...this.commits].reverse();
-    this.post({
+    const ordered = [...commits].reverse();
+    postCurrent({
       type: "state",
       rebaseInProgress,
       stoppedAt,
@@ -179,6 +205,14 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     this.view?.webview.postMessage(msg);
   }
 
+  private isCurrentCommitHash(value: unknown): value is string {
+    return (
+      typeof value === "string" &&
+      /^[0-9a-f]{40}$/i.test(value) &&
+      this.commits.some((commit) => commit.hash === value)
+    );
+  }
+
   /** Builds todo items (oldest-first) from current commits, applying an action. */
   private itemsWith(
     override?: (hash: string) => RebaseItem["action"] | undefined
@@ -194,7 +228,51 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async onMessage(m: FromWebview): Promise<void> {
+    const mutating = [
+      "reorder",
+      "drop",
+      "rebaseTo",
+      "lock",
+      "unlock",
+      "openCompose",
+      "generate",
+      "apply",
+      "appendStaged",
+      "continueRebase",
+      "abortRebase",
+    ];
+    if (mutating.includes(m.type)) {
+      if (this.busy) {
+        toast("warn", "上一个操作尚未完成，请稍候。");
+        return;
+      }
+      this.busy = true;
+      try {
+        await this.handleMessage(m);
+      } finally {
+        this.busy = false;
+      }
+      return;
+    }
+    await this.handleMessage(m);
+  }
+
+  private async handleMessage(m: FromWebview): Promise<void> {
     const cwd = this.cwd();
+    const hashActions = new Set([
+      "copyHash",
+      "requestDetail",
+      "drop",
+      "rebaseTo",
+      "lock",
+      "unlock",
+      "appendStaged",
+    ]);
+    if (hashActions.has(m.type) && !this.isCurrentCommitHash(m.hash)) {
+      toast("warn", "commit 列表已更新，请刷新后重试。");
+      await this.refresh();
+      return;
+    }
     if (!cwd && m.type !== "ready") {
       return;
     }
@@ -291,13 +369,26 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  private async handleReorder(cwd: string, displayOrder: string[]): Promise<void> {
+  private async handleReorder(cwd: string, displayOrder: unknown): Promise<void> {
     // displayOrder is oldest-first (top->bottom), which is already todo order.
+    const expected = new Set(this.commits.map((c) => c.hash));
+    const valid =
+      Array.isArray(displayOrder) &&
+      displayOrder.length === expected.size &&
+      new Set(displayOrder).size === expected.size &&
+      displayOrder.every(
+        (hash) => typeof hash === "string" && /^[0-9a-f]{40}$/i.test(hash) && expected.has(hash)
+      );
+    if (!valid) {
+      toast("warn", "commit 列表已更新，已取消重排。请刷新后重试。");
+      await this.refresh();
+      return;
+    }
     const bySubject = new Map(this.commits.map((c) => [c.hash, c.subject]));
     const items: RebaseItem[] = displayOrder.map((hash) => ({
       hash,
       action: "pick",
-      subject: bySubject.get(hash) ?? "",
+      subject: bySubject.get(hash)!,
     }));
     await this.runRebase(cwd, { items });
     await this.refresh();
@@ -511,8 +602,21 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
       throw new Error("找不到目标 commit，请刷新后重试。");
     }
 
+    const patch = await this.locks.computePatchId(cwd, hash);
+    if (this.locks.isLocked(this.root!, hash, patch)) {
+      toast("warn", "目标 commit 已锁定。请先解除锁定，再追加暂存区文件。");
+      return;
+    }
+
+    const upstream = await runGit(["rev-parse", "--verify", "--quiet", "@{upstream}"], { cwd });
+    const alreadyPushed =
+      upstream.code === 0 &&
+      (await runGit(["merge-base", "--is-ancestor", hash, "@{upstream}"], { cwd })).code === 0;
+    const pushedWarning = alreadyPushed
+      ? "该 commit 已推送到 upstream，完成后需要使用 --force-with-lease 更新远端。"
+      : "";
     const confirm = await vscode.window.showWarningMessage(
-      `将暂存区文件追加到 ${commit.shortHash} “${commit.subject}”？这会改写该 commit 及其后的历史。`,
+      `将暂存区文件追加到 ${commit.shortHash} “${commit.subject}”？这会改写该 commit 及其后的历史。${pushedWarning}`,
       { modal: true },
       "追加"
     );
@@ -561,7 +665,7 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
       const unstagedStash = status.hasUnstaged
         ? await stashPushKeepIndex(cwd)
         : undefined;
-      await this.setPendingAppend(this.root!, { changeStash, unstagedStash });
+      await this.setPendingAppend(this.root!, { changeStash, unstagedStash, targetHash: hash });
       const continued = await continueRebase(cwd);
       if (!continued.ok) {
         throw new Error(continued.message || "继续变基失败。");

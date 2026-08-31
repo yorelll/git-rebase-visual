@@ -84,8 +84,23 @@ code --install-extension git-rebase-visual-<version>.vsix
 ## 五、版本升级流程
 
 1. 修改代码并 `npm run compile` 验证。
-2. 更新 `package.json` 的 `version`（遵循语义化版本），可在下方维护更新记录。
-3. 重新 `vsce package`（或 `vsce publish`）。
+2. 更新 `package.json` 的 `version`（遵循语义化版本），并在下方维护更新记录。
+3. 运行完整发布门禁：`npm run test:release`（类型检查 + 逻辑/边界/真实 Git 集成测试 + 覆盖率）。
+4. 重新 `npm run package`，确认 VSIX 内容正确。
+5. 推送与版本一致的 `v<version>` tag。GitHub Actions 会再次执行发布门禁、校验 VSIX 不含源码/测试/文档/node_modules、校验 RELEASE.md 有该版本记录，全部通过后才创建并上传 Release。
+
+> Release 工作流不会以测试失败的构建发布 VSIX；本地门禁与 CI 使用相同的 `npm run test:release` 命令。
+
+### 测试覆盖范围
+
+| 测试类型 | 覆盖内容 |
+|---|---|
+| 逻辑测试 | trailer 拆分/保留、rebase todo 构建、refspec 模板替换 |
+| 边界测试 | 空 todo、空白 refspec、无 trailer、Git 输出上限、取消信号、失效 stash |
+| Git 集成测试 | 临时仓库中的 staged/unstaged 状态、stash apply/pop/drop、keep-index、提交范围、rebase edit 停靠与绝对 git-path |
+| 发布测试 | TypeScript 类型检查、VSIX 必需文件与排除文件检查、Release 版本记录检查 |
+
+测试文件位于 `test/`，运行 `npm run test` 或 `npm run test:coverage`。
 
 ### 更新记录
 
@@ -93,6 +108,11 @@ code --install-extension git-rebase-visual-<version>.vsix
   - 在目标 commit 的右键菜单中选择「将暂存区文件添加到此 commit」，插件会自动停靠、`--amend --no-edit` 并重放后续提交。
   - 操作前显示改写历史确认；暂存区为空时菜单不可用。
   - 同时存在未暂存改动时自动临时 stash，完成后恢复，确保只有操作开始时暂存的文件被追加。
+
+- **后续开发门禁** — 逻辑、边界与真实 Git 集成测试已加入发布工作流：
+  - `npm run test:release` 会运行 TypeScript 类型检查及 Node 测试覆盖率测试。
+  - 打版本 tag 时，Release CI 在打包前执行测试，并验证 VSIX 所含文件和 RELEASE.md 版本记录；失败时不发布。
+  - 覆盖范围包括 trailer、rebase todo/refspec、stash 状态机、rebase edit 停靠、Git 输出限制及取消信号。
 
 - **0.1.0** — 首个版本：
   - 拖拽重排、变基到此 commit（edit 停靠）、改 message、改 message 并变基、变基并 push、删除 commit、复制 hash。

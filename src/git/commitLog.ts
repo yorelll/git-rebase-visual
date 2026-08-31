@@ -62,15 +62,15 @@ export async function resolveRange(
  * instead of failing on the detached HEAD.
  */
 export async function rebasingBranch(cwd: string): Promise<string | undefined> {
-  const res = await runGit(["rev-parse", "--git-path", "rebase-merge/head-name"], {
-    cwd,
-  });
+  const res = await runGit(
+    ["rev-parse", "--path-format=absolute", "--git-path", "rebase-merge/head-name"],
+    { cwd }
+  );
   if (res.code !== 0) {
     return undefined;
   }
   const fs = await import("fs");
-  const pathMod = await import("path");
-  const abs = pathMod.resolve(cwd, res.stdout.trim());
+  const abs = res.stdout.trim();
   try {
     if (fs.existsSync(abs)) {
       const ref = fs.readFileSync(abs, "utf8").trim(); // refs/heads/main
@@ -110,13 +110,14 @@ export async function getCommits(
 
 /** True when a rebase (interactive or otherwise) is currently in progress. */
 export async function isRebaseInProgress(cwd: string): Promise<boolean> {
-  const merge = await runGit(["rev-parse", "--git-path", "rebase-merge"], { cwd });
-  const apply = await runGit(["rev-parse", "--git-path", "rebase-apply"], { cwd });
+  const [merge, apply] = await Promise.all(
+    ["rebase-merge", "rebase-apply"].map((name) =>
+      runGit(["rev-parse", "--path-format=absolute", "--git-path", name], { cwd })
+    )
+  );
   const fs = await import("fs");
-  const paths = [merge.stdout.trim(), apply.stdout.trim()].filter(Boolean);
-  for (const p of paths) {
+  for (const abs of [merge.stdout.trim(), apply.stdout.trim()].filter(Boolean)) {
     try {
-      const abs = require("path").resolve(cwd, p);
       if (fs.existsSync(abs)) {
         return true;
       }
@@ -138,15 +139,15 @@ export async function currentBranch(cwd: string): Promise<string | undefined> {
  * full hash of the commit it stopped at, or undefined if unavailable.
  */
 export async function rebaseStoppedSha(cwd: string): Promise<string | undefined> {
-  const res = await runGit(["rev-parse", "--git-path", "rebase-merge/stopped-sha"], {
-    cwd,
-  });
+  const res = await runGit(
+    ["rev-parse", "--path-format=absolute", "--git-path", "rebase-merge/stopped-sha"],
+    { cwd }
+  );
   if (res.code !== 0) {
     return undefined;
   }
   const fs = await import("fs");
-  const pathMod = await import("path");
-  const abs = pathMod.resolve(cwd, res.stdout.trim());
+  const abs = res.stdout.trim();
   try {
     if (fs.existsSync(abs)) {
       const sha = fs.readFileSync(abs, "utf8").trim();
