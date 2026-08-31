@@ -4,6 +4,11 @@
   "description": "Visual interactive rebase: drag to reorder commits, reword, lock, and AI-generated commit messages.",
   "version": "0.1.0",
   "publisher": "local",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yorelll/git-rebase-visual.git"
+  },
+  "license": "MIT",
   "icon": "media/extension-icon.png",
   "engines": {
     "vscode": "^1.85.0"
@@ -148,11 +153,13 @@
   "scripts": {
     "compile": "node esbuild.js",
     "watch": "node esbuild.js --watch",
-    "vscode:prepublish": "npm run compile"
+    "vscode:prepublish": "npm run compile",
+    "package": "vsce package --no-dependencies"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
     "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^3.2.1",
     "esbuild": "^0.20.0",
     "typescript": "^5.4.0"
   }

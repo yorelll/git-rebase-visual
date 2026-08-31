@@ -1,0 +1,15 @@
+# Source and local development files are not needed at runtime.
+.git/
+.github/
+.vscode/
+.claude/
+.codegraph/
+.superpowers/
+pic_ref/
+test/
+src/
+node_modules/
+*.ts
+esbuild.js
+tsconfig.json
+RELEASE.md
