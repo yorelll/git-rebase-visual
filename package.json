@@ -2,7 +2,7 @@
   "name": "git-rebase-visual",
   "displayName": "Git Rebase Visual",
   "description": "Visual interactive rebase: drag to reorder commits, reword, lock, and AI-generated commit messages.",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "publisher": "local",
   "repository": {
     "type": "git",

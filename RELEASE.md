@@ -104,6 +104,14 @@ code --install-extension git-rebase-visual-<version>.vsix
 
 ### 更新记录
 
+- **0.2.1** — 历史编辑安全性、恢复可靠性与发布质量修复：
+  - 历史重排和 commit 操作增加互斥与 refresh 快照版本控制，避免并发操作或旧刷新结果改写当前状态。
+  - 后端校验来自 Webview 的 commit hash 及拖拽顺序，阻止过期/残缺列表导致的静默历史改写。
+  - 追加暂存区文件前禁止修改锁定 commit；若目标已推送到 upstream，明确提示需要 `--force-with-lease`。
+  - Git 子进程增加 50 MiB 输出上限、120 秒超时和取消支持；rebase 状态检测改用绝对 Git 路径，兼容非标准 git-dir/worktree。
+  - 修复 commit message trailer 保留逻辑，避免编辑时意外丢失原 trailer 块。
+  - 新增 21 项逻辑、边界和真实 Git 集成测试；版本发布前自动执行类型检查、覆盖率测试、VSIX 内容检查和版本说明检查。
+
 - **0.2.0** — 可将暂存区文件追加到任意显示的 commit：
   - 在目标 commit 的右键菜单中选择「将暂存区文件添加到此 commit」，插件会自动停靠、`--amend --no-edit` 并重放后续提交。
   - 操作前显示改写历史确认；暂存区为空时菜单不可用。
