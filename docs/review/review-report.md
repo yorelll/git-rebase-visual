@@ -1,220 +1,100 @@
 # Git Rebase Visual — 复核与整改报告
 
-> 复核基线：v0.3.0 P1 功能开发工作树。
+> 本文记录对每一份外部 `code-review-<版本>.md` 的独立回复。
 >
-> 复核方法：逐项阅读实现、以临时 Git 仓库执行 stash/rebase/edit 流程、运行 TypeScript 类型检查和逻辑/边界/Git/HTTP 集成测试。
->
-> 状态含义：`[x]` 已确认问题并完成整改；`[ ]` 结论不成立或暂不整改，紧随其后的“未修改原因”说明原因；`[-]` 是设计建议而非缺陷。
+> **规则：**不修改 `code-review-*` 原文；每次收到新评审仅在本文件追加一个新的、不可回写的章节。章节编号与评审版本对应，例如 **1-0 回复**、**2-0 回复**、**3-0 回复**。每个章节包含：范围、逐项裁决、代码/测试证据、未修改原因与验证结果，便于未来追溯且不干扰此前结论。
+## 1-0 回复（历史归档）
 
-## 复核结果摘要
+初版评审的结论已在后续版本整改。主要完成项：Git 输出限制/超时/取消、绝对 git-path、reorder 与 hash 校验、历史操作互斥、append 锁定和已推送保护、trailer 保留与 Release 测试门禁。
 
-| 分类 | 结果 |
-|---|---|
-| v0.2.1 已完成 | Git 输出限制/超时/取消、绝对 git-path、输入校验、历史操作互斥、append 锁定/已推送保护、trailer 修复、Release 测试门禁 |
-| v0.3.0 P1 已完成 | LLM deadline/脱敏/流式、可取消 Push + OutputChannel、自动暂存状态刷新、drop 确认、edit 指引、冲突文件打开 |
-| P2 保留 | stash 恢复可见性、多仓库/搜索/squash/撤销、性能、架构拆分、安全迁移与发布增强 |
+详见 v0.2.1 的发布记录与 [`../summary/summary.md`](../summary/summary.md)。该章节为归档，不再回写。
 
-当前测试套件共 **26** 项，涵盖纯逻辑、边界、真实 Git 临时仓库和 LLM HTTP mock。
+## 2-0 回复（历史归档）
 
+第二轮评审聚焦 v0.2.1 的可靠性整改和测试门禁。已确认的修复项已随 v0.2.1 发布；剩余长期建议被拆分为 P2，并保留于 [`../improvement/improvement.md`](../improvement/improvement.md)。
+
+该章节为归档，不再回写。
+
+## 3-0 回复（对应 `code-review-3-0.md`）
+
+**评审基线：**v0.3.0 / `c4d0ce1`。
+
+**本次处理原则：**CR-1、CR-2 为真实 P1 缺陷，立即修改；CR-3 是正确的低风险性能问题，低成本修复；CR-4 为正确的测试覆盖建议，保留 P2 并说明原因；CR-5 为合理取舍，保留现状。
+### 3-0 / CR-1：commit 模式 `openCompose` / `apply` 未校验当前 hash
+
+- [x] **结论正确，已修复。**
+
+评审指出 `hashActions` 没有覆盖 `mode === "commit"` 的 `openCompose` / `apply`。在弹窗打开后发生外部历史变更时，过期 hash 可能让 `itemsWith` 构建全 `pick` todo，造成无意义 rebase 而不修改 message。该推演成立。
+
+**修改：**`RebaseViewProvider.handleMessage` 现在对 `openCompose` 和 `apply` 的 commit 模式同样执行 `isCurrentCommitHash` 验证。hash 无效时拒绝操作、提示刷新并刷新面板，不再进入 rebase。
+
+**结果：**过期 compose/apply 消息不会改写历史。
+
+### 3-0 / CR-2：视图关闭后 index 轮询持续运行
+
+- [x] **结论正确，已修复。**
+
+评审正确指出，仅在 extension deactivate 时清理 poller 会让已隐藏或处置的 view 继续触发轮询。
+
+**修改：**`resolveWebviewView` 现在：
+
+- 在 `onDidChangeVisibility` 不可见时停止轮询；可见时重新启动并刷新；
+- 在 `onDidDispose` 停止轮询并清除 `this.view` 引用；
+- 仅在视图打开时创建 poller。
+
+**结果：**侧栏折叠、切换视图组或显式隐藏时不再持续运行 Git status 刷新；视图重新显示时恢复自动状态同步。
+
+### 3-0 / CR-3：gitRunner maxBuffer 的 O(n²) 字节统计
+
+- [x] **结论正确，已修复。**
+
+原实现每个 data chunk 都对已聚合的 stdout/stderr 字符串执行 `Buffer.byteLength`，大输出场景会重复扫描历史内容。
+
+**修改：**`runGit` 改为 `outputBytes` 累计计数器：仅计算当前 chunk 字节数并累加，仍对 stdout/stderr 的总字节数实施相同上限。
+
+**验证：**扩展 `test/gitRunner.integration.test.ts`，确认 stdout/stderr 合并字节数在限制内。
+
+### 3-0 / CR-4：pushGuard、append 守卫与流式中途取消测试缺口
+
+- [ ] **结论正确，保留 P2。**
+
+**未修改原因：**当前 27 项测试已覆盖 Git runner 的取消/限制、append 成功事务、LLM deadline/预取消/流式 SSE 和基础 push refspec。评审建议的剩余测试需要为 provider UI、globalState、QuickPick/WarningMessage 和真实 remote push 建立可维护的 VS Code extension-host 或裸远端 Git 测试桩；一次性引入这些桩会扩大测试基础设施和 CI 时长。
+
+这些场景仍具价值，已保留到 P2：
+
+- `lockedInPush`、`pushRefspec` 的本地 bare remote 集成测试；
+- append 锁定拒绝、已推送提示、edit 前冲突/外部 abort 恢复；
+- `streamChat` 流读取途中取消与 deadline。
+
+在实现 P2 测试桩前，不将“未覆盖”表述为已验证的行为。
+
+### 3-0 / CR-5：`openCompose` / `generate` 的 busy 粒度
+
+- [ ] **结论属于可选 UX 取舍，保持现状。**
+
+`openCompose` 不是写操作，但当前将其与 generate 放入 busy 互斥，保证用户不能在生成、历史编辑或恢复事务中同时打开会提交旧快照的新对话框。移出互斥可以提高并行交互，但会重新引入 compose 消息与刷新/历史操作交错的状态复杂度。
+
+**未修改原因：**当前优先保证历史操作确定性；CR-1 修复后仍应保持 dialog 生命周期与操作事务串行。若后续引入类型化 webview 消息和 dialog session ID，再重新评估并行 compose。
+
+### 3-0 / 对原保留项的复核
+
+- [x] **认同** CR 报告对 R-11、R-12、R-14、R-15、R-17、R-18、R-19、R-20、CI-D 的“保留规划或不修改”判断。
+- [x] **无须反悔**此前安全结论：Git 仍通过 `spawn("git", args)` 执行，用户内容仍通过 `textContent` 渲染，API key 的 SecretStorage 迁移仍是 P2。
+
+### 3-0 验证
+
+已执行：
+
+```bash
+npm run typecheck
+npm run test
+```
+
+结果：**27 / 27 测试通过**，无失败、取消或跳过。
+
+本轮改动尚未发布为新版本；后续 release 仍会执行 `npm run test:release`、VSIX 内容验证及 RELEASE.md 版本记录验证。
 ---
 
-## 1. 已确认并整改的问题
+## 当前 P2 规划
 
-### R-1. Git 子进程无输出上限、超时和取消能力
-
-- [x] **已修复。**
-
-`src/git/gitRunner.ts` 现在具有默认 50 MiB 输出上限、120 秒超时和 `AbortSignal` 支持。超出输出限制、超时或取消时会终止子进程并返回明确失败结果。
-
-**验证：**`test/gitRunner.integration.test.ts` 覆盖非零返回、输出限制和取消。
-
-### R-2. 非标准 Git 目录下的 rebase 路径解析
-
-- [x] **已修复。**
-
-`rebasingBranch`、`isRebaseInProgress` 和 `rebaseStoppedSha` 使用 `--path-format=absolute --git-path`，避免相对路径与工作目录拼接造成的误判。
-
-**验证：**`test/commitLog.integration.test.ts` 在真实 rebase edit 停靠状态验证路径和 stopped SHA。
-
-### R-3. reorder 未校验完整提交集合
-
-- [x] **已修复。**
-
-拖拽顺序必须与当前 commit 快照等长、无重复、均为 40 位 SHA、且集合完全一致；不满足时取消历史改写并刷新 UI。
-
-### R-4. Webview hash 消息缺少当前快照与格式校验
-
-- [x] **已修复。**
-
-copy/detail/drop/rebase/lock/unlock/append 前都会验证 SHA 格式以及它是否仍属于当前快照，避免过期消息导致状态脱节。
-
-### R-5. LLM 超时、错误响应正文与 streamChat 未接入
-
-- [x] **已在 0.3.0 修复。**
-
-- 新增 `gitRebaseVisual.llm.timeoutMs`，默认 120 秒；
-- 401/403、429、5xx 使用分类、安全的错误文案，不回显服务端正文；
-- `streamChat` 的 SSE delta 实时回填 webview message textarea；
-- 用户取消仍会立即终止请求。
-
-**验证：**`test/llmClient.test.ts` 覆盖 SSE chunk、`[DONE]`、畸形事件、deadline、取消和认证错误脱敏。
-
-### R-6. Trailer 处理会错误丢弃原 trailer 块
-
-- [x] **已修复。**
-
-`applyTrailers` 区分“用户显式提供新的结尾 trailer 块”和“需要保留原 trailer 块”两种情况，避免编辑 commit message 时意外丢失原有 `Change-Id` 等 trailer；相邻标准 `Key: Value` 行也会被保留。
-
-**验证：**`test/message.test.ts`。
-
-### R-7. 运行中的 push 无独立取消 UI
-
-- [x] **已在 0.3.0 修复。**
-
-Push 使用 cancellable `withProgress`，取消 signal 传递给 `pushRefspec` 和 Git runner。新增 **Git Rebase Visual** OutputChannel，记录 Push 开始、成功和失败摘要。
-
-### R-8. refresh 竞态与写操作并发
-
-- [x] **已修复。**
-
-刷新使用 generation token，只有最新请求可提交 state；历史改写、生成和 Push 使用 provider busy 互斥。自动刷新在 busy 期间合并为一个完成后的 refresh 请求。
-
-### R-9. append 已锁定 commit 使 patch-id 锁失效
-
-- [x] **已修复。**
-
-append 前计算 patch-id 并检查锁定状态；锁定目标必须先显式解除锁定。
-
-### R-10. append 已推送 commit 没有明确风险提示
-
-- [x] **已修复。**
-
-append 前检测 upstream 是否已经包含目标 commit。若已推送，确认框会明确提示公开历史改写及 `--force-with-lease` 要求。
-
-### R-13. 暂存后菜单状态需刷新
-
-- [x] **已在 0.3.0 修复。**
-
-workspace 文件事件与 1.5 秒节流 index 轮询结合，覆盖终端 `git add` 的 index-only 变更；400ms debounce、busy 合并和 generation token 避免刷新风暴。
-
-### R-16. 缺失自动化测试
-
-- [x] **已修复并扩充。**
-
-测试体系当前含 26 项测试：trailer、todo/refspec、Git 输出/取消、stash、status、rebase edit、完整 staged append、冲突查询，以及 LLM SSE/deadline/cancel/错误脱敏。
-
-### CI-C. Release notes 双信息源漂移
-
-- [x] **已修复。**
-
-Release 工作流在创建 Release 前验证 `RELEASE.md` 含当前版本记录；测试、VSIX 内容或记录任一步失败都会阻止发布。
-
-### UX-1 / UX-2 / UX-3. 高风险操作、诊断与停靠引导
-
-- [x] **已在 0.3.0 完成。**
-
-- drop 前显示 short hash、subject 和历史重写确认；
-- edit 停靠 banner 展示当前目标以及 Continue / Abort 指引；
-- rebase/push/provider 失败写入 OutputChannel；rebase 冲突时枚举并自动打开冲突文件。
-
----
-
-## 2. 已确认但保留为 P2 的问题
-
-### R-11. append Abort 时两个 stash 的提示粒度
-
-- [ ] **保留规划。**
-
-**核验结论：正确但低优先级。**恢复失败时安全副本会保留，现有提示仍可更精细。
-
-**未修改原因：**当前行为优先保证数据不丢失；“打开 stash 列表”和精确恢复向导需要独立 UX/命令设计，列入 P2 stash 可见性。
-
-### R-15. commitDetail 的 shortstat 文本解析
-
-- [ ] **保留规划。**
-
-**核验结论：正确但影响范围有限。**merge 或特殊 Git 输出的统计展示可以更结构化。
-
-**未修改原因：**仅影响 hover 展示而非历史正确性；改为 `--numstat` 需要定义 merge/二进制文件的展示格式，列入 P2 性能/展示改进。
-
----
-
-## 3. 不成立或仅为建议的结论
-
-### R-12. 到目标 edit 前冲突会留下“无标识且无法找回”的 changeStash
-
-- [ ] **不修改。**
-
-**核验结论：不成立。**内部 stash 有固定命名，且保留 Git 原生暂停状态使用户可安全 Continue/Abort；自动 abort 反而可能丢弃用户进行中的冲突解决。
-
-### R-14. `--force-with-lease=${up.branch}` 只限定分支名
-
-- [ ] **不修改。**
-
-**核验结论：不成立。**当前普通 refspec 正是 `HEAD:refs/heads/<upstream branch>`，只保护该分支符合预期；评审 ref 刻意不加 lease。
-
-### R-17. 不使用 `--no-verify` 是问题
-
-- [ ] **不修改。**
-
-**核验结论：不成立。**保留 commit hooks 保护 Gerrit Change-Id 和项目质量门禁，绕过它们反而更不安全。
-
-### R-18. CSP 的 `style-src 'unsafe-inline'`
-
-- [ ] **不修改。**
-
-**核验结论：安全加固建议。**动态颜色使用 style 属性，用户数据用 `textContent` 渲染，无可复现 XSS 路径。收紧前需先重构动态样式。
-
-### R-19. RebaseViewProvider 文件过大
-
-- [ ] **保留 P2。**
-
-**核验结论：可维护性观察。**重构面广，先有覆盖后再拆分更安全。
-
-### R-20. 配置重复与动态导入风格
-
-- [ ] **保留 P2。**
-
-**核验结论：部分正确但非行为缺陷。**manifest 负责 VS Code schema，`config.ts` 负责运行时读取；单一来源生成需要独立工具链设计。
-
-### CI-D. 产物签名 / 多平台构建
-
-- [ ] **保留 P2。**
-
-**核验结论：增强建议。**JS VSIX 不要求平台编译；签名需要明确分发信任模型和密钥管理。
-
----
-
-## 4. 安全、并发与发布门禁
-
-| 项目 | 当前结论 |
-|---|---|
-| 命令注入 | Git 通过 `spawn("git", args)` 执行，不经过 shell。 |
-| Webview XSS | 用户内容使用 `textContent`；静态 banner 模板是唯一 `innerHTML` 使用点。 |
-| API key | 当前仍存于 settings，SecretStorage 迁移保留 P2。 |
-| 大 diff | Git runner 有 50 MiB 上限、超时、取消；列表虚拟化保留 P2。 |
-| 并发 | 写操作互斥，刷新 generation token + busy 队列避免过期状态。 |
-| Release | 版本一致性、typecheck、覆盖率测试、VSIX 必需/排除文件、RELEASE.md 记录均为发布门禁。 |
-
-Release 通过的步骤：
-
-1. `npm ci`；
-2. tag 与 `package.json.version` 一致；
-3. `npm run test:release`；
-4. VSIX 打包和内容验证；
-5. `RELEASE.md` 版本记录验证；
-6. 创建 GitHub Release 并上传 VSIX。
-
----
-
-## 5. 0.3.0 测试矩阵
-
-| 类型 | 文件 | 重点 |
-|---|---|---|
-| 逻辑 | `message.test.ts`、`rebaseEngine.test.ts`、`pushGuard.test.ts` | trailer、todo、refspec |
-| 边界 | `gitRunner.integration.test.ts` | 输出上限、取消、非零 Git 结果 |
-| Git 集成 | `commitLog.integration.test.ts`、`worktree.integration.test.ts` | status、冲突查询、stash、absolute git-path、edit stop |
-| 功能集成 | `appendStaged.integration.test.ts` | staged append、后续重放、未暂存恢复、stash 清理 |
-| HTTP mock | `llmClient.test.ts` | SSE、畸形事件、deadline、取消、脱敏 |
-
-P2 的完整计划见 [`../improvement/improvement.md`](../improvement/improvement.md)。
+P2 任务集中维护在 [`../improvement/improvement.md`](../improvement/improvement.md)，包括 stash 可见性、多仓库/搜索/squash/撤销、性能与虚拟列表、Provider 拆分、SecretStorage/l10n、发布签名，以及 3-0 / CR-4 的测试覆盖扩展。

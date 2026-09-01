@@ -37,6 +37,7 @@ export function runGit(args: string[], opts: GitRunOptions): Promise<GitResult> 
 
     let stdout = "";
     let stderr = "";
+    let outputBytes = 0;
     let stoppedReason: string | undefined;
     let settled = false;
     const maxBuffer = opts.maxBuffer ?? DEFAULT_MAX_BUFFER;
@@ -64,10 +65,12 @@ export function runGit(args: string[], opts: GitRunOptions): Promise<GitResult> 
         return;
       }
       const text = data.toString();
-      if (Buffer.byteLength(stdout) + Buffer.byteLength(stderr) + Buffer.byteLength(text) > maxBuffer) {
+      const bytes = Buffer.byteLength(text);
+      if (outputBytes + bytes > maxBuffer) {
         stop(`git ${args[0] ?? "command"} exceeded the ${maxBuffer}-byte output limit`);
         return;
       }
+      outputBytes += bytes;
       if (stream === "stdout") {
         stdout += text;
       } else {

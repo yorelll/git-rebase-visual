@@ -111,13 +111,33 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
   }
 
   resolveWebviewView(view: vscode.WebviewView): void {
-    if (!this.statusPollerStarted) {
-      // Git updates its index without changing workspace files. Poll only after
-      // the view opens, with a debounce to avoid repeated status commands.
-      this.statusPollerStarted = true;
-      this.statusPoller = setInterval(() => this.scheduleRefresh(), 1500);
-    }
     this.view = view;
+    this.startStatusPolling();
+    const stopPolling = () => {
+      if (this.statusPoller) {
+        clearInterval(this.statusPoller);
+        this.statusPoller = undefined;
+      }
+      if (this.refreshTimer) {
+        clearTimeout(this.refreshTimer);
+        this.refreshTimer = undefined;
+      }
+      this.statusPollerStarted = false;
+    };
+    view.onDidChangeVisibility(() => {
+      if (view.visible) {
+        this.startStatusPolling();
+        void this.refresh();
+      } else {
+        stopPolling();
+      }
+    });
+    view.onDidDispose(() => {
+      stopPolling();
+      if (this.view === view) {
+        this.view = undefined;
+      }
+    });
     view.webview.options = {
       enableScripts: true,
       localResourceRoots: [
@@ -131,6 +151,14 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
 
   private cwd(): string | undefined {
     return this.root ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  }
+
+  private startStatusPolling(): void {
+    if (this.statusPollerStarted) {
+      return;
+    }
+    this.statusPollerStarted = true;
+    this.statusPoller = setInterval(() => this.scheduleRefresh(), 1500);
   }
 
   private scheduleRefresh(): void {
@@ -323,7 +351,10 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
       "unlock",
       "appendStaged",
     ]);
-    if (hashActions.has(m.type) && !this.isCurrentCommitHash(m.hash)) {
+    const requiresCurrentCommit =
+      hashActions.has(m.type) ||
+      ((m.type === "openCompose" || m.type === "apply") && m.mode === "commit");
+    if (requiresCurrentCommit && !this.isCurrentCommitHash(m.hash)) {
       toast("warn", "commit 列表已更新，请刷新后重试。");
       await this.refresh();
       return;

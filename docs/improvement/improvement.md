@@ -79,7 +79,13 @@
 - 评估移除 CSP `style-src 'unsafe-inline'` 前，先将动态颜色转为安全 CSS class 或变量；
 - 增加 `vscode.l10n`，将硬编码中文提示外置。
 
-### P2-6. 发布增强
+### P2-6. 测试覆盖扩展（来自 3-0 / CR-4）
+
+- 为 `lockedInPush` 和 `pushRefspec` 增加本地 bare remote 集成测试，包括 `--force-with-lease` 与锁定拦截；
+- 为 append 增加锁定拒绝、已推送确认、edit 前冲突与外部 abort 恢复测试；
+- 为 `streamChat` 增加流读取途中取消和 timeout 的 HTTP mock 测试。
+
+### P2-7. 发布增强
 
 - Release notes 继续以 `RELEASE.md` 为人工记录、GitHub generate notes 为提交索引；必要时由脚本把版本段落同步到 release body；
 - 定义发布产物签名/校验策略后再引入签名；

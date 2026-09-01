@@ -19,6 +19,14 @@ test("runGit enforces an output limit", async (t) => {
   assert.match(result.stderr, /output limit/);
 });
 
+test("runGit tracks output bytes across stdout and stderr", async (t) => {
+  const cwd = createRepo();
+  t.after(() => removeRepo(cwd));
+  const result = await runGit(["config", "--list"], { cwd, maxBuffer: 16 * 1024 });
+  assert.equal(result.code, 0);
+  assert.ok(Buffer.byteLength(result.stdout) + Buffer.byteLength(result.stderr) <= 16 * 1024);
+});
+
 test("runGit honours an already-aborted signal", async (t) => {
   const cwd = createRepo();
   t.after(() => removeRepo(cwd));
