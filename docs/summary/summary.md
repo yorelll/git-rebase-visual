@@ -128,4 +128,6 @@ npm run package         # 编译并生成 VSIX
 - squash/fixup、多选、搜索、diff 比较、撤销和多远端；
 - 大仓库 patch-id 缓存、结构化变更统计和性能基准；
 
-详细结论、已修复项与未修改原因见 [`../review/review-report.md`](../review/review-report.md)。
+详细结论、已修复项与未修改原因见 [`../review/review-response.md`](../review/review-response.md)。
+
+外部版本化评审原文位于 `../review/code-review-<major>-<minor>-<patch>.md`；项目回复按相同版本号追加到 `review-response.md`。

@@ -1,6 +1,8 @@
 # Git Rebase Visual — 后续改进路线图
 
-> 本文档只记录尚未实施的改进项。已完成的 review 整改、测试和 Release 门禁见 [`../review/review-report.md`](../review/review-report.md)，当前架构见 [`../summary/summary.md`](../summary/summary.md)。
+> 本文档只记录尚未实施的改进项。已完成的 review 整改、测试和 Release 门禁见 [`../review/review-response.md`](../review/review-response.md)，当前架构见 [`../summary/summary.md`](../summary/summary.md)。
+>
+> 外部版本化评审使用 `code-review-<major>-<minor>-<patch>.md`；项目回复只追加到 `review-response.md` 的同版本章节。
 
 ## 已完成（从待办移除）
 

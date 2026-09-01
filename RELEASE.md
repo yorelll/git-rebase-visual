@@ -104,8 +104,15 @@ code --install-extension git-rebase-visual-<version>.vsix
 
 ### 更新记录
 
+- **0.3.1** — 评审整改与评审归档规范：
+  - 修复 commit message compose/apply 在列表更新后使用过期 hash 可能触发无意义 rebase 的问题；现在会拒绝过期 commit 操作并要求刷新。
+  - 面板隐藏或 dispose 时停止 index 轮询并释放 refresh timer，重新显示时恢复自动状态同步，避免后台 Git 空转。
+  - 优化 Git 输出上限计数为常数时间累计，避免大型输出场景的重复字节扫描。
+  - 将版本化评审规则固化到 `CLAUDE.md`：评审原文使用 `code-review-<major>-<minor>-<patch>.md`，项目回复只追加到 `docs/review/review-response.md` 的同版本章节。
+  - 将既有评审原文重命名为 `code-review-0-3-0.md`，将回复文档重命名为 `review-response.md`，并更新文档链接。
+  - 测试套件扩展至 27 项。
+
 - **0.3.0** — P1 体验、可靠性与诊断增强：
-  - AI message 改为流式生成；新增 `llm.timeoutMs`（默认 120 秒）、用户取消和安全的认证/限流/服务端错误提示。
   - Push 显示可取消进度；新增 **Git Rebase Visual** OutputChannel 记录 push 与 provider 操作失败摘要。
   - 暂存状态通过文件事件与节流 index 轮询自动刷新，终端 `git add` 后无需手动 Refresh 即可使用相关菜单。
   - 删除 commit 前增加目标与历史重写确认；rebase edit 停靠横幅显示当前目标和 Continue/Abort 指引。
