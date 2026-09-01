@@ -2,8 +2,9 @@
 
 > 本文件只保存对外部代码评审的回复；不修改任何 `code-review-*.md` 原文。
 >
-> ## 文件与章节命名规则
+> 开始新评审前，请先查看 [`code-review-commit.md`](code-review-commit.md) 确认哪些精确 commit 已被独立评审；完成评审后必须在该台账中记录 review 覆盖范围。
 >
+> ## 文件与章节命名规则
 > - 每个版本的独立评审文件必须命名为：`code-review-<major>-<minor>-<patch>.md`，例如 `code-review-0-3-0.md`。
 > - 对应回复只追加到本文件，章节标题为：`## <major>-<minor>-<patch> 回复`。
 > - 已写入的回复章节不可重写或删除；新的评审只新增下一版本章节，例如 `0-4-0 回复`。

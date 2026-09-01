@@ -17,6 +17,14 @@ The project keeps external versioned code-review reports and project responses s
 - A code-review report assesses that version's code. Do **not** edit, rewrite, rename, merge, or delete an existing `code-review-*.md` while replying to it.
 - A new review always receives a new versioned filename. Never overwrite a previous review.
 
+### Review coverage ledger
+
+- Before beginning a code review, read `docs/review/code-review-commit.md` first.
+- Treat a commit as already reviewed only when its exact full SHA is recorded in that ledger with a review report path. Do not repeat an already recorded review unless the user explicitly requests a re-review.
+- Review every commit reachable from the requested target that is not covered by the ledger. State the reviewed SHA/range in the new report's baseline section.
+- Immediately after completing a review, update `code-review-commit.md` in the same change with the exact commit SHA, subject, review filename, response filename (if one exists), review status, and date. Never remove historical ledger entries.
+- A review response or implementation fix does not make its own commit reviewed. It requires a subsequent independent `code-review-<major>-<minor>-<patch>.md` entry.
+
 ### Review response
 
 - Write project responses only in `docs/review/review-response.md`.

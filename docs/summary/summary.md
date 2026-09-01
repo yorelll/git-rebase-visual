@@ -130,4 +130,4 @@ npm run package         # 编译并生成 VSIX
 
 详细结论、已修复项与未修改原因见 [`../review/review-response.md`](../review/review-response.md)。
 
-外部版本化评审原文位于 `../review/code-review-<major>-<minor>-<patch>.md`；项目回复按相同版本号追加到 `review-response.md`。
+外部版本化评审原文位于 `../review/code-review-<major>-<minor>-<patch>.md`；项目回复按相同版本号追加到 `review-response.md`。开始评审前需读取 [`../review/code-review-commit.md`](../review/code-review-commit.md) 确认未覆盖 commit，完成后将精确 SHA 与对应报告写回该台账。
