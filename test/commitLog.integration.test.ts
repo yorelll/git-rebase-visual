@@ -40,7 +40,7 @@ test("conflictedFiles returns no paths in a clean repository", async (t) => {
   assert.deepEqual(await conflictedFiles(cwd), []);
 });
 
-test("patchId is stable across a cherry-pick and served by the session cache", async (t) => {
+test("patchId is stable across a rewritten clone and served by the session cache", async (t) => {
   const cwd = createRepo();
   t.after(() => {
     clearPatchIdCache();
@@ -49,20 +49,25 @@ test("patchId is stable across a cherry-pick and served by the session cache", a
   const base = commitFile(cwd, "base.txt", "base\n", "base");
   const first = commitFile(cwd, "one.txt", "one\n", "first");
   commitFile(cwd, "two.txt", "two\n", "second");
-  // Rewrite the same change elsewhere: cherry-picking `first` onto a side
-  // branch at `base` yields a new hash but the identical patch-id. (The base
-  // commit keeps `first` from being a root commit, whose diff-tree cannot
-  // establish a patch-id.) The side branch avoids resetting the worktree, so
-  // the cherry-pick cleanly re-applies the new-file change.
-  const branchName = git(cwd, ["symbolic-ref", "--short", "HEAD"]);
-  git(cwd, ["switch", "-c", "side", base]);
-  git(cwd, ["cherry-pick", first]);
-  git(cwd, ["switch", branchName]);
 
-  const rewritten = git(cwd, ["rev-parse", "side"]);
-  assert.notEqual(rewritten, first);
+  // Rewrite the same change as a fresh commit object with a different
+  // timestamp: `commit-tree` reuses the exact tree (same diff → same
+  // patch-id) but always yields a different hash. Unlike `git cherry-pick`,
+  // this is deterministic — a cherry-pick that lands in the same second as the
+  // original commit can reuse the identical commit object (same hash), which
+  // made the old `assert.notEqual` flaky on fast CI runners.
+  const parent = git(cwd, ["rev-parse", `${first}^`]);
+  const rewritten = git(cwd, [
+    "commit-tree",
+    `${first}^{tree}`,
+    "-p",
+    parent,
+    "-m",
+    "rewritten first",
+  ]);
   const pidBefore = await patchId(cwd, first);
   const pidAfter = await patchId(cwd, rewritten);
+  assert.notEqual(rewritten, first);
   assert.ok(pidBefore);
   assert.equal(pidAfter, pidBefore);
   // Second lookup is cached — same result.
