@@ -65,3 +65,55 @@ test("LLM requests honor caller cancellation", async () => {
     await assert.rejects(() => chat(cfg, messages, { signal: controller.signal }), /cancelled by test/);
   });
 });
+
+test("streamChat mid-stream cancellation stops draining the response", async () => {
+  const chunks: string[] = [];
+  const controller = new AbortController();
+  // Stream one delta then hold the connection open. The hardening races each
+  // `reader.read()` against the abort signal, so the loop must stop promptly
+  // (no further deltas) and surface the caller's abort reason.
+  //
+  // The abort fires from within the server handler, so the abort dispatch runs
+  // in the streamChat flow (not from a detached timer that could surface the
+  // rejection after the test body completes).
+  await withServer((_req, res) => {
+    res.writeHead(200, { "Content-Type": "text/event-stream" });
+    res.write('data: {"choices":[{"delta":{"content":"partial"}}]}\n\n');
+    setTimeout(() => {
+      res.end();
+      // Abort listeners have already run by the time this returns; the abort
+      // dispatch may rethrow one of their rejections, so seal it — the test
+      // only asserts the stream rejects with the reason.
+      try {
+        controller.abort(new Error("user cancelled"));
+      } catch {
+        // ignore — the abort was already delivered to all listeners
+      }
+    }, 5);
+  }, async (cfg) => {
+    await assert.rejects(
+      () => streamChat(cfg, messages, (c) => chunks.push(c), { signal: controller.signal }),
+      /user cancelled/
+    );
+    // Let undici's response-body teardown settle inside the test so no async
+    // activity outlives it (node:test reports it as post-test activity).
+    await new Promise((r) => setTimeout(r, 20));
+  });
+  // Only the first delta arrived before cancellation.
+  assert.deepEqual(chunks, ["partial"]);
+});
+
+test("streamChat honours the deadline mid-stream", async () => {
+  const chunks: string[] = [];
+  await withServer((_req, res) => {
+    res.writeHead(200, { "Content-Type": "text/event-stream" });
+    res.write('data: {"choices":[{"delta":{"content":"partial"}}]}\n\n');
+    // The stream stays open, forcing the client deadline to fire mid-read.
+  }, async (cfg) => {
+    await assert.rejects(
+      () => streamChat(cfg, messages, (c) => chunks.push(c), { timeout: 20 }),
+      /timed out/
+    );
+  });
+  assert.deepEqual(chunks, ["partial"]);
+});

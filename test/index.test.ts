@@ -1,8 +1,11 @@
+import "./appendGuard.integration.test";
 import "./appendStaged.integration.test";
 import "./commitLog.integration.test";
 import "./gitRunner.integration.test";
 import "./llmClient.test";
 import "./message.test";
+import "./pushGuard.integration.test";
 import "./pushGuard.test";
 import "./rebaseEngine.test";
+import "./secretsAccess.test";
 import "./worktree.integration.test";

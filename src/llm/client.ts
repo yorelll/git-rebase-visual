@@ -119,8 +119,55 @@ export async function chat(
 }
 
 /**
+ * Creates a promise that resolves when the caller aborts or after `ms`.
+ * Used to race the next SSE read against cancellation/timeout so a server that
+ * stops sending data cannot leave `reader.read()` pending forever. Resolves
+ * with a discriminant so the caller can distinguish an abort from a timeout.
+ *
+ * The abort is captured by each timer tick re-checking `signal.aborted`, which
+ * is closed over and observed even when the abort races the listener
+ * registration (no "unregistered abort" window, no stray timers keeping the
+ * event loop alive).
+ */
+async function abortOrTimeout(
+  options: LlmRequestOptions,
+  cancelled?: AbortSignal
+): Promise<{ kind: "abort"; reason: unknown } | { kind: "timeout"; cancelled: boolean }> {
+  const timeout = options.timeout ?? DEFAULT_TIMEOUT;
+  if (options.signal?.aborted) {
+    return { kind: "abort", reason: options.signal.reason };
+  }
+  return new Promise((resolve) => {
+    // `cancelled` lets the read loop tear this pending race down when the
+    // reader wins, so no stray timer keeps the event loop alive afterwards.
+    const cleanup = () => {
+      clearTimeout(timer);
+      cancelled?.removeEventListener("abort", onCancelled);
+      options.signal?.removeEventListener("abort", onAbort);
+    };
+    const finish = (out: { kind: "abort"; reason: unknown } | { kind: "timeout"; cancelled: boolean }) => {
+      if (finished) {
+        return;
+      }
+      finished = true;
+      cleanup();
+      resolve(out);
+    };
+    const timer = setTimeout(() => {
+      finish({ kind: "timeout", cancelled: false });
+    }, timeout);
+    const onAbort = () => finish({ kind: "abort", reason: options.signal?.reason });
+    const onCancelled = () => finish({ kind: "timeout", cancelled: true });
+    let finished = false;
+    options.signal?.addEventListener("abort", onAbort, { once: true });
+    cancelled?.addEventListener("abort", onCancelled, { once: true });
+  });
+}
+
+/**
  * Streams an OpenAI-compatible chat completion. Invokes `onDelta` for each
- * content chunk and resolves with the complete generated text.
+ * content chunk and resolves with the complete generated text. Each SSE read
+ * is raced against cancellation/deadline, so an idle connection cannot hang.
  */
 export async function streamChat(
   cfg: LlmConfig,
@@ -135,7 +182,11 @@ export async function streamChat(
   }
 
   const reader = pending.response.body.getReader();
-  const onAbort = () => void reader.cancel(options.signal?.reason);
+  const onAbort = () => {
+    // The body may already be closing; swallow the cancel() rejection so an
+    // in-flight abort never surfaces as an unhandled rejection.
+    reader.cancel(options.signal?.reason).catch(() => undefined);
+  };
   options.signal?.addEventListener("abort", onAbort, { once: true });
   try {
     const decoder = new TextDecoder();
@@ -143,12 +194,39 @@ export async function streamChat(
     let full = "";
 
     while (true) {
-      const { done, value } = await reader.read();
+      // An egoist server that stops emitting bytes (no timeout configured)
+      // would otherwise leave `reader.read()` pending indefinitely. Race each
+      // read against cancellation/deadline; tear the losing race down when the
+      // read wins so no stray timer outlives the loop.
+      const raceController = new AbortController();
+      // The abort listener also calls reader.cancel(), which rejects the
+      // in-flight read. Absorb that rejection so the losing side never
+      // surfaces as an unhandled rejection when the caller aborts mid-read.
+      const read = reader.read().then((r) => {
+        raceController.abort(); // read won — retire the abortOrTimeout timer
+        return r;
+      });
+      read.catch(() => undefined); // discard the loser's rejection
+      const anyRead = await Promise.race([
+        read,
+        abortOrTimeout(options, raceController.signal),
+      ]);
       throwIfTimedOut(pending);
-      if (done) {
+      if ("kind" in anyRead && anyRead.kind === "abort") {
+        throw anyRead.reason instanceof Error
+          ? anyRead.reason
+          : new Error(String(anyRead.reason ?? "LLM request cancelled."));
+      }
+      if ("kind" in anyRead && anyRead.kind === "timeout") {
+        if (anyRead.cancelled) {
+          continue; // the read actually won; this was the torn-down race
+        }
+        throw new Error("LLM request timed out. Please try again.");
+      }
+      if (anyRead.done) {
         break;
       }
-      buffer += decoder.decode(value, { stream: true });
+      buffer += decoder.decode(anyRead.value, { stream: true });
       const lines = buffer.split("\n");
       buffer = lines.pop() ?? "";
       for (const raw of lines) {
@@ -176,6 +254,7 @@ export async function streamChat(
   } finally {
     pending.finish();
     options.signal?.removeEventListener("abort", onAbort);
+    await reader.cancel().catch(() => undefined);
     reader.releaseLock();
   }
 }

@@ -5,6 +5,7 @@ import * as path from "path";
 import {
   stashApplyIndexBySha,
   stashDropBySha,
+  stashList,
   stashPopBySha,
   stashPush,
   stashPushKeepIndex,
@@ -53,6 +54,30 @@ test("keep-index stash moves worktree-only changes without losing the index", as
   assert.equal(popped.ok, true);
   assert.equal(popped.gone, false);
   assert.match(git(cwd, ["status", "--porcelain"]), /^\?\? untracked\.txt/m);
+});
+
+test("stashList reports exact stash names and stable shas", async (t) => {
+  const cwd = createRepo();
+  t.after(() => removeRepo(cwd));
+  commitFile(cwd, "tracked.txt", "base\n", "initial");
+
+  fs.writeFileSync(path.join(cwd, "one.txt"), "one\n", "utf8");
+  const first = await stashPush(cwd);
+  assert.ok(first);
+  fs.writeFileSync(path.join(cwd, "two.txt"), "two\n", "utf8");
+  const second = await stashPush(cwd);
+  assert.ok(second);
+
+  const entries = await stashList(cwd);
+  assert.equal(entries.length, 2);
+  assert.equal(entries[0].sha, second);
+  assert.equal(entries[1].sha, first);
+  assert.match(entries[0].name, /^stash@\{\d+\}$/);
+  assert.notEqual(entries[0].name, entries[1].name);
+  // Empty list when no stashes remain.
+  await stashDropBySha(cwd, second);
+  await stashDropBySha(cwd, first);
+  assert.deepEqual(await stashList(cwd), []);
 });
 
 test("stash helpers identify a manually removed stash without failing", async (t) => {

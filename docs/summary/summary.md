@@ -1,6 +1,6 @@
 # Git Rebase Visual — 功能、架构与测试总结
 
-> 当前基线：v0.3.0 P1 功能开发工作树。本文同步描述现有功能、核心保护机制、测试体系和发布门禁。
+> 当前基线：v0.4.0 P2 高价值项落地与可靠性增强。
 
 ## 1. 项目定位
 
@@ -37,7 +37,7 @@ Webview (media/main.js)
 ```text
 确认 staged 存在
   ├─ 拒绝被锁定的目标 commit
-  ├─ 若目标已在 upstream，明确警告需要 force-with-lease
+  ├─ 若目标已在 upstream：确认框要求显式二次确认「我已推送同内容，仍要改写」
   ├─ stashPush(-u) 保存完整初始快照
   ├─ interactive rebase：目标 action = edit
   ├─ 校验 stopped SHA 是目标 SHA
@@ -53,7 +53,7 @@ Webview (media/main.js)
 
 - 暂存区为空：菜单禁用，后端也会复查并拒绝。
 - 目标已锁定：必须先解除锁定，避免 amend 改变 patch-id 后失去推送保护。
-- 目标已推送：确认框明确提示公开历史将被改写，后续需 `--force-with-lease`。
+- 目标已推送：确认框明确提示公开历史将被改写并要求显式二次确认，后续需 `--force-with-lease`。
 - 发生重放冲突：保持 Git 原生 rebase 状态，面板 Continue/Abort 负责恢复 pending append stash。
 - 所有写操作由 provider 互斥；refresh 采用 generation token，避免旧请求覆盖当前 commit 快照。
 
@@ -74,7 +74,8 @@ src/
 ├─ lock/lockStore.ts               patch-id 持久化锁
 ├─ llm/client.ts                   OpenAI-compatible chat / streamChat、deadline、错误脱敏
 ├─ llm/messageGen.ts               diff 和提示词构造、流式生成入口
-└─ ui/rebaseViewProvider.ts        webview 协调、状态机、历史操作、OutputChannel、自动刷新
+├─ ui/rebaseViewProvider.ts        webview 协调、状态机、历史操作、OutputChannel、自动刷新
+├─ ui/secretsAccess.ts            SecretStorage 访问器注入桩（安全降级）
 
 media/main.js                      webview DOM、拖拽、菜单、弹窗
 .github/workflows/release.yml      tag 发布门禁与 GitHub Release
@@ -93,9 +94,11 @@ media/main.js                      webview DOM、拖拽、菜单、弹窗
 | Git 集成 | `test/commitLog.integration.test.ts` | staged/unstaged 状态、commit 顺序、absolute git-path、edit stop |
 | Git 集成 | `test/worktree.integration.test.ts` | stash apply/pop/drop、keep-index、外部删除 stash |
 | 功能集成 | `test/appendStaged.integration.test.ts` | staged append、amend、后续重放、未暂存恢复、stash 清理 |
-| LLM HTTP mock | `test/llmClient.test.ts` | SSE delta/`[DONE]`/畸形事件、deadline、取消、错误正文脱敏 |
-
-当前测试套件含 26 项测试。
+| LLM HTTP mock | `test/llmClient.test.ts` | SSE delta、畸形事件、deadline、预取消、流读取途中取消/超时、错误正文脱敏 |
+| Git 集成（推送/守卫） | `test/pushGuard.integration.test.ts` | bare-remote：force-with-lease 并发拒绝、lockedInPush 拦截/解锁 |
+| Git 集成（append 守卫） | `test/appendGuard.integration.test.ts` | 已推 upstream 守卫、锁定 commit patch-id 跨重写稳定 |
+| 注入桩 | `test/secretsAccess.test.ts` | SecretStorage 访问器安全降级与委托 |
+当前测试套件含 40 项测试（覆盖条目的完整裁决见 improvement.md）。
 
 命令：
 
@@ -123,11 +126,12 @@ npm run package         # 编译并生成 VSIX
 
 ## 7. 已知后续工作（P2 规划）
 
-- 多根工作区、列表虚拟化、provider 模块拆分、SecretStorage 和完整 l10n；
-- append/stash 恢复可见性与一键打开 stash 列表；
-- squash/fixup、多选、搜索、diff 比较、撤销和多远端；
-- 大仓库 patch-id 缓存、结构化变更统计和性能基准；
+- ~~大仓库 patch-id 缓存~~（✅ v0.4.0 已实施：session cache）与结构化变更统计（✅ v0.4.0 已实施：`--numstat`）；
+- ~~append/stash 恢复可见性~~（✅ v0.4.0 已实施：精确 stash@{n} 提示 + `stashList` 命令）；
+- 多根工作区、`all` 模式虚拟滚动/上限、provider 模块拆分、SecretStorage 完整读写迁移和 l10n；
+- squash/fixup、多选合并、搜索过滤、双 commit diff、历史撤销和多远端；
+- 性能测试仓库与刷新延迟基准；
 
-详细结论、已修复项与未修改原因见 [`../review/review-response.md`](../review/review-response.md)。
+详细结论、已修复项与未修改原因见 [`../review/review-response-0-4-0.md`](../review/review-response-0-4-0.md)。
 
-外部版本化评审原文位于 `../review/code-review-<major>-<minor>-<patch>.md`；项目回复按相同版本号追加到 `review-response.md`。开始评审前需读取 [`../review/code-review-commit.md`](../review/code-review-commit.md) 确认未覆盖 commit，完成后将精确 SHA 与对应报告写回该台账。
+外部版本化评审原文位于 `../review/code-review-<major>-<minor>-<patch>.md`；项目回复按相同版本号放在 `review-response-<major>-<minor>-<patch>.md`。开始评审前需读取 [`../review/code-review-commit.md`](../review/code-review-commit.md) 确认未覆盖 commit，完成后将精确 SHA 与对应报告写回该台账。

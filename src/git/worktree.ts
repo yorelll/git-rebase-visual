@@ -1,5 +1,13 @@
 import { git, runGit } from "./gitRunner";
 
+export interface StashEntry {
+  /** Human-readable stash name, e.g. `stash@{2}`. */
+  name: string;
+  /** Full stash commit sha (stable identity for pop/apply/drop). */
+  sha: string;
+  subject: string;
+}
+
 /**
  * Stashes all changes (including untracked) so a rebase can run on a clean
  * tree. Returns the stash commit sha when something was stashed, or undefined
@@ -7,8 +15,11 @@ import { git, runGit } from "./gitRunner";
  * that we later use to pop exactly our stash (unaffected by rebase rewriting
  * other commit hashes, and robust if the user creates other stashes).
  */
-export async function stashPush(cwd: string): Promise<string | undefined> {
-  return stash(cwd, ["--include-untracked"], "git-rebase-visual auto-stash");
+export async function stashPush(
+  cwd: string,
+  message: string = "git-rebase-visual auto-stash"
+): Promise<string | undefined> {
+  return stash(cwd, ["--include-untracked"], message);
 }
 
 /** Stashes unstaged changes while leaving the existing index intact. */
@@ -67,6 +78,27 @@ export async function stashApplyIndexBySha(
   }
   const res = await runGit(["stash", "apply", "--index", `stash@{${idx}}`], { cwd });
   return { ok: res.code === 0, gone: false, message: (res.stderr || res.stdout).trim() };
+}
+
+/**
+ * Returns the current stash list (newest first). Empty when no stashes exist.
+ */
+export async function stashList(cwd: string): Promise<StashEntry[]> {
+  const res = await runGit(
+    ["stash", "list", "--format=%gd%x1f%H%x1f%s"],
+    { cwd }
+  );
+  if (res.code !== 0) {
+    return [];
+  }
+  return res.stdout
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const [name, sha, subject] = line.split("\x1f");
+      return { name, sha, subject };
+    });
 }
 
 /** Removes a stash by its stable commit sha. */

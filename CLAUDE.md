@@ -27,14 +27,14 @@ The project keeps external versioned code-review reports and project responses s
 
 ### Review response
 
-- Write project responses only in `docs/review/review-response.md`.
-- For a report named `code-review-X-Y-Z.md`, append one new top-level section named exactly:
+- Write project responses in versioned files `docs/review/review-response-<major>-<minor>-<patch>.md`.
+- For a report named `code-review-X-Y-Z.md`, create/replace the response file for that version, `review-response-X-Y-Z.md`, with one top-level section named exactly:
 
   ```markdown
   ## X-Y-Z 回复（对应 `code-review-X-Y-Z.md`）
   ```
 
-- Do not revise prior response sections after a later review arrives. Add the next version section instead; for example `0-4-0 回复` after `0-3-0 回复`.
+- Do not revise prior response files after a later review arrives. Add the next version file instead; for example `review-response-0-4-0.md` after `review-response-0-3-0.md`.
 - Each response section must include:
   1. the review baseline/version;
   2. a decision for every finding: fixed, intentionally not changed, or deferred;

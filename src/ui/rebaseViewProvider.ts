@@ -15,6 +15,8 @@ import {
   workingStatus,
   isDirty,
   conflictedFiles,
+  isAncestor,
+  checkGitFeature,
 } from "../git/commitLog";
 import {
   executeRebase,
@@ -57,9 +59,11 @@ import {
   getAutoStash,
   isLlmConfigured,
 } from "../config";
+import { SecretsAccessModule, fromSecretStorage } from "./secretsAccess";
 
 const PENDING_STASH_KEY = "gitRebaseVisual.pendingStash";
 const PENDING_APPEND_KEY = "gitRebaseVisual.pendingAppend";
+const LLM_APIKEY_SECRET = "gitRebaseVisual.llmApiKey";
 
 interface PendingAppend {
   changeStash: string;
@@ -202,6 +206,22 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
       return;
     }
     this.root = root;
+
+    // Startup capability check: surface a clear warning banner (and continue in
+    // a degraded read-only fashion) when the installed Git is too old or missing
+    // features the interactive edit path relies on.
+    const gitOk = await checkGitFeature(root);
+    if (!isCurrent()) {
+      return;
+    }
+    if (!gitOk.ok) {
+      postCurrent({
+        type: "state",
+        error: gitOk.message ?? "Git 环境异常。",
+        rebaseInProgress: false,
+      });
+      return;
+    }
 
     const rebaseInProgress = await isRebaseInProgress(root);
 
@@ -573,13 +593,26 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
       return; // user already restored it — nothing to do
     }
     if (!res.ok) {
+      // Show the exact stash name (stash@{n}) so the "manual restore" hint is
+      // actionable: identify it from the stable sha.
+      const name = await this.stashNameBySha(cwd, sha);
       toast(
         "warn",
-        `恢复自动 stash 时有冲突：${res.message}。stash 仍保留，请手动解决后 git stash pop。`
+        `恢复自动 stash 时有冲突：${res.message}。安全副本 ${name}（stash: ${sha.slice(0, 7)}）仍保留，请使用 “git stash list” / “git stash pop ${name}” 手动恢复。`
       );
     } else {
-      toast("info", "已恢复自动 stash 的改动。");
+      toast("info", "已恢复自动 stash 的改动（已弹出 stash@{0}/原 stash）。");
     }
+  }
+
+  /** Resolves the human-readable stash name (stash@{n}) for a stash commit sha. */
+  private async stashNameBySha(cwd: string, sha: string): Promise<string> {
+    const list = await runGit(["stash", "list", "--format=%H"], { cwd });
+    if (list.code !== 0) {
+      return "对应 stash";
+    }
+    const idx = list.stdout.split("\n").map((l) => l.trim()).filter(Boolean).indexOf(sha);
+    return idx >= 0 ? `stash@{${idx}}` : "对应 stash";
   }
 
   /** Restores stashes recorded while appending staged changes to a commit. */
@@ -595,14 +628,16 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     if (restoreOriginalIndex) {
       const restore = await stashApplyIndexBySha(cwd, pending.changeStash);
       if (!restore.gone && !restore.ok) {
-        toast("warn", `恢复原始暂存区时有冲突：${restore.message}。stash 仍保留，请手动恢复。`);
+        const name = await this.stashNameBySha(cwd, pending.changeStash);
+        toast("warn", `恢复原始暂存区时有冲突：${restore.message}。安全副本 ${name}（stash: ${pending.changeStash.slice(0, 7)}）仍保留，请用 “git stash list” / “git stash apply --index ${name}” 手动恢复。`);
         return;
       }
     }
     if (pending.unstagedStash) {
       const restore = await stashPopBySha(cwd, pending.unstagedStash);
       if (!restore.gone && !restore.ok) {
-        toast("warn", `恢复未暂存改动时有冲突：${restore.message}。stash 仍保留，请手动恢复。`);
+        const name = await this.stashNameBySha(cwd, pending.unstagedStash);
+        toast("warn", `恢复未暂存改动时有冲突：${restore.message}。安全副本 ${name}（stash: ${pending.unstagedStash.slice(0, 7)}）仍保留，请用 “git stash list” / “git stash pop ${name}” 手动恢复。`);
         return;
       }
     }
@@ -614,7 +649,8 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
   private async restoreAppendSnapshot(cwd: string, sha: string): Promise<void> {
     const restore = await stashApplyIndexBySha(cwd, sha);
     if (!restore.gone && !restore.ok) {
-      toast("warn", `恢复原始改动时有冲突：${restore.message}。stash 仍保留，请手动恢复。`);
+      const name = await this.stashNameBySha(cwd, sha);
+      toast("warn", `恢复原始改动时有冲突：${restore.message}。安全副本 ${name}（stash: ${sha.slice(0, 7)}）仍保留，请用 “git stash list” / “git stash apply --index ${name}” 手动恢复。`);
       return;
     }
     await stashDropBySha(cwd, sha);
@@ -640,7 +676,7 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
       );
       return { proceed: false, stashed: false };
     }
-    const sha = await stashPush(cwd);
+    const sha = await stashPush(cwd, "git-rebase-visual auto-stash");
     if (sha) {
       await this.setPendingStash(root, sha);
     }
@@ -716,20 +752,26 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
       toast("warn", "目标 commit 已锁定。请先解除锁定，再追加暂存区文件。");
       return;
     }
-
+    // Rejection guard: never amend a commit that is already on the local
+    // upstream. Doing so would silently rewrite already-shared history, and the
+    // later --force-with-lease push would abort (remote moved on) or clobber.
     const upstream = await runGit(["rev-parse", "--verify", "--quiet", "@{upstream}"], { cwd });
     const alreadyPushed =
-      upstream.code === 0 &&
-      (await runGit(["merge-base", "--is-ancestor", hash, "@{upstream}"], { cwd })).code === 0;
+      upstream.code === 0 && (await isAncestor(cwd, hash, "@{upstream}"));
     const pushedWarning = alreadyPushed
       ? "该 commit 已推送到 upstream，完成后需要使用 --force-with-lease 更新远端。"
       : "";
     const confirm = await vscode.window.showWarningMessage(
       `将暂存区文件追加到 ${commit.shortHash} “${commit.subject}”？这会改写该 commit 及其后的历史。${pushedWarning}`,
       { modal: true },
-      "追加"
+      ...(alreadyPushed ? ["取消", "我已推送同内容，仍要改写"] : ["追加"])
     );
-    if (confirm !== "追加") {
+    if (!alreadyPushed && confirm !== "追加") {
+      return;
+    }
+    // Never force an append onto a commit that is already on upstream: the only
+    // acceptable confirmation is the explicit "still rewrite" acknowledgment.
+    if (alreadyPushed && confirm !== "我已推送同内容，仍要改写") {
       return;
     }
 
@@ -943,11 +985,40 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
       toast("info", "工作区干净，无需 stash。");
       return;
     }
-    const sha = await stashPush(cwd);
+    const sha = await stashPush(cwd, "git-rebase-visual manual stash");
     if (sha) {
       toast("info", "已 stash 未提交的改动。");
     }
     await this.refresh();
+  }
+
+  /**
+   * Opens the "Git Stash" view or the Git Lens stash explorer when available;
+   * falls back to listing stashes in the Output channel with the exact
+   * `stash@{n}` names.
+   */
+  public async showStashList(): Promise<void> {
+    // The Git extension may not be installed; `executeCommand` rejects for
+    // unknown commands, so fall back to the Output-channel listing.
+    try {
+      const opened = await vscode.commands.executeCommand<boolean>("git.openStash");
+      if (opened) {
+        return;
+      }
+    } catch {
+      // fall through to the local listing
+    }
+    const cwd = this.cwd();
+    if (!cwd) {
+      return;
+    }
+    const res = await runGit(["stash", "list", "--format=%gd %H %s"], { cwd });
+    if (res.code !== 0 || !res.stdout.trim()) {
+      toast("info", "没有可显示的 stash。");
+      return;
+    }
+    this.log("stash", `stash list:\n${res.stdout.trim()}`);
+    toast("info", "stash 列表已写入 Output 面板 (Git Rebase Visual)。");
   }
 
   /** Manual pop of the most recent stash. */
@@ -1060,8 +1131,16 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
       }
     }
 
+    // Show a hint when the user is pushing to a review ref while the API key is
+    // only stored in settings (not yet migrated to SecretStorage) — the key may
+    // be absent from the pushed ref's configured authentication.
+    const secretApiKey = await SecretsAccessModule.get().get(LLM_APIKEY_SECRET);
+    const reviewHint =
+      /:refs\/for\//.test(refspec) && isLlmConfigured() && !secretApiKey
+        ? "\n（提示：LLM API key 仍保存在 settings 中；若评审推送依赖该凭据，建议迁移到 SecretStorage。）"
+        : "";
     const confirm = await vscode.window.showWarningMessage(
-      `${label}？（${refspec}）`,
+      `${label}？（${refspec}）${reviewHint}`,
       { modal: true },
       "Push"
     );

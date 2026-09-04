@@ -18,6 +18,54 @@ const SEP = "\x1f"; // unit separator, safe inside git format
 const REC = "\x1e"; // record separator
 
 /**
+ * The minimum Git version the extension supports (2.31.0, the first Git with
+ * `--path-format=absolute`). The installed Git revision is probed lazily at
+ * first use and cached for the session.
+ */
+export const MIN_GIT_VERSION = [2, 31, 0] as const;
+
+let cachedGitVersion: string | undefined;
+
+/** Returns `git --version`'s version string, or undefined when git is missing. */
+export async function gitVersion(cwd: string): Promise<string | undefined> {
+  if (cachedGitVersion !== undefined) {
+    return cachedGitVersion;
+  }
+  const res = await runGit(["--version"], { cwd });
+  const match = res.stdout.match(/\d+(?:\.\d+)+/);
+  cachedGitVersion = match?.[0] ?? undefined;
+  return cachedGitVersion;
+}
+
+/**
+ * True when the installed Git is at least `MIN_GIT_VERSION`. Accepts the
+ * optional feature name to be reported when the check fails; a missing git
+ * binary reports a clear failure too.
+ */
+export async function checkGitFeature(
+  cwd: string,
+  feature: string = "git rebase"
+): Promise<{ ok: boolean; message?: string }> {
+  const version = await gitVersion(cwd);
+  if (!version) {
+    return { ok: false, message: "Git not found. Install Git and reopen this panel." };
+  }
+  const parsed = version.split(".").map((n) => Number(n) || 0);
+  const tooOld =
+    parsed[0] < MIN_GIT_VERSION[0] ||
+    (parsed[0] === MIN_GIT_VERSION[0] &&
+      (parsed[1] < MIN_GIT_VERSION[1] ||
+        (parsed[1] === MIN_GIT_VERSION[1] && (parsed[2] ?? 0) < MIN_GIT_VERSION[2])));
+  if (tooOld) {
+    return {
+      ok: false,
+      message: `Git ${version} is too old for ${feature}. Git ${MIN_GIT_VERSION.join(".")} or newer is required.`,
+    };
+  }
+  return { ok: true };
+}
+
+/**
  * Resolves the git rev-range expression for the configured display range.
  * Returns undefined when the range cannot be resolved (e.g. no upstream set).
  */
@@ -172,6 +220,22 @@ export async function fullMessage(cwd: string, hash: string): Promise<string> {
   return git(["log", "-1", "--pretty=format:%B", hash], { cwd });
 }
 
+/**
+ * True when `ancestor` is an ancestor of (or equal to) `descendant`.
+ * `merge-base --is-ancestor` exits 0 when the relationship holds.
+ */
+export async function isAncestor(
+  cwd: string,
+  ancestor: string,
+  descendant: string
+): Promise<boolean> {
+  const res = await runGit(
+    ["merge-base", "--is-ancestor", ancestor, descendant],
+    { cwd }
+  );
+  return res.code === 0;
+}
+
 export interface CommitDetail {
   author: string;
   email: string;
@@ -179,6 +243,50 @@ export interface CommitDetail {
   absDate: string;
   message: string;
   stat: string; // e.g. "8 files changed, 30 insertions(+), 2843 deletions(-)"
+}
+
+/**
+ * Parses `git show --numstat` output into a human-readable summary. Structured
+ * columns (added/deleted per path) avoid the locale-sensitive text parsing of
+ * `--shortstat`. Lines that are not `<added>\t<deleted>\t<path>` (commit hash
+ * headers, subjects, merge lines) are skipped; binary/rename lines (`-` in a
+ * column) count as changed files without +/- contributions.
+ */
+export function summarizeNumstat(numstat: string[]): string {
+  let files = 0;
+  let insertions = 0;
+  let deletions = 0;
+  for (const line of numstat) {
+    const parts = line.trim().split("\t");
+    if (parts.length < 3) {
+      continue; // header/blank/subject line — not a numstat data row
+    }
+    files += 1;
+    // A `-` in either column marks a binary/rename row: count it as a changed
+    // file but omit its +/- contributions (matching `--shortstat`).
+    if (parts[0] === "-" || parts[1] === "-") {
+      continue;
+    }
+    const added = Number(parts[0]);
+    const deleted = Number(parts[1]);
+    if (Number.isFinite(added)) {
+      insertions += added;
+    }
+    if (Number.isFinite(deleted)) {
+      deletions += deleted;
+    }
+  }
+  if (files === 0) {
+    return "";
+  }
+  const parts = [`${files} file${files === 1 ? "" : "s"} changed`];
+  if (insertions > 0) {
+    parts.push(`${insertions} insertion${insertions === 1 ? "" : "s"}(+)`);
+  }
+  if (deletions > 0) {
+    parts.push(`${deletions} deletion${deletions === 1 ? "" : "s"}(-)`);
+  }
+  return parts.join(", ");
 }
 
 /** Fetches rich details for a commit, used for the hover tooltip. */
@@ -189,18 +297,31 @@ export async function commitDetail(cwd: string, hash: string): Promise<CommitDet
     { cwd }
   );
   const [author, email, relDate, absDate, message] = meta.split("\x1f");
+
+  // Structured stat: `--numstat` prints "added\tdeleted\tpath" per changed file,
+  // using "-" for binary files and omitting rename targets. Preferred over
+  // parsing the localized `--shortstat` prose. `--format=%H` keeps the header
+  // minimal (a bare hash the summarizer skips).
+  const numstat = await runGit(
+    ["show", "--numstat", "--format=%H", "--no-color", hash],
+    { cwd }
+  );
+  const statLine = summarizeNumstat(numstat.stdout.split("\n"));
+  if (statLine) {
+    return { author, email, relDate, absDate, message, stat: statLine };
+  }
+  // Fallback: parse the last `--shortstat` summary line (locale-dependent).
   const statRes = await runGit(
     ["show", "--shortstat", "--oneline", "--no-color", hash],
     { cwd }
   );
-  // Last non-empty line of --shortstat output holds the summary.
-  const statLine =
+  const shortstatLine =
     statRes.stdout
       .split("\n")
       .map((l) => l.trim())
       .filter((l) => /files? changed|insertion|deletion/.test(l))
       .pop() ?? "";
-  return { author, email, relDate, absDate, message, stat: statLine };
+  return { author, email, relDate, absDate, message, stat: shortstatLine };
 }
 
 export interface WorkingStatus {
@@ -246,20 +367,48 @@ export async function conflictedFiles(cwd: string): Promise<string[]> {
 }
 
 /**
+ * In-memory session cache for patch-id lookups. The patch-id of a commit is
+ * stable unless the commit itself is rewritten, and a refresh can ask for the
+ * same hash multiple times (hover detail + lock check + push guard). Caching
+ * avoids repeating the two git calls (`diff-tree` + `patch-id`) per lookup.
+ * Keyed by absolute repo root so concurrent worktrees never collide.
+ */
+const patchIdCache = new Map<string, string | undefined>();
+
+/** Clears the in-memory patch-id cache (used between tests and on demand). */
+export function clearPatchIdCache(): void {
+  patchIdCache.clear();
+}
+
+/**
  * Computes a stable patch-id for a commit's diff. The patch-id stays the same
  * across cherry-pick and rebase (as long as the diff is unchanged), so it is a
  * reliable identity for "the same change" even when the commit hash changes.
  * Returns undefined for commits with no diff (e.g. merges).
+ *
+ * Results are memoized for the current extension session keyed by
+ * `<repoRoot>:<hash>`; call `clearPatchIdCache()` to force a fresh computation
+ * (tests do this between cases).
  */
 export async function patchId(cwd: string, hash: string): Promise<string | undefined> {
-  const diff = await runGit(["diff-tree", "-p", "--no-color", hash], { cwd });
+  const root = (await repoRoot(cwd)) ?? cwd;
+  const key = `${root}:${hash}`;
+  if (patchIdCache.has(key)) {
+    return patchIdCache.get(key);
+  }
+  // `--root` includes root commits (whose parent-less diff-tree output is
+  // otherwise empty); it is harmless on non-root commits.
+  const diff = await runGit(["diff-tree", "-p", "--no-color", "--root", hash], { cwd });
   if (diff.code !== 0 || !diff.stdout.trim()) {
+    patchIdCache.set(key, undefined);
     return undefined;
   }
   const res = await runGit(["patch-id", "--stable"], { cwd, input: diff.stdout });
   if (res.code !== 0) {
+    patchIdCache.set(key, undefined);
     return undefined;
   }
-  const id = res.stdout.trim().split(/\s+/)[0];
-  return id || undefined;
+  const id = res.stdout.trim().split(/\s+/)[0] || undefined;
+  patchIdCache.set(key, id);
+  return id;
 }
