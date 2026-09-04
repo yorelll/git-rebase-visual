@@ -104,6 +104,15 @@ code --install-extension git-rebase-visual-<version>.vsix
 
 ### 更新记录
 
+- **0.4.0** — P2 高价值项落地与可靠性增强：
+  - **测试覆盖扩展（P2-6）**：新增真实 bare remote 集成测试，覆盖 `--force-with-lease` 并发远端变更拒绝与 `lockedInPush` 锁定拦截/解锁放行；新增 append 前置守卫测试（目标已在 upstream / 目标被锁定均不可 append）；`streamChat` 增加流读取途中取消与超时的 HTTP mock 测试，并据此加固实现——每次 SSE read 与取消/超时竞速、吸收进行中 read 的取消拒绝、撤销时清理计时器，杜绝挂死与 unhandled rejection。
+  - **大仓库性能（P2-3，部分）**：patch-id 增加按 `<repoRoot>:<hash>` 的 session 缓存（`clearPatchIdCache` 供测试重置），避免同一 hash 在 hover/lock/push 路径重复计算；hover 变更统计改用结构化 `--numstat`（`summarizeNumstat`，正确处理二进制/重命名行），`--shortstat` 文本解析仅作降级；顺带修复根提交（root commit）patch-id 恒为空的缺陷（`diff-tree --root`）。
+  - **Stash 恢复可见性（P2-1）**：append/auto-stash 冲突提示精确到 `stash@{n}` + 短 sha + 可执行的手动恢复命令；新增 `gitRebaseVisual.stashList` 命令（优先调用 `git.openStash`，降级列出到 **Git Rebase Visual** OutputChannel）。
+  - **安全与可移植性（P2-5，部分）**：启动时通过 `checkGitFeature` 检查最低 Git 版本（2.31.0），过旧时显示明确错误而非崩溃；SecretStorage 接入管线打通（`activate` 注入 `context.secrets`，通过 `secretsAccess.ts` 安全访问），评审推送时若 API key 仍存于 settings 会提示迁移。
+  - **append 已推送保护强化**：目标 commit 已在本地 upstream 时，确认框要求显式输入「我已推送同内容，仍要改写」二次确认，杜绝静默改写已共享历史。
+  - 测试套件扩展至 **40 项**；全文件行覆盖 85%。
+  - 回复文档改为按版本命名（`review-response-0-4-0.md`），`CLAUDE.md` 命名规则同步更新。
+
 - **0.3.1** — 评审整改与评审归档规范：
   - 修复 commit message compose/apply 在列表更新后使用过期 hash 可能触发无意义 rebase 的问题；现在会拒绝过期 commit 操作并要求刷新。
   - 面板隐藏或 dispose 时停止 index 轮询并释放 refresh timer，重新显示时恢复自动状态同步，避免后台 Git 空转。
