@@ -62,6 +62,13 @@ npm run test:coverage    # 40 / 40 通过，全文件行覆盖 85.13%
 
 streamChat 竞态另经独立 probe（真实 SSE 服务器分多 chunk 发送后挂起）验证：三个 chunk 全部接收、超时正确触发、无 chunk 丢失。
 
+### 发布 CI 复核：patch-id 测试时序稳定性
+
+首次 v0.4.0 tag 的 GitHub Actions 在测试阶段失败（39/40），但未创建 GitHub Release。失败项 `patchId is stable across a cherry-pick and served by the session cache` 错误地假设 `git cherry-pick` 一定产生新 hash。Linux 快速 runner 中，原提交与 cherry-pick 若在同一秒内完成，tree、parent、message、author/committer 元数据均相同，Git 合法生成相同 hash，导致 `assert.notEqual` 时序 flaky。
+
+- [x] **已修复。**测试改为使用 `git commit-tree` 构造相同 tree/diff、不同 message 的确定性 clone：hash 必不同、patch-id 必相同；不再依赖 wall-clock 时间。
+- [x] **已验证。**修改后的单文件测试 8/8 通过，`npm run test:release` 40/40 通过，coverage 85.13%。
+
 ---
 
 ## 当前 P2 规划（0-4-0 之后）

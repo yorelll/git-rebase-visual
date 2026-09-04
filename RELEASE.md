@@ -110,7 +110,7 @@ code --install-extension git-rebase-visual-<version>.vsix
   - **Stash 恢复可见性（P2-1）**：append/auto-stash 冲突提示精确到 `stash@{n}` + 短 sha + 可执行的手动恢复命令；新增 `gitRebaseVisual.stashList` 命令（优先调用 `git.openStash`，降级列出到 **Git Rebase Visual** OutputChannel）。
   - **安全与可移植性（P2-5，部分）**：启动时通过 `checkGitFeature` 检查最低 Git 版本（2.31.0），过旧时显示明确错误而非崩溃；SecretStorage 接入管线打通（`activate` 注入 `context.secrets`，通过 `secretsAccess.ts` 安全访问），评审推送时若 API key 仍存于 settings 会提示迁移。
   - **append 已推送保护强化**：目标 commit 已在本地 upstream 时，确认框要求显式输入「我已推送同内容，仍要改写」二次确认，杜绝静默改写已共享历史。
-  - 测试套件扩展至 **40 项**；全文件行覆盖 85%。
+  - 测试套件扩展至 **40 项**；全文件行覆盖 85%。发布 CI 中发现并修复 patch-id 跨重写测试的同秒 hash 时序 flaky：不再假设 `cherry-pick` 必然换 hash，改以 `commit-tree` 构造同 diff、不同 message 的确定性 clone。
   - 回复文档改为按版本命名（`review-response-0-4-0.md`），`CLAUDE.md` 命名规则同步更新。
 
 - **0.3.1** — 评审整改与评审归档规范：
