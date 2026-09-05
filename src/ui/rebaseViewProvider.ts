@@ -1233,12 +1233,19 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
           throw new Error("未能停靠在目标 commit，message 未应用。");
         }
       } else {
-        await this.runRebase(cwd, {
+        const outcome = await this.runRebase(cwd, {
           items: this.itemsWith((h) => (h === hash ? "reword" : undefined)),
           newMessage: finalMsg,
           operation: "编辑 commit message",
           affectedCount: this.commits.length,
         });
+        if (!outcome?.ok) {
+          throw new Error(
+            outcome?.stopped
+              ? "变基已暂停，message 仍保留在对话框中。请先处理当前暂停状态。"
+              : "编辑 commit message 未应用。"
+          );
+        }
       }
     } else if (mode === "staged") {
       await commitIndex(cwd, message.replace(/\s+$/, "") + "\n");
