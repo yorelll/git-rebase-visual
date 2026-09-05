@@ -14,7 +14,15 @@ test("workingStatus distinguishes staged, unstaged, and untracked changes", asyn
   fs.writeFileSync(path.join(cwd, "one.txt"), "staged\n", "utf8");
   git(cwd, ["add", "one.txt"]);
   fs.writeFileSync(path.join(cwd, "two.txt"), "untracked\n", "utf8");
-  assert.deepEqual(await workingStatus(cwd), { hasStaged: true, hasUnstaged: true });
+  fs.writeFileSync(path.join(cwd, "three.txt"), "both\n", "utf8");
+  git(cwd, ["add", "three.txt"]);
+  fs.writeFileSync(path.join(cwd, "three.txt"), "both and worktree\n", "utf8");
+  assert.deepEqual(await workingStatus(cwd), {
+    hasStaged: true,
+    hasUnstaged: true,
+    stagedCount: 2,
+    unstagedCount: 2,
+  });
 });
 
 test("commit queries preserve newest-first order and calculate a rebase base", async (t) => {

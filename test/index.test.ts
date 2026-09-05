@@ -7,5 +7,7 @@ import "./message.test";
 import "./pushGuard.integration.test";
 import "./pushGuard.test";
 import "./rebaseEngine.test";
+import "./rebasePauseState.test";
+import "./rebaseSafety.integration.test";
 import "./secretsAccess.test";
 import "./worktree.integration.test";

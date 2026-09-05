@@ -327,13 +327,17 @@ export async function commitDetail(cwd: string, hash: string): Promise<CommitDet
 export interface WorkingStatus {
   hasStaged: boolean;
   hasUnstaged: boolean; // includes untracked
+  /** Number of porcelain entries that have an index-side change. */
+  stagedCount: number;
+  /** Number of porcelain entries that have a worktree-side change. */
+  unstagedCount: number;
 }
 
-/** Reports whether there are staged and/or unstaged (incl. untracked) changes. */
+/** Reports staged/unstaged state and an intentionally lightweight file count. */
 export async function workingStatus(cwd: string): Promise<WorkingStatus> {
   const res = await runGit(["status", "--porcelain"], { cwd });
-  let hasStaged = false;
-  let hasUnstaged = false;
+  let stagedCount = 0;
+  let unstagedCount = 0;
   for (const line of res.stdout.split("\n")) {
     if (line.length < 2) {
       continue;
@@ -341,17 +345,22 @@ export async function workingStatus(cwd: string): Promise<WorkingStatus> {
     const x = line[0]; // staged column
     const y = line[1]; // worktree column
     if (line.startsWith("??")) {
-      hasUnstaged = true;
+      unstagedCount += 1;
       continue;
     }
     if (x !== " " && x !== "?") {
-      hasStaged = true;
+      stagedCount += 1;
     }
     if (y !== " " && y !== "?") {
-      hasUnstaged = true;
+      unstagedCount += 1;
     }
   }
-  return { hasStaged, hasUnstaged };
+  return {
+    hasStaged: stagedCount > 0,
+    hasUnstaged: unstagedCount > 0,
+    stagedCount,
+    unstagedCount,
+  };
 }
 
 /** True when the working tree has any staged or unstaged changes. */

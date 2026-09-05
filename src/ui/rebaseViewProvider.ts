@@ -60,6 +60,7 @@ import {
   isLlmConfigured,
 } from "../config";
 import { SecretsAccessModule, fromSecretStorage } from "./secretsAccess";
+import { rebasePauseState } from "./rebaseState";
 
 const PENDING_STASH_KEY = "gitRebaseVisual.pendingStash";
 const PENDING_APPEND_KEY = "gitRebaseVisual.pendingAppend";
@@ -89,6 +90,12 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
   private refreshTimer?: NodeJS.Timeout;
   private statusPoller?: NodeJS.Timeout;
   private statusPollerStarted = false;
+  /** Details retained while an edit/conflict stop awaits Continue or Abort. */
+  private pendingRewrite?: {
+    operation: string;
+    oldTip: string | undefined;
+    affectedCount: number;
+  };
   private readonly output: vscode.OutputChannel;
 
   constructor(
@@ -258,6 +265,11 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     }
 
     const stoppedAt = rebaseInProgress ? await rebaseStoppedSha(root) : undefined;
+    const pause = rebasePauseState(
+      rebaseInProgress,
+      stoppedAt,
+      rebaseInProgress ? await conflictedFiles(root) : []
+    );
 
     // Determine locked state per commit. Only compute patch-ids when locks
     // exist (patch-id computation costs two git calls per commit).
@@ -286,9 +298,12 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
       type: "state",
       rebaseInProgress,
       stoppedAt,
+      ...pause,
       llmConfigured: isLlmConfigured(),
       hasStaged: status.hasStaged,
       hasUnstaged: status.hasUnstaged,
+      stagedCount: status.stagedCount,
+      unstagedCount: status.unstagedCount,
       commits: ordered.map((c) => ({
         hash: c.hash,
         shortHash: c.shortHash,
@@ -375,7 +390,11 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
       hashActions.has(m.type) ||
       ((m.type === "openCompose" || m.type === "apply") && m.mode === "commit");
     if (requiresCurrentCommit && !this.isCurrentCommitHash(m.hash)) {
-      toast("warn", "commit 列表已更新，请刷新后重试。");
+      const message = "commit 列表已更新，请刷新后重试。";
+      if (m.type === "apply") {
+        this.post({ type: "applyFailed", message });
+      }
+      toast("warn", message);
       await this.refresh();
       return;
     }
@@ -404,6 +423,12 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
           await vscode.env.clipboard.writeText(m.text ?? "");
           toast("info", "已复制到剪贴板");
           break;
+        case "openLlmSettings":
+          await vscode.commands.executeCommand(
+            "workbench.action.openSettings",
+            "gitRebaseVisual.llm"
+          );
+          break;
         case "requestDetail":
           await this.sendDetail(cwd!, m.hash);
           break;
@@ -412,6 +437,11 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
           break;
         case "drop": {
           const commit = this.commits.find((c) => c.hash === m.hash)!;
+          const pid = await this.locks.computePatchId(cwd!, m.hash);
+          if (this.locks.isLocked(this.root!, m.hash, pid)) {
+            toast("warn", "目标 commit 已锁定。请先解除锁定，再删除 commit。");
+            return;
+          }
           const confirm = await vscode.window.showWarningMessage(
             `删除 ${commit.shortHash} “${commit.subject}”？此操作会改写其后的提交历史。`,
             { modal: true },
@@ -420,20 +450,32 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
           if (confirm !== "删除") {
             return;
           }
-          const pid = await this.locks.computePatchId(cwd!, m.hash);
           await this.runRebase(cwd!, {
             items: this.itemsWith((h) => (h === m.hash ? "drop" : undefined)),
+            operation: "删除 commit (drop)",
+            affectedCount: 1,
           });
-          await this.locks.unlock(this.root!, m.hash, pid);
           await this.refresh();
           break;
         }
-        case "rebaseTo":
+        case "rebaseTo": {
+          const commit = this.commits.find((c) => c.hash === m.hash)!;
+          const confirm = await vscode.window.showWarningMessage(
+            `将在 ${commit.shortHash} “${commit.subject}” 停靠 (edit)。这会开始变基并改写后续提交。`,
+            { modal: true },
+            "开始变基"
+          );
+          if (confirm !== "开始变基") {
+            return;
+          }
           await this.runRebase(cwd!, {
             items: this.itemsWith((h) => (h === m.hash ? "edit" : undefined)),
+            operation: "停靠在此 (edit)",
+            affectedCount: this.commits.length,
           });
           await this.refresh();
           break;
+        }
         case "lock": {
           const pid = await this.locks.computePatchId(cwd!, m.hash);
           await this.locks.lock(this.root!, m.hash, pid);
@@ -459,28 +501,61 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
           await this.apply(cwd!, m.mode, m.hash, m.message, m.thenEdit === true);
           break;
         case "continueRebase": {
+          const conflicts = await conflictedFiles(cwd!);
+          if (conflicts.length > 0) {
+            toast(
+              "warn",
+              `仍有 ${conflicts.length} 个冲突文件未解决：${conflicts.join("、")}。解决并暂存后再 Continue。`
+            );
+            await this.refresh();
+            return;
+          }
           const r = await continueRebase(cwd!);
-          if (!r.ok && !r.stopped) {
-            toast("error", r.message);
+          if (!r.ok) {
+            toast("error", r.message || "Continue 失败，请检查 Output。");
           }
           // Restore the auto-stash once the rebase is fully done.
           if (!(await isRebaseInProgress(cwd!))) {
             await this.popPendingStash(cwd!, this.root!);
             await this.restorePendingAppend(cwd!, this.root!);
+            if (r.ok && this.pendingRewrite) {
+              const pending = this.pendingRewrite;
+              this.pendingRewrite = undefined;
+              await this.reportRewrite(
+                cwd!,
+                pending.operation,
+                pending.oldTip,
+                pending.affectedCount
+              );
+            }
           }
           await this.refresh();
           break;
         }
-        case "abortRebase":
+        case "abortRebase": {
+          const confirm = await vscode.window.showWarningMessage(
+            "Abort 将丢弃本次变基的所有中间结果，并恢复变基开始前的历史。",
+            { modal: true },
+            "Abort"
+          );
+          if (confirm !== "Abort") {
+            return;
+          }
           await abortRebase(cwd!);
+          this.pendingRewrite = undefined;
           await this.popPendingStash(cwd!, this.root!);
           await this.restorePendingAppend(cwd!, this.root!, true);
+          toast("info", "已 Abort 变基并请求恢复变基前历史。", 5000);
           await this.refresh();
           break;
+        }
       }
     } catch (e: any) {
       const message = String(e.message ?? e);
       this.log(m.type, `失败 ${message}`);
+      if (m.type === "apply") {
+        this.post({ type: "applyFailed", message });
+      }
       toast("error", message);
       await this.refresh();
     }
@@ -507,7 +582,26 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
       action: "pick",
       subject: bySubject.get(hash)!,
     }));
-    await this.runRebase(cwd, { items });
+    const changed = displayOrder.some(
+      (hash, index) => hash !== [...this.commits].reverse()[index]?.hash
+    );
+    if (!changed) {
+      return;
+    }
+    const confirm = await vscode.window.showWarningMessage(
+      `重排 ${displayOrder.length} 个 commit 会改写受影响的提交历史。继续吗？`,
+      { modal: true },
+      "重排"
+    );
+    if (confirm !== "重排") {
+      await this.refresh();
+      return;
+    }
+    await this.runRebase(cwd, {
+      items,
+      operation: "拖拽重排",
+      affectedCount: displayOrder.length,
+    });
     await this.refresh();
   }
 
@@ -683,18 +777,61 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     return { proceed: true, stashed: !!sha };
   }
 
+  private async headTip(cwd: string): Promise<string | undefined> {
+    const result = await runGit(["rev-parse", "HEAD"], { cwd });
+    return result.code === 0 ? result.stdout.trim() : undefined;
+  }
+
+  /** Records a completed rewrite without offering an unsafe ORIG_HEAD reset. */
+  private async reportRewrite(
+    cwd: string,
+    operation: string,
+    oldTip: string | undefined,
+    affectedCount: number
+  ): Promise<void> {
+    const newTip = await this.headTip(cwd);
+    const details = `${operation}; 范围 ${affectedCount} 个 commit; old tip ${oldTip ?? "unknown"}; new tip ${newTip ?? "unknown"}`;
+    this.log("rebase", `完成 ${details}`);
+    toast(
+      "info",
+      `${operation} 已完成：${oldTip?.slice(0, 10) ?? "unknown"} → ${newTip?.slice(0, 10) ?? "unknown"}（${affectedCount} 个 commit）。详情见 Output。`,
+      8000
+    );
+  }
+
   private async runRebase(
     cwd: string,
-    plan: { items: RebaseItem[]; newMessage?: string; onto?: RebaseBase }
-  ): Promise<void> {
+    plan: {
+      items: RebaseItem[];
+      newMessage?: string;
+      onto?: RebaseBase;
+      operation?: string;
+      affectedCount?: number;
+    }
+  ): Promise<{ ok: boolean; stopped: boolean } | undefined> {
     const root = this.root!;
-    const prep = await this.prepareCleanTree(cwd, root);
-    if (!prep.proceed) {
-      return;
+    // Reject before preparing a clean tree: otherwise a blocked drop could
+    // auto-stash user changes even though no Git operation is allowed to run.
+    const lockedDrop = plan.items.find((item) => item.action === "drop");
+    if (lockedDrop) {
+      const pid = await this.locks.computePatchId(cwd, lockedDrop.hash);
+      if (this.locks.isLocked(root, lockedDrop.hash, pid)) {
+        toast("warn", "目标 commit 已锁定。请先解除锁定，再删除 commit。");
+        return undefined;
+      }
     }
 
+    const prep = await this.prepareCleanTree(cwd, root);
+    if (!prep.proceed) {
+      return undefined;
+    }
+
+    const oldTip = await this.headTip(cwd);
     const onto = plan.onto ?? (await this.computeBase(cwd));
-    const outcome = await executeRebase(cwd, { ...plan, onto });
+    const { operation, affectedCount, ...rebasePlan } = plan;
+    void operation;
+    void affectedCount;
+    const outcome = await executeRebase(cwd, { ...rebasePlan, onto });
 
     if (!outcome.ok && !outcome.stopped) {
       this.log("rebase", `失败 ${outcome.message}`);
@@ -704,6 +841,11 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
         await this.popPendingStash(cwd, root);
       }
     } else if (outcome.stopped) {
+      this.pendingRewrite = {
+        operation: plan.operation ?? "变基",
+        oldTip,
+        affectedCount: plan.affectedCount ?? plan.items.length,
+      };
       // Keep the pending stash; it is popped on Continue/Abort. Only mention
       // the stash when we actually created one.
       const conflicts = await conflictedFiles(cwd);
@@ -723,10 +865,24 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
           () => undefined
         );
       }
-    } else if (prep.stashed) {
-      // Completed cleanly — restore now.
-      await this.popPendingStash(cwd, root);
+    } else {
+      if (prep.stashed) {
+        // Completed cleanly — restore now.
+        await this.popPendingStash(cwd, root);
+      }
+      const newTip = await this.headTip(cwd);
+      if (oldTip !== newTip) {
+        await this.reportRewrite(
+          cwd,
+          plan.operation ?? "变基",
+          oldTip,
+          plan.affectedCount ?? plan.items.length
+        );
+      } else {
+        this.log("rebase", `${plan.operation ?? "变基"} 未改变 HEAD；未报告历史改写。`);
+      }
     }
+    return { ok: outcome.ok, stopped: outcome.stopped };
   }
 
   /**
@@ -786,10 +942,18 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
 
     let restoredForAmend = false;
     try {
+      const oldTip = await this.headTip(cwd);
       const outcome = await executeRebase(cwd, {
         items: this.itemsWith((h) => (h === hash ? "edit" : undefined)),
         onto: await this.computeBase(cwd),
       });
+      if (outcome.stopped) {
+        this.pendingRewrite = {
+          operation: "追加暂存区",
+          oldTip,
+          affectedCount: this.commits.length,
+        };
+      }
       if (!outcome.stopped) {
         throw new Error(outcome.message || "未能在目标 commit 停靠，已取消追加操作。");
       }
@@ -822,6 +986,11 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
         throw new Error(continued.message || "继续变基失败。");
       }
       await this.restorePendingAppend(cwd, this.root!);
+      const pending = this.pendingRewrite;
+      this.pendingRewrite = undefined;
+      if (pending) {
+        await this.reportRewrite(cwd, pending.operation, pending.oldTip, pending.affectedCount);
+      }
       toast("info", `已将暂存区文件追加到 ${commit.shortHash}。`);
     } catch (e) {
       const inProgress = await isRebaseInProgress(cwd);
@@ -833,6 +1002,7 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
         }
       } else if (!restoredForAmend) {
         await this.restoreAppendSnapshot(cwd, changeStash);
+        this.pendingRewrite = undefined;
       }
       throw e;
     } finally {
@@ -944,16 +1114,31 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
       const original = await fullMessage(cwd, hash);
       const finalMsg = applyTrailers(message, original);
       if (thenEdit) {
-        await this.runRebase(cwd, {
+        const outcome = await this.runRebase(cwd, {
           items: this.itemsWith((h) => (h === hash ? "edit" : undefined)),
+          operation: "编辑 message 后停靠",
+          affectedCount: this.commits.length,
         });
-        if (await isRebaseInProgress(cwd)) {
+        if (outcome?.stopped && (await isRebaseInProgress(cwd))) {
+          const [stoppedAt, conflicts] = await Promise.all([
+            rebaseStoppedSha(cwd),
+            conflictedFiles(cwd),
+          ]);
+          if (stoppedAt !== hash || conflicts.length > 0) {
+            throw new Error(
+              "变基未能安全停靠在目标 commit；请先处理当前暂停状态。message 仍保留在对话框中。"
+            );
+          }
           await git(["commit", "--amend", "-m", finalMsg], { cwd });
+        } else if (!outcome?.ok) {
+          throw new Error("未能停靠在目标 commit，message 未应用。");
         }
       } else {
         await this.runRebase(cwd, {
           items: this.itemsWith((h) => (h === hash ? "reword" : undefined)),
           newMessage: finalMsg,
+          operation: "编辑 commit message",
+          affectedCount: this.commits.length,
         });
       }
     } else if (mode === "staged") {
@@ -964,6 +1149,7 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
       toast("info", "已暂存并提交工作区改动。");
     }
     await this.refresh();
+    this.post({ type: "applySucceeded" });
   }
 
   private async sendDetail(cwd: string, hash: string): Promise<void> {
@@ -1182,7 +1368,7 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     const nonce = getNonce();
     const csp = `default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}';`;
     return `<!DOCTYPE html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
 <meta http-equiv="Content-Security-Policy" content="${csp}">
@@ -1191,14 +1377,16 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
 <title>Git Rebase</title>
 </head>
 <body>
-<div id="banner" class="banner hidden"></div>
+<div id="banner" class="banner hidden" role="status" aria-live="polite"></div>
 <div id="changes" class="changes hidden"></div>
-<div id="list" class="list"></div>
-<div id="menu" class="menu hidden"></div>
+<div id="direction" class="direction" role="status" aria-live="polite"></div>
+<div id="list" class="list" role="list"></div>
+<div id="menu" class="menu hidden" role="menu" aria-label="Commit 操作菜单"></div>
 <div id="tooltip" class="tooltip hidden"></div>
-<div id="dialog" class="dialog-backdrop hidden">
-  <div class="dialog">
+<div id="dialog" class="dialog-backdrop hidden" role="presentation">
+  <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="dialog-title" aria-describedby="dialog-error">
     <div class="dialog-title" id="dialog-title">编辑 commit message</div>
+    <div id="dialog-error" class="dialog-error hidden" role="alert"></div>
 
     <div id="orig-block" class="pane-block hidden">
       <div class="pane-label">
@@ -1229,6 +1417,7 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     </div>
   </div>
 </div>
+<div id="live" class="sr-only" role="status" aria-live="polite"></div>
 <script nonce="${nonce}" src="${scriptUri}"></script>
 </body>
 </html>`;
