@@ -110,22 +110,32 @@ export async function resolveRange(
  * instead of failing on the detached HEAD.
  */
 export async function rebasingBranch(cwd: string): Promise<string | undefined> {
-  const res = await runGit(
-    ["rev-parse", "--path-format=absolute", "--git-path", "rebase-merge/head-name"],
-    { cwd }
+  // Interactive rebases use rebase-merge while `git rebase --apply` uses
+  // rebase-apply. Both record the original branch in head-name. Checking both
+  // keeps refreshes attached to the rebased branch while an apply-backend
+  // conflict has detached HEAD.
+  const paths = await Promise.all(
+    ["rebase-merge/head-name", "rebase-apply/head-name"].map((gitPath) =>
+      runGit(
+        ["rev-parse", "--path-format=absolute", "--git-path", gitPath],
+        { cwd }
+      )
+    )
   );
-  if (res.code !== 0) {
-    return undefined;
-  }
   const fs = await import("fs");
-  const abs = res.stdout.trim();
-  try {
-    if (fs.existsSync(abs)) {
-      const ref = fs.readFileSync(abs, "utf8").trim(); // refs/heads/main
-      return ref.replace(/^refs\/heads\//, "");
+  for (const result of paths) {
+    if (result.code !== 0) {
+      continue;
     }
-  } catch {
-    // ignore
+    const abs = result.stdout.trim();
+    try {
+      if (fs.existsSync(abs)) {
+        const ref = fs.readFileSync(abs, "utf8").trim(); // refs/heads/main
+        return ref.replace(/^refs\/heads\//, "");
+      }
+    } catch {
+      // Try the other backend path.
+    }
   }
   return undefined;
 }
@@ -182,20 +192,25 @@ export async function currentBranch(cwd: string): Promise<string | undefined> {
   return res.code === 0 ? res.stdout.trim() : undefined;
 }
 
-/**
- * When a rebase is paused (edit stop or after a resolved step), returns the
- * full hash of the commit it stopped at, or undefined if unavailable.
- */
-export async function rebaseStoppedSha(cwd: string): Promise<string | undefined> {
+async function rebaseMergePath(cwd: string, name: string): Promise<string | undefined> {
   const res = await runGit(
-    ["rev-parse", "--path-format=absolute", "--git-path", "rebase-merge/stopped-sha"],
+    ["rev-parse", "--path-format=absolute", "--git-path", `rebase-merge/${name}`],
     { cwd }
   );
-  if (res.code !== 0) {
+  return res.code === 0 && res.stdout.trim() ? res.stdout.trim() : undefined;
+}
+
+/**
+ * When rebase-merge records a stopped commit, returns its full hash. Git keeps
+ * this file for both `edit` stops and replay conflicts, so callers that need
+ * the reason must also use `rebaseAtEditStop`.
+ */
+export async function rebaseStoppedSha(cwd: string): Promise<string | undefined> {
+  const abs = await rebaseMergePath(cwd, "stopped-sha");
+  if (!abs) {
     return undefined;
   }
   const fs = await import("fs");
-  const abs = res.stdout.trim();
   try {
     if (fs.existsSync(abs)) {
       const sha = fs.readFileSync(abs, "utf8").trim();
@@ -207,6 +222,46 @@ export async function rebaseStoppedSha(cwd: string): Promise<string | undefined>
     // ignore
   }
   return undefined;
+}
+
+/**
+ * True only when the current rebase-merge step is an explicit interactive
+ * `edit` stop. On a replay conflict `done` ends in the preceding successful
+ * todo action while `git-rebase-todo` still starts with the failed `pick`, so
+ * inspecting the last completed action avoids reporting a stale stopped-sha
+ * as an edit stop.
+ */
+export async function rebaseAtEditStop(cwd: string): Promise<boolean> {
+  const [donePath, todoPath] = await Promise.all([
+    rebaseMergePath(cwd, "done"),
+    rebaseMergePath(cwd, "git-rebase-todo"),
+  ]);
+  if (!donePath || !todoPath) {
+    return false;
+  }
+  const fs = await import("fs");
+  try {
+    if (!fs.existsSync(donePath) || !fs.existsSync(todoPath)) {
+      return false;
+    }
+    const doneLines = fs.readFileSync(donePath, "utf8").split(/\r?\n/);
+    const lastAction = [...doneLines]
+      .reverse()
+      .map((line) => line.trim())
+      .find((line) => line && !line.startsWith("#"));
+    if (!lastAction || !/^edit\s+/i.test(lastAction)) {
+      return false;
+    }
+    // After Git stops for an edit, it removes that command from todo. During a
+    // conflict it has not consumed the failed command, which remains at top.
+    const nextAction = fs.readFileSync(todoPath, "utf8")
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .find((line) => line && !line.startsWith("#"));
+    return !nextAction || !/^edit\s+/i.test(nextAction);
+  } catch {
+    return false;
+  }
 }
 
 /** Returns the repository top-level directory, or undefined when not a repo. */
@@ -333,9 +388,13 @@ export interface WorkingStatus {
   unstagedCount: number;
 }
 
-/** Reports staged/unstaged state and an intentionally lightweight file count. */
+/** Reports staged/unstaged state and file counts. */
 export async function workingStatus(cwd: string): Promise<WorkingStatus> {
-  const res = await runGit(["status", "--porcelain"], { cwd });
+  // Git's default untracked mode collapses a directory into one `?? dir/`
+  // entry, which would make the UI claim there is one changed file even when
+  // it contains many. Expand untracked files so both counters reflect files;
+  // tracked renames and submodules remain one porcelain entry each.
+  const res = await runGit(["status", "--porcelain", "--untracked-files=all"], { cwd });
   let stagedCount = 0;
   let unstagedCount = 0;
   for (const line of res.stdout.split("\n")) {

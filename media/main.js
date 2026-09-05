@@ -157,14 +157,15 @@
       bannerEl.className = "banner rebase" + (state.conflictCount ? " conflict" : "");
       const stopped = state.commits && state.commits.find((c) => c.hash === state.stoppedAt);
       const isConflict = state.conflictCount > 0;
+      const isEditStop = state.pausedReason === "edit" && stopped;
       const title = isConflict
         ? `变基暂停：${state.conflictCount} 个文件存在冲突`
-        : stopped
+        : isEditStop
           ? `变基停靠 (edit)：${stopped.shortHash} “${stopped.subject}”`
           : "变基进行中，等待继续";
       const guidance = isConflict
         ? `请在编辑器解决并暂存冲突文件：${state.conflictFiles.join("、")}。`
-        : stopped
+        : isEditStop
           ? "可修改代码或提交新改动后继续。"
           : "确认工作区状态后继续或 Abort。";
       bannerEl.innerHTML = "";
@@ -282,7 +283,7 @@
 
   function commitRow(c) {
     const row = document.createElement("div");
-    const stopped = state.stoppedAt && c.hash === state.stoppedAt;
+    const stopped = state.pausedReason === "edit" && state.stoppedAt && c.hash === state.stoppedAt;
     const index = state.commits.indexOf(c) + 1;
     row.className =
       "commit" + (c.locked ? " locked" : "") + (stopped ? " stopped" : "");
@@ -501,6 +502,8 @@
       closeMenu();
     }
   });
+  document.addEventListener("scroll", closeMenu, true);
+  window.addEventListener("resize", closeMenu);
 
   // ---- hover tooltip ------------------------------------------------------
 

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import * as fs from "fs";
 import * as path from "path";
-import { clearPatchIdCache, commitDetail, conflictedFiles, currentBranch, getCommits, isRebaseInProgress, patchId, rebaseStoppedSha, resolveRange, summarizeNumstat, workingStatus } from "../src/git/commitLog";
+import { clearPatchIdCache, commitDetail, conflictedFiles, currentBranch, getCommits, isRebaseInProgress, patchId, rebaseAtEditStop, rebaseStoppedSha, rebasingBranch, resolveRange, summarizeNumstat, workingStatus } from "../src/git/commitLog";
 import { resolveBase } from "../src/git/rebaseEngine";
 import { createRepo, commitFile, git, removeRepo } from "./helpers/gitTestRepo";
 
@@ -22,6 +22,43 @@ test("workingStatus distinguishes staged, unstaged, and untracked changes", asyn
     hasUnstaged: true,
     stagedCount: 2,
     unstagedCount: 2,
+  });
+});
+
+test("workingStatus counts each untracked file and a rename once", async (t) => {
+  const cwd = createRepo();
+  t.after(() => removeRepo(cwd));
+  commitFile(cwd, "before.txt", "before\n", "initial");
+
+  fs.mkdirSync(path.join(cwd, "new-dir"));
+  fs.writeFileSync(path.join(cwd, "new-dir", "one.txt"), "one\n", "utf8");
+  fs.writeFileSync(path.join(cwd, "new-dir", "two.txt"), "two\n", "utf8");
+  git(cwd, ["mv", "before.txt", "after.txt"]);
+  assert.deepEqual(await workingStatus(cwd), {
+    hasStaged: true,
+    hasUnstaged: true,
+    stagedCount: 1,
+    unstagedCount: 2,
+  });
+});
+
+test("workingStatus treats a modified submodule as one worktree entry", async (t) => {
+  const superRepo = createRepo();
+  const subRepo = createRepo();
+  t.after(() => {
+    removeRepo(superRepo);
+    removeRepo(subRepo);
+  });
+  commitFile(subRepo, "sub.txt", "base\n", "sub base");
+  git(superRepo, ["-c", "protocol.file.allow=always", "submodule", "add", "-q", subRepo, "nested"]);
+  git(superRepo, ["commit", "-qm", "add submodule"]);
+
+  fs.writeFileSync(path.join(superRepo, "nested", "sub.txt"), "modified\n", "utf8");
+  assert.deepEqual(await workingStatus(superRepo), {
+    hasStaged: false,
+    hasUnstaged: true,
+    stagedCount: 0,
+    unstagedCount: 1,
   });
 });
 
@@ -147,4 +184,35 @@ test("rebase state helpers find an edit stop via absolute Git paths", async (t) 
 
   assert.equal(await isRebaseInProgress(cwd), true);
   assert.equal(await rebaseStoppedSha(cwd), second);
+  assert.equal(await rebaseAtEditStop(cwd), true);
+  assert.equal(await rebasingBranch(cwd), "master");
+});
+
+test("rebase state helpers resolve the original branch for an apply-backend conflict", async (t) => {
+  const cwd = createRepo();
+  t.after(() => {
+    try {
+      git(cwd, ["rebase", "--abort"]);
+    } catch {
+      // No rebase may remain after a failed setup.
+    }
+    removeRepo(cwd);
+  });
+
+  commitFile(cwd, "shared.txt", "base\n", "base");
+  git(cwd, ["checkout", "-qb", "topic"]);
+  commitFile(cwd, "shared.txt", "topic\n", "topic change");
+  git(cwd, ["checkout", "-q", "master"]);
+  commitFile(cwd, "shared.txt", "master\n", "master change");
+  git(cwd, ["checkout", "-q", "topic"]);
+
+  const { execFileSync } = await import("child_process");
+  assert.throws(
+    () => execFileSync("git", ["rebase", "--apply", "master"], { cwd, stdio: "pipe" })
+  );
+
+  assert.equal(await isRebaseInProgress(cwd), true);
+  assert.deepEqual(await conflictedFiles(cwd), ["shared.txt"]);
+  assert.equal(await rebasingBranch(cwd), "topic");
+  assert.equal(await rebaseStoppedSha(cwd), undefined);
 });

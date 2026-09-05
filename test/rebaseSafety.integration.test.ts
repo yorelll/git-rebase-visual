@@ -3,7 +3,7 @@ import * as fs from "fs";
 import * as path from "path";
 import test from "node:test";
 import { abortRebase, continueRebase, executeRebase, resolveBase } from "../src/git/rebaseEngine";
-import { clearPatchIdCache, conflictedFiles, isRebaseInProgress, patchId, rebaseStoppedSha } from "../src/git/commitLog";
+import { clearPatchIdCache, conflictedFiles, isRebaseInProgress, patchId, rebaseAtEditStop, rebaseStoppedSha } from "../src/git/commitLog";
 import { LockStore } from "../src/lock/lockStore";
 import { createRepo, commitFile, git, removeRepo } from "./helpers/gitTestRepo";
 
@@ -95,13 +95,19 @@ test("Continue reports a stopped conflict until it is resolved, then completes",
   const blocked = await continueRebase(cwd);
   assert.equal(blocked.ok, false);
   assert.equal(blocked.stopped, true);
-  // Git keeps the stopped SHA while a replay conflict is unresolved; the
-  // provider distinguishes this from an edit stop using conflictedFiles().
+  // Git keeps the stopped SHA while a replay conflict is unresolved. The
+  // provider must not turn that stale marker into an edit-stop label after
+  // conflict paths have been staged.
   assert.ok(await rebaseStoppedSha(cwd));
+  assert.equal(await rebaseAtEditStop(cwd), false);
 
-  // Resolve, stage, then use the same engine method the provider invokes.
+  // Resolve and stage, but inspect the pause state before Continue. This is
+  // the short state-poller window that previously displayed a false edit stop.
   fs.writeFileSync(path.join(cwd, "shared.txt"), "resolved\n", "utf8");
   git(cwd, ["add", "shared.txt"]);
+  assert.deepEqual(await conflictedFiles(cwd), []);
+  assert.ok(await rebaseStoppedSha(cwd));
+  assert.equal(await rebaseAtEditStop(cwd), false);
   const completed = await continueRebase(cwd);
   assert.equal(completed.ok, true);
   assert.equal(completed.stopped, false);

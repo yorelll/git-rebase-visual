@@ -10,11 +10,13 @@ export interface RebasePauseState {
  * Derives the small, serializable part of webview state that describes a
  * paused rebase. Conflict state is deliberately derived from Git on every
  * refresh so the Continue button is only enabled after all unmerged paths are
- * resolved.
+ * resolved. `atEditStop` must come from the last rebase-merge todo action:
+ * stopped-sha alone is also present for a replay conflict and must not be used
+ * to mislabel a resolved conflict as an edit stop.
  */
 export function rebasePauseState(
   rebaseInProgress: boolean,
-  stoppedAt: string | undefined,
+  atEditStop: boolean,
   conflictFiles: string[]
 ): RebasePauseState {
   const files = rebaseInProgress ? [...new Set(conflictFiles)].sort() : [];
@@ -25,7 +27,7 @@ export function rebasePauseState(
       ? undefined
       : files.length > 0
         ? "conflict"
-        : stoppedAt
+        : atEditStop
           ? "edit"
           : "paused",
   };
