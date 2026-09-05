@@ -1,6 +1,6 @@
 # Git Rebase Visual — 功能、架构与测试总结
 
-> 当前基线：v0.4.0 P2 高价值项落地与可靠性增强。
+> 当前基线：v0.5.0 UI/UX 安全反馈、历史改写状态机与可访问性增强。
 
 ## 1. 项目定位
 
@@ -20,15 +20,17 @@ Webview (media/main.js)
 
 | 功能 | 行为与保护 |
 |---|---|
-| 拖拽重排 | 通过 scripted interactive rebase 重排 oldest-first todo；后端验证 webview 提交集合完整，防止缺项导致静默 drop。 |
-| edit / reword / drop | 在原生 rebase 中执行；暂停时提供 Continue / Abort。 |
-| commit 锁定 | 使用稳定 `patch-id`，重排/cherry-pick 后仍能识别同一修改；push 前阻止包含锁定 commit 的范围。 |
+| 拖拽重排 | 通过 scripted interactive rebase 重排 oldest-first todo；后端验证 webview 提交集合完整，UI 显示 Base/HEAD 方向、拖拽前后语义和历史改写确认。 |
+| edit / reword / drop | 在原生 rebase 中执行；暂停时提供 Continue / Abort。Compose reword 失败或暂停时保留输入，不会错误报告成功。 |
+| commit 锁定 | 使用稳定 `patch-id`，重排/cherry-pick 后仍能识别同一修改；push 前阻止包含锁定 commit 的范围。locked commit 必须先解锁才能 Drop。 |
 | AI message | 对 commit、暂存区或工作区 diff 流式生成可编辑消息；保留常见 trailer，支持取消与可配置 deadline。 |
-| stash | autoStash 以 stash commit SHA 持久化定位，避免 `stash@{0}` 因外部操作漂移。 |
+| stash | autoStash 以 stash commit SHA 持久化定位，避免 `stash@{0}` 因外部操作漂移；append Abort 避免完整 snapshot 与 keep-index stash 的重复恢复。 |
 | push | 普通分支使用 `--force-with-lease`；可选评审 refspec；可取消进度和 OutputChannel 诊断；rebase edit 停靠时仍可推送。 |
-| 自动状态同步 | 文件事件与节流 index 轮询自动刷新 staged/unstaged 状态，终端 `git add` 后无需手动刷新。 |
-| 危险操作 UX | drop 前显示 commit 与历史改写确认；edit 停靠横幅展示目标和 Continue/Abort 指引。 |
-| staged append | 目标 commit `edit` 停靠后恢复初始 index，`--amend --no-edit`，再重放其后的提交。 |
+| 自动状态同步 | 文件事件与节流 index 轮询自动刷新 staged/unstaged 状态和文件数，终端 `git add` 后无需手动刷新。 |
+| 暂停 rebase 反馈 | 刷新时派生冲突文件、数量和暂停原因；未解决冲突会禁用 Continue，宿主仍二次检查。 |
+| 危险操作 UX | Drop、reorder、edit-stop、Abort 均有明确确认；成功改写记录 operation、old/new tip 和影响范围到 Output/通知。 |
+| staged append | 目标 commit `edit` 停靠后恢复初始 index，`--amend --no-edit`，再重放其后的提交。 | 
+| UI/可访问性基线 | message 主行/metadata 次行、菜单风险分组、Base/HEAD 方向、最小 ARIA、Escape、Menu 键与 Ctrl/Cmd+Enter。 |
 
 ## 3. 「将暂存区文件添加到此 commit」事务
 
@@ -74,8 +76,9 @@ src/
 ├─ lock/lockStore.ts               patch-id 持久化锁
 ├─ llm/client.ts                   OpenAI-compatible chat / streamChat、deadline、错误脱敏
 ├─ llm/messageGen.ts               diff 和提示词构造、流式生成入口
-├─ ui/rebaseViewProvider.ts        webview 协调、状态机、历史操作、OutputChannel、自动刷新
-├─ ui/secretsAccess.ts            SecretStorage 访问器注入桩（安全降级）
+├─ ui/rebaseViewProvider.ts        webview 协调、历史事务、暂停/冲突状态、OutputChannel、自动刷新
+├─ ui/rebaseState.ts               由 Git 未合并路径/explicit edit action 派生的暂停状态
+├─ ui/secretsAccess.ts             SecretStorage 访问器注入桩（安全降级）
 
 media/main.js                      webview DOM、拖拽、菜单、弹窗
 .github/workflows/release.yml      tag 发布门禁与 GitHub Release
@@ -91,14 +94,16 @@ media/main.js                      webview DOM、拖拽、菜单、弹窗
 | 逻辑 | `test/rebaseEngine.test.ts` | todo 顺序、各种 rebase action、空 todo |
 | 逻辑 | `test/pushGuard.test.ts` | 默认/refspec 模板/空白模板 |
 | 边界 | `test/gitRunner.integration.test.ts` | 非零 Git 结果、输出上限、取消信号 |
-| Git 集成 | `test/commitLog.integration.test.ts` | staged/unstaged 状态、commit 顺序、absolute git-path、edit stop |
+| Git 集成 | `test/commitLog.integration.test.ts` | staged/unstaged 文件数、commit 顺序、absolute git-path、edit stop/rebase-apply 分支 |
 | Git 集成 | `test/worktree.integration.test.ts` | stash apply/pop/drop、keep-index、外部删除 stash |
 | 功能集成 | `test/appendStaged.integration.test.ts` | staged append、amend、后续重放、未暂存恢复、stash 清理 |
+| Git 安全 | `test/rebaseSafety.integration.test.ts` | locked Drop conflict/Abort、冲突 Continue、edit-stop Abort 恢复 |
+| 暂停状态 | `test/rebasePauseState.test.ts` | conflict / explicit edit / paused 状态派生 |
 | LLM HTTP mock | `test/llmClient.test.ts` | SSE delta、畸形事件、deadline、预取消、流读取途中取消/超时、错误正文脱敏 |
 | Git 集成（推送/守卫） | `test/pushGuard.integration.test.ts` | bare-remote：force-with-lease 并发拒绝、lockedInPush 拦截/解锁 |
 | Git 集成（append 守卫） | `test/appendGuard.integration.test.ts` | 已推 upstream 守卫、锁定 commit patch-id 跨重写稳定 |
 | 注入桩 | `test/secretsAccess.test.ts` | SecretStorage 访问器安全降级与委托 |
-当前测试套件含 40 项测试（覆盖条目的完整裁决见 improvement.md）。
+当前测试套件含 48 项测试（UI/Git 安全裁决见 [`../ui-reivew/ui-review-0-5-0.md`](../ui-reivew/ui-review-0-5-0.md)，覆盖条目的完整裁决见 improvement.md）。
 
 命令：
 
@@ -129,9 +134,10 @@ npm run package         # 编译并生成 VSIX
 - ~~大仓库 patch-id 缓存~~（✅ v0.4.0 已实施：session cache）与结构化变更统计（✅ v0.4.0 已实施：`--numstat`）；
 - ~~append/stash 恢复可见性~~（✅ v0.4.0 已实施：精确 stash@{n} 提示 + `stashList` 命令）；
 - 多根工作区、`all` 模式虚拟滚动/上限、provider 模块拆分、SecretStorage 完整读写迁移和 l10n；
-- squash/fixup、多选合并、搜索过滤、双 commit diff、历史撤销和多远端；
+- squash/fixup、多选合并、搜索过滤、双 commit diff、**安全事务式**历史撤销和多远端；
+- 精确 rebase N/M 进度、状态栏常驻状态、完整键盘重排和人工 High Contrast/辅助技术验收；
 - 性能测试仓库与刷新延迟基准；
 
-详细结论、已修复项与未修改原因见 [`../review/review-response-0-4-0.md`](../review/review-response-0-4-0.md)。
+UI 建议的逐项事实纠正、已修复项与未修改原因见 [`../ui-reivew/ui-review-0-5-0.md`](../ui-reivew/ui-review-0-5-0.md)；代码评审处理记录见 [`../review/review-response-0-5-0.md`](../review/review-response-0-5-0.md)。
 
 外部版本化评审原文位于 `../review/code-review-<major>-<minor>-<patch>.md`；项目回复按相同版本号放在 `review-response-<major>-<minor>-<patch>.md`。开始评审前需读取 [`../review/code-review-commit.md`](../review/code-review-commit.md) 确认未覆盖 commit，完成后将精确 SHA 与对应报告写回该台账。

@@ -14,9 +14,9 @@
 
 安装后左侧活动栏出现 **Git Rebase** 图标，点击展开 **Commits** 面板。面板会显示当前分支**尚未推送**的 commit（默认范围，见下文配置）。
 
-- 列表**从上到下 = 从旧到新**（顶部是最早的 commit，底部是最新的）。
-- 每个 commit 前有一个**彩色圆点**（由 hash 生成，便于区分）、短 hash、以及 message 摘要。
-- 顶部工具栏有**刷新**按钮。
+- 列表**从上到下 = 从旧到新**（顶部标记为 **Base / 较早**，底部标记为 **HEAD / 较新**），与交互式 rebase todo 的执行顺序一致。
+- 每个 commit 以 message 为主信息（最多两行）；短 hash、作者和日期显示在次级元信息行。行首的中性圆点/时间轴用于浏览，`🔒` 表示锁定。
+- 顶部工具栏提供 **Push / Stash / Pop / Refresh**，右键菜单按查看、编辑/变基、保护和危险操作分组。
 
 ---
 
@@ -25,7 +25,7 @@
 所有操作都通过**拖拽**或**右键菜单**触发。
 
 ### 1. 拖拽重排
-直接拖动某个 commit 到目标位置松手，即可重排提交顺序（松手即时生效，后台自动执行 rebase）。拖动时按光标落在目标行的**上半区 / 下半区**决定插入到其**前 / 后**（对应蓝色上/下指示线），因此可以把某个 commit 拖到**列表最末位**（落在最后一行的下半区）。
+拖动某个 commit 时，行首 grip 与插入线会提示拖拽状态；目标行会明确显示插入到其**之前（较早）/之后（较新）**。松手后会显示历史改写确认，确认后执行 rebase。完成后在通知与 **Git Rebase Visual** Output 中显示操作、old tip、new tip 和受影响 commit 数。拖到最后一行下半区可移动到列表最末位。
 
 ### 2. 悬停查看详情
 鼠标悬停在某个 commit 上约 0.4 秒，会弹出浮层：
@@ -40,14 +40,14 @@
 
 | 菜单项 | 作用 |
 |--------|------|
-| **复制 commit hash** | 复制完整 hash 到剪贴板 |
-| **变基到此 commit** | 将此 commit 标记为 `edit`，rebase 停靠在此，便于在此点做改动（见「变基进行中」） |
-| **更改此 commit message** | 弹窗编辑 message，仅改该 commit 的 message，其余不变 |
-| **更改 message 并变基至此** | 改完 message 后 rebase 停靠在此 commit |
-| **为此 commit 生成 AI message** | 调用大模型根据该 commit 的 diff 生成 message（需先配置，见下文） |
-| **将暂存区文件添加到此 commit** | 将当前暂存区追加到选中 commit，自动重放其后的提交；会改写该 commit 及其后的历史（见下文） |
+| **复制 commit hash / message** | 复制完整 hash 或 message 到剪贴板 |
+| **停靠在此 (edit)** | 将此 commit 标记为 `edit`，rebase 停靠在此，便于在此点做改动（见「变基进行中」） |
+| **编辑 commit message…** | 弹窗编辑 message，仅改该 commit 的 message，其余不变 |
+| **编辑 message 并停靠…** | 改完 message 后 rebase 停靠在此 commit |
+| **AI 生成 message…** | 调用大模型根据该 commit 的 diff 生成 message（需先配置，见下文） |
+| **将暂存区文件添加到此 commit** | 将当前暂存区追加到选中 commit，自动重放其后的提交；会改写该 commit 及其后的历史（见下文）。目标锁定、暂存区为空或 rebase 中时会禁用并说明原因 |
 | **锁定 commit / 解除锁定** | 锁定他人的提交，防止把它推送出去（见下文） |
-| **删除 commit** | 从历史中移除该 commit（drop） |
+| **删除 commit (drop)** | 从历史中移除该 commit；锁定 commit 须先解除锁定，且会显示二次确认 |
 
 ### 4. commit message 编辑弹窗（reword / AI）
 「更改 message」「更改 message 并变基至此」「为此 commit 生成 AI message」都会打开同一个 compose 弹窗：
@@ -56,7 +56,8 @@
 - **补充信息给 AI**（仅 AI 模式）：可填写额外上下文（如关联的链接、Issue 号），配合 **生成 / 重新生成** 按钮多次生成。
 - **Commit message**：可编辑的结果框，AI 生成的内容会填入这里，可整体替换、也可从原始 message 复制部分内容拼接。
 - **保留的 trailer**：若原 message 结尾含 `Change-Id:` / `Signed-off-by:` 等 trailer，会被单独识别并**只读展示**；应用时自动保留、不被修改（`IPCSDK-xxxx` 之类的行仍算正文，可编辑）。
-- **应用 / 取消**：应用即写回该 commit（reword），并保留 trailer。
+- **应用 / 取消**：应用期间对话框保留并锁定输入，只有宿主 Git 操作成功后才关闭；失败时保留手写 message、在对话框内显示错误并可重试。支持 `Ctrl/Cmd+Enter` 应用、`Esc` 取消。
+- 支持基础键盘/无障碍操作：提交列表、菜单和弹窗带语义与焦点环；按 `Shift+F10` 或 Menu 键可打开当前 commit 的操作菜单。
 
 ### 5. 将暂存区文件添加到已有 commit
 先通过 VSCode 源代码管理（或 `git add`）把要追加的文件放入暂存区，再右键目标 commit → **将暂存区文件添加到此 commit**。
@@ -88,10 +89,10 @@
 
 ### 8. 变基进行中（暂停状态）
 当选择「变基到此 commit」或发生冲突时，rebase 会**暂停**：
-- 面板顶部出现黄色横幅 **变基进行中** + **Continue / Abort** 按钮。
-- 暂停所在的 commit 行会**高亮**并显示 `⏸ 停在此` 徽章。
-- 有冲突时，在编辑器解决并 `git add` 后点 **Continue**；想放弃点 **Abort**。
-- 暂停期间无法发起新的变基操作，需先 Continue 或 Abort。
+- 面板顶部出现**变基进行中**横幅 + **Continue / Abort** 按钮；Abort 会先要求确认。
+- 暂停所在的 commit 行会**高亮**并显示 `⏸ 停在此` 徽章；横幅区分冲突、显式 edit 停靠和其它暂停状态。
+- 有冲突时横幅会显示冲突文件；Continue 会禁用，直到你在编辑器解决冲突并 `git add`。宿主在 Continue 前还会再次检查 Git 冲突状态。
+- 暂停期间无法发起新的历史改写操作，需先 Continue 或 Abort。
 
 ### 9. 顶部工具栏（Push / Stash / Pop / Refresh）
 面板顶部工具栏提供：
@@ -102,6 +103,7 @@
   - 推送与变基解耦，避免 Gerrit 因「无改动」拒绝合并式推送。
 - **Stash**（archive 图标）：把当前未提交改动 `git stash push -u`（默认命名）。
 - **Pop**（inbox 图标）：`git stash pop` 恢复最近一次 stash。
+- **查看 stash 列表**：可通过命令 `Git Rebase: View Stash List` 打开 Git stash 视图；不可用时会将精确的 `stash@{n}` 列表写入 **Git Rebase Visual** Output。
 - **Refresh**：刷新列表。
 
 > Stash / Pop 按钮主要用于**手动 stash 模式**（见下）：你自行 stash 后再执行变基相关操作，完成后再 pop。
@@ -162,6 +164,6 @@
 ## 注意事项
 
 - 变基/推送会**改写历史**。请在自己的功能分支上使用；普通分支推送用的是 `--force-with-lease`（会在远端被他人更新时自动中止，避免覆盖）。
-- 重排相互**有依赖**的 commit 可能产生冲突，此时按「变基进行中」提示解决即可，这与命令行 `git rebase -i` 行为一致。
+- 重排相互**有依赖**的 commit 可能产生冲突，此时按「变基进行中」提示解决即可，这与命令行 `git rebase -i` 行为一致。成功改写会在 Output 中记录 old/new tip 和影响范围；这不是一键 Undo，若需手动恢复请以记录的 tip 为边界审慎操作。
 - 面板仅显示**本地分支**的 commit。
 - 变基通过驱动原生 `git rebase -i` 实现，编辑器进程使用插件运行时的 node/Electron 可执行文件（`process.execPath`），因此在 vscode-server / 远程环境下即使 PATH 中没有 `node` 也能正常工作。

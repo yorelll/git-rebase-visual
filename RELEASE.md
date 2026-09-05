@@ -104,6 +104,15 @@ code --install-extension git-rebase-visual-<version>.vsix
 
 ### 更新记录
 
+- **0.5.0** — UI/UX 安全反馈与历史改写可靠性增强：
+  - **UI 评审闭环**：基于六张实际 UI 截图、用户建议、独立 UI 审查、实施审查与主 agent 复核，新增 [`docs/ui-reivew/ui-review-0-5-0.md`](docs/ui-reivew/ui-review-0-5-0.md)；逐项记录已实施、延后与事实纠正（如 hover 已是 fixed 浮层，不存在 layout shift）。
+  - **列表与菜单**：保持与 interactive-rebase todo 一致的 oldest-first，新增 Base/HEAD 方向、拖拽 grip/前后方向提示与历史改写确认；列表调整为 subject 主行、hash/author/date metadata；菜单增加目标 header、分组、危险 Drop 尾置、锁定/暂存/rebase 状态禁用原因。
+  - **历史安全**：locked commit 无法直接 Drop，避免 rebase 冲突/失败/Abort 后锁丢失；Drop、reorder、edit-stop、Abort 增加明确确认和 operation old/new tip/影响范围反馈。
+  - **暂停 rebase**：新增 `rebaseState`，实时显示冲突文件/数量/暂停原因；未解决冲突时 Continue 禁用且宿主二次检查；不再把 replay conflict 的 stale stopped-sha 错标为 edit stop。
+  - **append Abort 修正**：修复 replay conflict → Abort 时完整 snapshot 与 keep-index stash 的双重恢复，避免重复应用未暂存改动、冲突与 pending stash 残留。
+  - **Compose/无障碍**：Apply 在宿主成功前保留 dialog 和手写输入；reword 暂停/失败也走 applyFailed；新增最小 ARIA、`lang="zh-CN"`、Escape、Menu 键、Ctrl/Cmd+Enter 和 focus-visible 基线。
+  - **测试**：新增真实 Git rebase 安全测试与暂停状态测试；全套扩展至 **48 项**。
+
 - **0.4.0** — P2 高价值项落地与可靠性增强：
   - **测试覆盖扩展（P2-6）**：新增真实 bare remote 集成测试，覆盖 `--force-with-lease` 并发远端变更拒绝与 `lockedInPush` 锁定拦截/解锁放行；新增 append 前置守卫测试（目标已在 upstream / 目标被锁定均不可 append）；`streamChat` 增加流读取途中取消与超时的 HTTP mock 测试，并据此加固实现——每次 SSE read 与取消/超时竞速、吸收进行中 read 的取消拒绝、撤销时清理计时器，杜绝挂死与 unhandled rejection。
   - **大仓库性能（P2-3，部分）**：patch-id 增加按 `<repoRoot>:<hash>` 的 session 缓存（`clearPatchIdCache` 供测试重置），避免同一 hash 在 hover/lock/push 路径重复计算；hover 变更统计改用结构化 `--numstat`（`summarizeNumstat`，正确处理二进制/重命名行），`--shortstat` 文本解析仅作降级；顺带修复根提交（root commit）patch-id 恒为空的缺陷（`diff-tree --root`）。
