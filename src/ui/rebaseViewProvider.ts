@@ -779,6 +779,15 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
         toast("warn", `恢复原始暂存区时有冲突：${restore.message}。安全副本 ${name}（stash: ${pending.changeStash.slice(0, 7)}）仍保留，请用 “git stash list” / “git stash apply --index ${name}” 手动恢复。`);
         return false;
       }
+      // The full snapshot already includes the worktree-only changes. Popping
+      // the later keep-index snapshot here would apply those same changes a
+      // second time and can manufacture a conflict during Abort.
+      if (pending.unstagedStash) {
+        await stashDropBySha(cwd, pending.unstagedStash);
+      }
+      await stashDropBySha(cwd, pending.changeStash);
+      await this.clearPendingAppend(root);
+      return true;
     }
     if (!pending.amended) {
       if (!restoreOriginalIndex) {
