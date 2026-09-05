@@ -249,7 +249,16 @@ export async function rebaseAtEditStop(cwd: string): Promise<boolean> {
       .reverse()
       .map((line) => line.trim())
       .find((line) => line && !line.startsWith("#"));
-    if (!lastAction || !/^edit\s+/i.test(lastAction)) {
+    const match = lastAction?.match(/^edit\s+([0-9a-f]{7,40})\b/i);
+    if (!match) {
+      return false;
+    }
+    // `stopped-sha` is updated to the currently replayed commit. A conflict
+    // after an earlier edit therefore has `done` ending in that edit but a
+    // different stopped SHA; comparing them prevents the resolved-conflict
+    // polling window from being mislabeled as another edit stop.
+    const stopped = await rebaseStoppedSha(cwd);
+    if (!stopped || !stopped.startsWith(match[1])) {
       return false;
     }
     // After Git stops for an edit, it removes that command from todo. During a
