@@ -18,6 +18,17 @@ const SEP = "\x1f"; // unit separator, safe inside git format
 const REC = "\x1e"; // record separator
 
 /**
+ * Read-only status queries run from the visible webview and its periodic
+ * refresh path. Git may otherwise opportunistically refresh index metadata,
+ * briefly creating index.lock and racing an interactive terminal `switch`,
+ * `stash`, or `commit`. The status result remains correct when optional locks
+ * are disabled; Git simply skips that cache-refresh optimization.
+ */
+const BACKGROUND_STATUS_ENV: NodeJS.ProcessEnv = {
+  GIT_OPTIONAL_LOCKS: "0",
+};
+
+/**
  * The minimum Git version the extension supports (2.31.0, the first Git with
  * `--path-format=absolute`). The installed Git revision is probed lazily at
  * first use and cached for the session.
@@ -403,7 +414,10 @@ export async function workingStatus(cwd: string): Promise<WorkingStatus> {
   // entry, which would make the UI claim there is one changed file even when
   // it contains many. Expand untracked files so both counters reflect files;
   // tracked renames and submodules remain one porcelain entry each.
-  const res = await runGit(["status", "--porcelain", "--untracked-files=all"], { cwd });
+  const res = await runGit(
+    ["status", "--porcelain", "--untracked-files=all"],
+    { cwd, env: BACKGROUND_STATUS_ENV }
+  );
   let stagedCount = 0;
   let unstagedCount = 0;
   for (const line of res.stdout.split("\n")) {
@@ -433,7 +447,10 @@ export async function workingStatus(cwd: string): Promise<WorkingStatus> {
 
 /** True when the working tree has any staged or unstaged changes. */
 export async function isDirty(cwd: string): Promise<boolean> {
-  const res = await runGit(["status", "--porcelain"], { cwd });
+  const res = await runGit(
+    ["status", "--porcelain"],
+    { cwd, env: BACKGROUND_STATUS_ENV }
+  );
   return res.stdout.trim().length > 0;
 }
 

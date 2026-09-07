@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import * as fs from "fs";
 import * as path from "path";
-import { clearPatchIdCache, commitDetail, conflictedFiles, currentBranch, getCommits, isRebaseInProgress, patchId, rebaseAtEditStop, rebaseStoppedSha, rebasingBranch, resolveRange, summarizeNumstat, workingStatus } from "../src/git/commitLog";
+import { clearPatchIdCache, commitDetail, conflictedFiles, currentBranch, getCommits, isDirty, isRebaseInProgress, patchId, rebaseAtEditStop, rebaseStoppedSha, rebasingBranch, resolveRange, summarizeNumstat, workingStatus } from "../src/git/commitLog";
 import { resolveBase } from "../src/git/rebaseEngine";
 import { createRepo, commitFile, git, removeRepo } from "./helpers/gitTestRepo";
 
@@ -23,6 +23,27 @@ test("workingStatus distinguishes staged, unstaged, and untracked changes", asyn
     stagedCount: 2,
     unstagedCount: 2,
   });
+});
+
+test("background status reads work with an existing optional index lock", async (t) => {
+  const cwd = createRepo();
+  t.after(() => removeRepo(cwd));
+  commitFile(cwd, "one.txt", "one\n", "initial");
+  fs.writeFileSync(path.join(cwd, "one.txt"), "changed\n", "utf8");
+  const lock = git(cwd, ["rev-parse", "--path-format=absolute", "--git-path", "index.lock"]);
+  fs.writeFileSync(lock, "simulated optional lock\n", "utf8");
+
+  try {
+    assert.deepEqual(await workingStatus(cwd), {
+      hasStaged: false,
+      hasUnstaged: true,
+      stagedCount: 0,
+      unstagedCount: 1,
+    });
+    assert.equal(await isDirty(cwd), true);
+  } finally {
+    fs.rmSync(lock, { force: true });
+  }
 });
 
 test("workingStatus counts each untracked file and a rename once", async (t) => {

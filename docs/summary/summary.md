@@ -26,7 +26,7 @@ Webview (media/main.js)
 | AI message | 对 commit、暂存区或工作区 diff 流式生成可编辑消息；保留常见 trailer，支持取消与可配置 deadline。 |
 | stash | autoStash 以 stash commit SHA 持久化定位，避免 `stash@{0}` 因外部操作漂移；append Abort 避免完整 snapshot 与 keep-index stash 的重复恢复。 |
 | push | 普通分支使用 `--force-with-lease`；可选评审 refspec；可取消进度和 OutputChannel 诊断；rebase edit 停靠时仍可推送。 |
-| 自动状态同步 | 文件事件与节流 index 轮询自动刷新 staged/unstaged 状态和文件数，终端 `git add` 后无需手动刷新。 |
+| 自动状态同步 | 文件事件与节流 index 轮询自动刷新 staged/unstaged 状态和文件数，终端 `git add` 后无需手动刷新；后台 status 使用 `GIT_OPTIONAL_LOCKS=0`，避免 optional `index.lock` 与终端写操作竞争。 |
 | 暂停 rebase 反馈 | 刷新时派生冲突文件、数量和暂停原因；未解决冲突会禁用 Continue，宿主仍二次检查。 |
 | 危险操作 UX | Drop、reorder、edit-stop、Abort 均有明确确认；成功改写记录 operation、old/new tip 和影响范围到 Output/通知。 |
 | staged append | 目标 commit `edit` 停靠后恢复初始 index，`--amend --no-edit`，再重放其后的提交。 | 
@@ -124,8 +124,8 @@ npm run package         # 编译并生成 VSIX
 3. `npm run test:release`；
 4. 打包 VSIX；
 5. 验证 VSIX 含必要 runtime 文件，不含 `src/`、`test/`、`docs/`、`node_modules/`；
-6. 验证 `RELEASE.md` 包含对应版本；
-7. 创建 GitHub Release 并上传 VSIX。
+6. 验证 `RELEASE.md` 包含对应版本，且 `docs/release-notes/<version>.md` 存在、标题匹配、无未替换模板占位符；
+7. 以该版本化 Markdown 作为最终 Release body 创建 GitHub Release 并上传 VSIX。
 
 任一环节失败均不会发布。
 

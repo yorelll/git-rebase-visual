@@ -56,10 +56,14 @@ jobs:
           ! unzip -l "git-rebase-visual-$version.vsix" | grep -q 'extension/docs/'
           ! unzip -l "git-rebase-visual-$version.vsix" | grep -q 'extension/node_modules/'
 
-      - name: Check release notes are documented
+      - name: Verify final release body
         shell: bash
         run: |
           version="${GITHUB_REF_NAME#v}"
+          notes="docs/release-notes/$version.md"
+          test -s "$notes"
+          grep -Fq "## Git Rebase Visual $version" "$notes"
+          ! grep -Eq '{{[A-Z_]+}}' "$notes"
           grep -q -- "**$version**" RELEASE.md
 
       - name: Create GitHub release
@@ -70,5 +74,5 @@ jobs:
           gh release create "$GITHUB_REF_NAME" \
             --repo "$GITHUB_REPOSITORY" \
             --title "Git Rebase Visual v$version" \
-            --generate-notes \
+            --notes-file "docs/release-notes/$version.md" \
             "git-rebase-visual-$version.vsix#Git Rebase Visual v$version"

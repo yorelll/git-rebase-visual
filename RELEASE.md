@@ -87,9 +87,10 @@ code --install-extension git-rebase-visual-<version>.vsix
 2. 更新 `package.json` 的 `version`（遵循语义化版本），并在下方维护更新记录。
 3. 运行完整发布门禁：`npm run test:release`（类型检查 + 逻辑/边界/真实 Git 集成测试 + 覆盖率）。
 4. 重新 `npm run package`，确认 VSIX 内容正确。
-5. 推送与版本一致的 `v<version>` tag。GitHub Actions 会再次执行发布门禁、校验 VSIX 不含源码/测试/文档/node_modules、校验 RELEASE.md 有该版本记录，全部通过后才创建并上传 Release。
+5. 按 [`docs/release-template.md`](docs/release-template.md) 创建 `docs/release-notes/<version>.md`，填入面向下载者的**最终**新功能、修复、可靠性说明、使用方式、功能总览、文件和系统要求。不得保留 `{{...}}` 占位符。
+6. 推送与版本一致的 `v<version>` tag。GitHub Actions 会再次执行发布门禁、校验 VSIX 不含源码/测试/文档/node_modules、校验 RELEASE.md 与 `docs/release-notes/<version>.md`，全部通过后以该 Markdown 文件作为最终 Release body 创建并上传 Release。
 
-> Release 工作流不会以测试失败的构建发布 VSIX；本地门禁与 CI 使用相同的 `npm run test:release` 命令。
+> Release 工作流不会以测试失败的构建发布 VSIX；本地门禁与 CI 使用相同的 `npm run test:release` 命令。Release 创建后不依赖事后 `gh release edit` 补写功能说明。`docs/release-notes/` 仅为发布输入，按 `.vscodeignore` 排除在 VSIX 外。
 
 ### 测试覆盖范围
 
@@ -103,6 +104,11 @@ code --install-extension git-rebase-visual-<version>.vsix
 测试文件位于 `test/`，运行 `npm run test` 或 `npm run test:coverage`。
 
 ### 更新记录
+
+- **0.5.1** — 后台 Git 状态轮询的 index-lock 竞争修复：
+  - **终端切分支/stash 并发保护**：面板可见时后台 `git status` 刷新可能触发 Git 的可选 index metadata refresh，短暂创建 `.git/index.lock`，与终端 `git switch`、`git stash` 等写 index 操作竞争。后台 `workingStatus()` 与 `isDirty()` 现使用 `GIT_OPTIONAL_LOCKS=0`，状态结果保持正确但不再获取 optional index lock；rebase、stash、commit、push 等写操作仍保留正常 Git lock。
+  - **回归测试**：真实临时仓库中预先创建 `index.lock`，验证后台状态读取仍能正确返回 staged/unstaged 状态和 dirty 结果。
+  - **发布说明标准化**：新增 [`docs/release-template.md`](docs/release-template.md)；每次 tag 前必须提交 `docs/release-notes/<version>.md`。Release workflow 校验 body 存在、标题版本匹配、无未替换占位符，并以 `--notes-file` 发布最终说明，不再使用 `--generate-notes` 或依赖事后编辑。
 
 - **0.5.0** — UI/UX 安全反馈与历史改写可靠性增强：
   - **UI 评审闭环**：基于六张实际 UI 截图、用户建议、独立 UI 审查、实施审查与主 agent 复核，新增 [`docs/ui-reivew/ui-review-0-5-0.md`](docs/ui-reivew/ui-review-0-5-0.md)；逐项记录已实施、延后与事实纠正（如 hover 已是 fixed 浮层，不存在 layout shift）。
