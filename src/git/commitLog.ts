@@ -5,7 +5,25 @@ export interface Commit {
   shortHash: string;
   subject: string;
   author: string;
+  authorEmail: string;
   date: string;
+}
+
+/** Reads the configured identity; absent email intentionally remains unknown. */
+export async function currentUserEmail(cwd: string): Promise<string | undefined> {
+  const result = await runGit(["config", "--get", "user.email"], { cwd });
+  const email = result.code === 0 ? result.stdout.trim() : "";
+  return email || undefined;
+}
+
+/** A stable, non-cryptographic author color seed; labels/initials remain available for non-color users. */
+export function authorColorKey(email: string): string {
+  let value = 2166136261;
+  for (const char of email.toLowerCase()) {
+    value ^= char.charCodeAt(0);
+    value = Math.imul(value, 16777619);
+  }
+  return String(Math.abs(value >>> 0) % 360);
 }
 
 export type RangeConfig =
@@ -156,7 +174,7 @@ export async function getCommits(
   cwd: string,
   revRange: string
 ): Promise<Commit[]> {
-  const format = ["%H", "%h", "%s", "%an", "%ad"].join(SEP) + REC;
+  const format = ["%H", "%h", "%s", "%an", "%ae", "%ad"].join(SEP) + REC;
   const args = [
     "log",
     "--date=short",
@@ -172,8 +190,8 @@ export async function getCommits(
     .map((r) => r.replace(/^\n/, ""))
     .filter((r) => r.trim().length > 0)
     .map((rec) => {
-      const [hash, shortHash, subject, author, date] = rec.split(SEP);
-      return { hash, shortHash, subject, author, date };
+      const [hash, shortHash, subject, author, authorEmail, date] = rec.split(SEP);
+      return { hash, shortHash, subject, author, authorEmail, date };
     });
 }
 
@@ -242,6 +260,25 @@ export async function rebaseStoppedSha(cwd: string): Promise<string | undefined>
  * inspecting the last completed action avoids reporting a stale stopped-sha
  * as an edit stop.
  */
+/** Reads interactive todo files when available. Other rebase backends are intentionally unknown. */
+export async function rebaseTodoFiles(cwd: string): Promise<{ doneLines?: string[]; todoLines?: string[] }> {
+  const [donePath, todoPath] = await Promise.all([
+    rebaseMergePath(cwd, "done"),
+    rebaseMergePath(cwd, "git-rebase-todo"),
+  ]);
+  if (!donePath || !todoPath) return {};
+  const fs = await import("fs");
+  try {
+    if (!fs.existsSync(donePath) || !fs.existsSync(todoPath)) return {};
+    return {
+      doneLines: fs.readFileSync(donePath, "utf8").split(/\r?\n/),
+      todoLines: fs.readFileSync(todoPath, "utf8").split(/\r?\n/),
+    };
+  } catch {
+    return {};
+  }
+}
+
 export async function rebaseAtEditStop(cwd: string): Promise<boolean> {
   const [donePath, todoPath] = await Promise.all([
     rebaseMergePath(cwd, "done"),

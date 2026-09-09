@@ -62,6 +62,17 @@
         "title": "Pop Stash",
         "category": "Git Rebase",
         "icon": "$(inbox)"
+      },
+      {
+        "command": "gitRebaseVisual.undo",
+        "title": "Undo Last Rewrite",
+        "category": "Git Rebase",
+        "icon": "$(discard)"
+      },
+      {
+        "command": "gitRebaseVisual.reveal",
+        "title": "Show Git Rebase Visual",
+        "category": "Git Rebase"
       }
     ],
     "menus": {
@@ -82,9 +93,14 @@
           "group": "navigation@3"
         },
         {
-          "command": "gitRebaseVisual.refresh",
+          "command": "gitRebaseVisual.undo",
           "when": "view == gitRebaseVisual.commits",
           "group": "navigation@4"
+        },
+        {
+          "command": "gitRebaseVisual.refresh",
+          "when": "view == gitRebaseVisual.commits",
+          "group": "navigation@5"
         }
       ]
     },

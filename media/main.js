@@ -54,10 +54,11 @@
   }
 
   function renderDirection() {
-    if (!directionEl) {
-      return;
-    }
-    directionEl.textContent = dragHint || "↑ Base / 较早（顶部） · ↓ HEAD / 较新（底部）";
+    // The top/bottom timeline anchors below already explain direction. Keep this
+    // compact live region for keyboard drag feedback only, not duplicate chrome.
+    if (!directionEl) return;
+    directionEl.textContent = dragHint;
+    directionEl.classList.toggle("hidden", !dragHint);
   }
 
   function clearDragHint() {
@@ -174,6 +175,12 @@
       titleEl.textContent = title;
       const guidanceEl = document.createElement("div");
       guidanceEl.textContent = guidance;
+      const progress = state.totalSteps === undefined
+        ? "进度 unknown（外部 rebase 无法可靠映射）"
+        : `步骤 ${Math.min((state.completedSteps || 0) + 1, state.totalSteps)} / ${state.totalSteps}`;
+      const progressEl = document.createElement("div");
+      progressEl.className = "banner-progress";
+      progressEl.textContent = progress;
       const actions = document.createElement("div");
       actions.className = "banner-actions";
       const continueButton = document.createElement("button");
@@ -185,13 +192,44 @@
         continueButton.title = `还有 ${state.conflictCount} 个文件未解决；解决并暂存后才能 Continue。`;
       }
       continueButton.onclick = () => vscode.postMessage({ type: "continueRebase" });
+      if (isEditStop) {
+        const editActions = document.createElement("div");
+        editActions.className = "edit-actions";
+        const counts = document.createElement("div");
+        counts.className = "edit-counts";
+        counts.textContent = `在此 commit 上的改动：${state.stagedCount || 0} 个暂存 · ${state.unstagedCount || 0} 个工作区文件`;
+        const amend = document.createElement("button");
+        amend.className = "btn primary";
+        amend.textContent = "Amend 当前 commit…";
+        amend.disabled = !state.hasStaged;
+        amend.title = state.hasStaged ? "" : "请先在 SCM 中暂存改动。";
+        amend.onclick = () => openEditStopCompose("amend");
+        const create = document.createElement("button");
+        create.className = "btn";
+        create.textContent = "创建新 commit…";
+        create.disabled = !state.hasStaged;
+        create.title = state.hasStaged ? "" : "请先在 SCM 中暂存改动。";
+        create.onclick = () => openEditStopCompose("new");
+        const messageOnly = document.createElement("button");
+        messageOnly.className = "btn";
+        messageOnly.textContent = "仅生成 message";
+        messageOnly.onclick = () => vscode.postMessage({ type: "openCompose", mode: "staged", ai: true, thenEdit: false });
+        editActions.append(counts, amend, create, messageOnly);
+      }
+      if (isConflict) {
+        const skip = document.createElement("button");
+        skip.className = "btn danger-btn";
+        skip.textContent = "Skip（丢弃 patch）";
+        skip.onclick = () => vscode.postMessage({ type: "skipRebase" });
+        actions.appendChild(skip);
+      }
       const abortButton = document.createElement("button");
       abortButton.className = "btn danger-btn";
       abortButton.id = "b-abort";
       abortButton.textContent = "Abort";
       abortButton.onclick = () => vscode.postMessage({ type: "abortRebase" });
       actions.append(continueButton, abortButton);
-      bannerEl.append(titleEl, guidanceEl, actions);
+      bannerEl.append(titleEl, guidanceEl, progressEl, actions);
       bannerEl.classList.remove("hidden");
       return;
     }
@@ -233,20 +271,29 @@
       return;
     }
     if (state.hasStaged) {
-      changesEl.appendChild(
-        changeBtn(`为暂存区生成并提交（${state.stagedCount || 0} 个文件）`, { mode: "staged", ai: true })
-      );
+      changesEl.appendChild(changeBtn("生成 message 并提交暂存区", { mode: "staged", ai: true, primary: true }));
     }
+    const more = document.createElement("details");
+    more.className = "changes-more";
+    const summary = document.createElement("summary");
+    summary.textContent = "更多提交选项";
+    more.appendChild(summary);
     if (state.hasUnstaged) {
-      changesEl.appendChild(
-        changeBtn(`为工作区生成并提交（${state.unstagedCount || 0} 个文件，git add -A）`, { mode: "working", ai: true })
-      );
+      const all = changeBtn("提交全部改动（git add -A）⚠", { mode: "working", ai: true });
+      all.classList.add("danger-choice");
+      more.appendChild(all);
     }
+    const only = document.createElement("button");
+    only.className = "btn small";
+    only.textContent = "仅生成 message（不提交）";
+    only.onclick = () => vscode.postMessage({ type: "openCompose", mode: state.hasStaged ? "staged" : "working", ai: true, thenEdit: false, messageOnly: true });
+    more.appendChild(only);
+    changesEl.appendChild(more);
   }
 
   function changeBtn(text, ctx) {
     const b = document.createElement("button");
-    b.className = "btn small";
+    b.className = "btn small" + (ctx.primary ? " primary" : "");
     b.textContent = text;
     b.onclick = () =>
       vscode.postMessage({
@@ -285,15 +332,17 @@
     const row = document.createElement("div");
     const stopped = state.pausedReason === "edit" && state.stoppedAt && c.hash === state.stoppedAt;
     const index = state.commits.indexOf(c) + 1;
+    const pending = (state.pendingHashes || []).some((hash) => c.hash.startsWith(hash) || hash.startsWith(c.hash));
     row.className =
-      "commit" + (c.locked ? " locked" : "") + (stopped ? " stopped" : "");
-    row.draggable = !state.rebaseInProgress;
+      "commit" + (c.locked ? " locked" : "") + (stopped ? " stopped" : "") + (pending ? " pending" : "");
+    // HTML drag is enabled only while pointer starts on the grip below.
+    row.draggable = false;
     row.dataset.hash = c.hash;
     row.tabIndex = 0;
     row.setAttribute("role", "listitem");
     row.setAttribute(
       "aria-label",
-      `第 ${index} 个，共 ${state.commits.length} 个，${c.subject}，${c.shortHash}，${c.author}，${c.date}${c.locked ? "，已锁定" : ""}${stopped ? "，变基停靠于此" : ""}`
+      `第 ${index} 个，共 ${state.commits.length} 个，${c.subject}，${pending ? "待重放，原 hash 将在 Continue 后变化，" : ""}${c.shortHash}，${c.author}，${c.date}${c.locked ? "，已锁定" : ""}${stopped ? "，变基停靠于此" : ""}`
     );
 
     const grip = document.createElement("span");
@@ -301,9 +350,13 @@
     grip.textContent = "⋮⋮";
     grip.title = "拖拽重排；顶部较早，底部较新";
     grip.setAttribute("aria-hidden", "true");
+    grip.draggable = !state.rebaseInProgress;
     const dot = document.createElement("span");
     dot.className = "dot";
-    dot.setAttribute("aria-hidden", "true");
+    dot.textContent = c.authorInitial || "?";
+    dot.style.setProperty("--author-hue", c.authorColorKey || "0");
+    dot.title = `${c.author}${c.isCurrentAuthor === false ? "（非当前作者）" : c.isCurrentAuthor === "unknown" ? "（当前作者未知）" : "（当前作者）"}`;
+    dot.setAttribute("aria-label", dot.title);
 
     const content = document.createElement("div");
     content.className = "commit-content";
@@ -312,8 +365,14 @@
     subject.textContent = c.subject;
     const meta = document.createElement("span");
     meta.className = "commit-meta";
-    meta.textContent = `${c.shortHash} · ${c.author} · ${c.date}`;
+    meta.textContent = `${pending ? `${c.shortHash.slice(0, 8)}*（待重放）` : c.shortHash.slice(0, 8)} · ${c.author} · ${c.date}`;
     content.append(subject, meta);
+    if (pending) {
+      const pendingText = document.createElement("span");
+      pendingText.className = "pending-text";
+      pendingText.textContent = "待重放：Continue 后 hash 将变化";
+      content.appendChild(pendingText);
+    }
     row.append(grip, dot, content);
 
     if (c.locked) {
@@ -330,7 +389,8 @@
       row.appendChild(badge);
     }
 
-    row.addEventListener("dragstart", (e) => {
+    grip.addEventListener("dragstart", (e) => {
+      if (state.rebaseInProgress) { e.preventDefault(); return; }
       dragHash = c.hash;
       row.classList.add("dragging");
       e.dataTransfer.effectAllowed = "move";
@@ -338,7 +398,7 @@
       renderDirection();
       hideTooltip();
     });
-    row.addEventListener("dragend", () => {
+    grip.addEventListener("dragend", () => {
       dragHash = null;
       row.classList.remove("dragging");
       clearDropMarkers();
@@ -427,6 +487,8 @@
 
     menuEl.append(menuGroupLabel("查看"));
     menuEl.append(menuItem({ label: "复制 commit hash", action: () => send("copyHash", c) }));
+    menuEl.append(menuItem({ label: "复制 message", action: () => send("copyMessage", c) }));
+    menuEl.append(menuItem({ label: "打开变更…", action: () => vscode.postMessage({ type: "openDiff", hash: c.hash }) }));
     menuEl.append(menuSeparator(), menuGroupLabel("编辑与变基"));
     menuEl.append(menuItem({
       label: "编辑 message…",
@@ -443,6 +505,15 @@
       action: () => vscode.postMessage({ type: "openCompose", mode: "commit", hash: c.hash, ai: false, thenEdit: true }),
     }));
     menuEl.append(menuItem({ label: "停靠在此 (edit)", action: () => send("rebaseTo", c) }));
+    const position = state.commits.indexOf(c);
+    const previous = state.commits[position - 1];
+    const combineReason = position <= 0
+      ? "第一个 commit 不能合并到前驱。"
+      : c.locked || previous?.locked
+        ? "当前 commit 或前驱已锁定。"
+        : state.rebaseInProgress ? "变基进行中。" : "";
+    menuEl.append(menuItem({ label: combineReason ? `合并到上一个 (squash)（${combineReason.replace(/。$/, "")}）` : "合并到上一个 (squash)", disabled: !!combineReason, disabledReason: combineReason, action: () => send("squash", c) }));
+    menuEl.append(menuItem({ label: combineReason ? `合并到上一个，丢弃 message (fixup)（${combineReason.replace(/。$/, "")}）` : "合并到上一个，丢弃 message (fixup)", disabled: !!combineReason, disabledReason: combineReason, action: () => send("fixup", c) }));
 
     const appendReason = c.locked
       ? "目标已锁定，请先解除锁定。"
@@ -603,12 +674,25 @@
 
   // ---- compose dialog -----------------------------------------------------
 
+  function openEditStopCompose(kind) {
+    dialogCtx = { mode: "editStop", editKind: kind, hash: state.stoppedAt, thenEdit: false, ai: false };
+    dialogApplying = false;
+    dialogText.readOnly = false;
+    dialogText.value = "";
+    dialogTitle.textContent = kind === "amend" ? "Amend 当前 edit commit" : "在 edit 停靠创建新 commit";
+    origBlock.classList.add("hidden"); aiBlock.classList.add("hidden"); trailerBlock.classList.add("hidden");
+    setDialogError("");
+    dialogEl.classList.remove("hidden");
+    dialogText.focus();
+  }
+
   function openDialog(m) {
     dialogCtx = {
       mode: m.mode,
       hash: m.hash,
       thenEdit: m.thenEdit === true,
       ai: m.ai === true,
+      messageOnly: m.messageOnly === true,
     };
     // Must reset before making the dialog visible: closeDialog intentionally
     // refuses to close while an apply is pending.
@@ -708,13 +792,21 @@
     }
     setDialogError("");
     setDialogApplying(true);
-    vscode.postMessage({
-      type: "apply",
-      mode: dialogCtx.mode,
-      hash: dialogCtx.hash,
-      message,
-      thenEdit: dialogCtx.thenEdit,
-    });
+    if (dialogCtx.mode === "editStop") {
+      vscode.postMessage({ type: dialogCtx.editKind === "amend" ? "commitEditAmend" : "commitEditNew", message });
+    } else if (dialogCtx.messageOnly) {
+      setDialogApplying(false);
+      vscode.postMessage({ type: "copyText", text: message });
+      announce("已生成 message，尚未提交。");
+    } else {
+      vscode.postMessage({
+        type: "apply",
+        mode: dialogCtx.mode,
+        hash: dialogCtx.hash,
+        message,
+        thenEdit: dialogCtx.thenEdit,
+      });
+    }
   };
 
   function resetGenerateBtn() {

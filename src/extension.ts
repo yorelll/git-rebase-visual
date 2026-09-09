@@ -29,6 +29,12 @@ export function activate(context: vscode.ExtensionContext): void {
     ),
     vscode.commands.registerCommand("gitRebaseVisual.stashList", () =>
       provider.showStashList()
+    ),
+    vscode.commands.registerCommand("gitRebaseVisual.undo", () =>
+      provider.undoLastRewrite()
+    ),
+    vscode.commands.registerCommand("gitRebaseVisual.reveal", () =>
+      vscode.commands.executeCommand("workbench.view.extension.gitRebaseVisual")
     )
   );
 }

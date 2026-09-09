@@ -3,7 +3,7 @@ import * as fs from "fs";
 import * as path from "path";
 import { runGit, git, GitResult } from "./gitRunner";
 
-export type RebaseAction = "pick" | "reword" | "drop" | "edit";
+export type RebaseAction = "pick" | "reword" | "drop" | "edit" | "squash" | "fixup";
 
 export interface RebaseItem {
   hash: string;

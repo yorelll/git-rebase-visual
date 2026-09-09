@@ -1,6 +1,7 @@
 import "./appendGuard.integration.test";
 import "./appendStaged.integration.test";
 import "./commitLog.integration.test";
+import "./composeDraft.test";
 import "./gitRunner.integration.test";
 import "./llmClient.test";
 import "./message.test";
@@ -8,6 +9,9 @@ import "./pushGuard.integration.test";
 import "./pushGuard.test";
 import "./rebaseEngine.test";
 import "./rebasePauseState.test";
+import "./rebaseProgressState.test";
+import "./squashFixup.integration.test";
+import "./undo.integration.test";
 import "./rebaseSafety.integration.test";
 import "./secretsAccess.test";
 import "./worktree.integration.test";
