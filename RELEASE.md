@@ -105,6 +105,13 @@ code --install-extension git-rebase-visual-<version>.vsix
 
 ### 更新记录
 
+- **0.6.1** — rebase 面板交互稳定性修复：
+  - **Compose 原 message / trailer 可靠交付**：修复首次打开或 Webview reload 时宿主在 listener 就绪前发送 payload，导致原 message 与 trailer 为空的竞态。Compose Panel 现通过 `composeReady` handshake 保存并重发最新 payload。
+  - **locked run 交互稳定性**：连续 locked commit 仅在数量 **≥3** 且 `gitRebaseVisual.collapseLockedRuns=true`（默认）时折叠；用户展开状态跨 refresh 保持。折叠摘要支持将非 locked commit 拖到 run 前/后，不必展开。
+  - **搜索/更多选项状态保留**：状态刷新后恢复搜索焦点和光标 selection，保持“更多提交选项”展开状态，避免轮询刷新使用户无法输入或自动收起。
+  - **通知与上下文**：复制、stash 等成功反馈改为面板内 2.5 秒 inline toast；warning/error 保持 VS Code 系统通知；Push/AI/rebase 使用 SourceControl progress。面板增加 branch、upstream、ahead/behind 与 range context bar。
+  - **edit 停靠 draft-only 修正**：停靠横幅中的“仅生成 message”现在严格携带 `messageOnly`，Compose 只复制/保留 message，绝不意外提交。新增 Compose delivery、暂停 Compose policy、branch context 等测试；测试套件扩展至 **70 项**。
+
 - **0.6.0** — 大版本 rebase 状态模型、恢复能力与编辑体验升级：
   - **受控 Undo 与操作历史**：历史改写前创建私有 `refs/gitRebaseVisual/undo/<id>` checkpoint，并记录仓库、分支、before/after tip 与操作类型。工具栏、成功结果和历史入口可 Undo；Undo 会验证 rebase、分支、HEAD、工作区、checkpoint 和已推送风险，优先 `reset --keep`，不使用不安全的裸 `ORIG_HEAD + reset --hard`。
   - **真实 rebase 状态**：新增 rebase session/progress，显示步骤 N/M、edit/conflict/paused 原因、当前/待重放 commit；待重放行明确 hash 将变化，外部无法可靠解析时显示 unknown，不虚构进度。增加可点击状态栏提示。

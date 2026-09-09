@@ -22,6 +22,10 @@
 | `ff260667727ba3c92dde861c74b2f594ec736ca5` | `feat: implement 0.6 rebase experience` | [`code-review-0-6-0.md`](code-review-0-6-0.md) | [`review-response-0-6-0.md`](review-response-0-6-0.md) — 0-6-0 回复 | 已评审；rebase session/Undo/Panel/操作升级通过 | 2026-09-09 | 由两轮 UI 建议、截图、Agent A/B/C 和主 agent 复核覆盖。 |
 | `02ff57da31d2f2a8a485ab7446417f8bc0caf492` | `fix: harden 0.6 rebase experience` | [`code-review-0-6-0.md`](code-review-0-6-0.md) | [`review-response-0-6-0.md`](review-response-0-6-0.md) | 已评审；Undo/progress/Compose 安全修正 | 2026-09-09 | Agent C 第一轮深审修正。 |
 | `612556664652601269438156fc5df8cec1ceac99` | `fix: harden 0.6 rebase experience` | [`code-review-0-6-0.md`](code-review-0-6-0.md) | [`review-response-0-6-0.md`](review-response-0-6-0.md) | 已评审；多选/过滤/locked run/键盘修正 | 2026-09-09 | Agent C 按大版本价值要求补齐的安全实现。 |
+| `45e663a` | `fix: initialize compose panel after webview ready` | [`code-review-0-6-1.md`](code-review-0-6-1.md) | [`review-response-0-6-1.md`](review-response-0-6-1.md) — 0-6-1 回复 | 已评审；Compose payload handshake 修复 | 2026-09-09 | Panel ready/reload payload delivery 的初始修正。 |
+| `e8a6027` | `fix: stabilize rebase panel interactions` | [`code-review-0-6-1.md`](code-review-0-6-1.md) | [`review-response-0-6-1.md`](review-response-0-6-1.md) | 已评审；交互状态持久化与上下文修复 | 2026-09-09 | locked run、search、inline toast、branch context、SourceControl progress。 |
+| `6a71abb` | `fix: keep edit-stop message generation draft-only` | [`code-review-0-6-1.md`](code-review-0-6-1.md) | [`review-response-0-6-1.md`](review-response-0-6-1.md) | 已评审；draft-only 语义修复 | 2026-09-09 | edit stop 的仅生成 message 不再进入提交路径。 |
+| `ca1801d` | `fix: harden 0.6.1 panel interactions` | [`code-review-0-6-1.md`](code-review-0-6-1.md) | [`review-response-0-6-1.md`](review-response-0-6-1.md) | 已评审；暂停 Compose policy 加固 | 2026-09-09 | Agent 审查修正 host allow-list。 |
 
 ## 待评审 Commit
 
@@ -42,6 +46,10 @@
 | `ff260667727ba3c92dde861c74b2f594ec736ca5` | `feat: implement 0.6 rebase experience` | ✅ 已在 2026-09-09 的 `code-review-0-6-0.md` 中评审；保留此上下文作为历史记录。 |
 | `02ff57da31d2f2a8a485ab7446417f8bc0caf492` | `fix: harden 0.6 rebase experience` | ✅ 已在 2026-09-09 的 `code-review-0-6-0.md` 中评审；保留此上下文作为历史记录。 |
 | `612556664652601269438156fc5df8cec1ceac99` | `fix: harden 0.6 rebase experience` | ✅ 已在 2026-09-09 的 `code-review-0-6-0.md` 中评审；保留此上下文作为历史记录。 |
+| `45e663a` | `fix: initialize compose panel after webview ready` | ✅ 已在 2026-09-09 的 `code-review-0-6-1.md` 中评审；保留此上下文作为历史记录。 |
+| `e8a6027` | `fix: stabilize rebase panel interactions` | ✅ 已在 2026-09-09 的 `code-review-0-6-1.md` 中评审；保留此上下文作为历史记录。 |
+| `6a71abb` | `fix: keep edit-stop message generation draft-only` | ✅ 已在 2026-09-09 的 `code-review-0-6-1.md` 中评审；保留此上下文作为历史记录。 |
+| `ca1801d` | `fix: harden 0.6.1 panel interactions` | ✅ 已在 2026-09-09 的 `code-review-0-6-1.md` 中评审；保留此上下文作为历史记录。 |
 
 > 未来评审覆盖上述任一 commit 时，必须在“已评审 Commit”表中新增或补充对应记录，写明完整 SHA、评审文件、回复章节、状态和日期；保留“待评审 Commit”中的历史上下文，不得直接删除。
 >
