@@ -4,6 +4,7 @@ import "./appendStaged.integration.test";
 import "./commitLog.integration.test";
 import "./composeDraft.test";
 import "./composePanelState.test";
+import "./composePolicy.test";
 import "./rebasePresentation.test";
 import "./gitRunner.integration.test";
 import "./llmClient.test";

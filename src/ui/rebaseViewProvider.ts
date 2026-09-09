@@ -67,6 +67,7 @@ import {
 import { SecretsAccessModule, fromSecretStorage } from "./secretsAccess";
 import { currentCommitSelection, rebaseProgressState } from "./rebaseState";
 import { branchContext } from "./rebasePresentation";
+import { isDraftOnlyComposeAllowedDuringRebase } from "./composePolicy";
 import { ComposePanel } from "./composePanel";
 import { UndoJournal, UndoRecord, undoPreflight } from "../git/undo";
 
@@ -518,7 +519,10 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     // a conflict never gets those paths.
     if (cwd && (await isRebaseInProgress(cwd))) {
       const allowed = new Set(["continueRebase", "abortRebase", "skipRebase", "commitEditAmend", "commitEditNew"]);
-      if (!allowed.has(m.type)) {
+      const draftOnlyCompose =
+        m.type === "openCompose" &&
+        isDraftOnlyComposeAllowedDuringRebase(m.mode, m.messageOnly === true);
+      if (!allowed.has(m.type) && m.type !== "copyText" && !draftOnlyCompose) {
         const message = "变基进行中：此操作不能在当前暂停状态执行。";
         if (m.type === "apply") this.compose.post({ type: "applyFailed", message });
         vscode.window.showWarningMessage(message);
@@ -1495,7 +1499,9 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
       throw new Error("未知 Compose 模式，无法打开。 ");
     }
     if (await isRebaseInProgress(cwd)) {
-      throw new Error("变基进行中：不能打开 Compose 或生成 message。请先 Continue 或 Abort。 ");
+      if (!isDraftOnlyComposeAllowedDuringRebase(mode, messageOnly)) {
+        throw new Error("变基进行中：不能打开 Compose 或生成 message。请先 Continue 或 Abort。 ");
+      }
     }
     let body = "";
     let trailers = "";
