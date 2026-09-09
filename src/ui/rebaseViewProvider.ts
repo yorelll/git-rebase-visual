@@ -61,16 +61,19 @@ import {
   getLlmExtras,
   getPushRefspecTemplate,
   getAutoStash,
+  getCollapseLockedRuns,
   isLlmConfigured,
 } from "../config";
 import { SecretsAccessModule, fromSecretStorage } from "./secretsAccess";
 import { currentCommitSelection, rebaseProgressState } from "./rebaseState";
+import { branchContext } from "./rebasePresentation";
 import { ComposePanel } from "./composePanel";
 import { UndoJournal, UndoRecord, undoPreflight } from "../git/undo";
 
 const PENDING_STASH_KEY = "gitRebaseVisual.pendingStash";
 const PENDING_APPEND_KEY = "gitRebaseVisual.pendingAppend";
 const LLM_APIKEY_SECRET = "gitRebaseVisual.llmApiKey";
+let inlineToastSink: ((message: string, duration?: number) => void) | undefined;
 
 interface PendingAppend {
   /** Full pre-append snapshot, including the original index and worktree. */
@@ -126,8 +129,14 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     this.statusBar.command = "gitRebaseVisual.reveal";
     this.statusBar.tooltip = "显示 Git Rebase Visual";
     this.compose = new ComposePanel(ctx.extensionUri, (message) => this.onMessage(message));
-    ctx.subscriptions.push(this.output, this.statusBar, this.compose);
+    inlineToastSink = (message, duration) => this.postInlineToast(message, duration);
+    ctx.subscriptions.push(this.output, this.statusBar, this.compose, new vscode.Disposable(() => {
+      if (inlineToastSink) inlineToastSink = undefined;
+    }));
     ctx.subscriptions.push(
+      vscode.workspace.onDidChangeConfiguration((event) => {
+        if (event.affectsConfiguration("gitRebaseVisual")) this.scheduleRefresh();
+      }),
       vscode.workspace.onDidChangeTextDocument(() => this.scheduleRefresh()),
       vscode.workspace.onDidCreateFiles(() => this.scheduleRefresh()),
       vscode.workspace.onDidDeleteFiles(() => this.scheduleRefresh()),
@@ -287,10 +296,31 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
 
     // During a rebase HEAD is detached; resolve the range against the branch
     // being rebased so we still show meaningful commits instead of "no upstream".
+    const rangeConfig = getRangeConfig();
     const tipRef = rebaseInProgress ? await rebasingBranch(root) : undefined;
-    const range = await resolveRange(root, getRangeConfig(), tipRef ?? "HEAD");
+    const branch = tipRef ?? await currentBranch(root);
+    const upstream = branch ? await getUpstream(root, branch) : undefined;
+    let aheadCount = 0;
+    let behindCount = 0;
+    if (upstream) {
+      const counts = await runGit(["rev-list", "--left-right", "--count", `${upstream.ref}...HEAD`], { cwd: root });
+      const [behind, ahead] = counts.stdout.trim().split(/\s+/).map(Number);
+      if (counts.code === 0 && Number.isFinite(ahead) && Number.isFinite(behind)) {
+        aheadCount = ahead;
+        behindCount = behind;
+      }
+    }
+    const presentation = branchContext({
+      branchName: branch,
+      upstreamRef: upstream?.ref,
+      aheadCount,
+      behindCount,
+      range: rangeConfig,
+      rebasing: rebaseInProgress,
+    });
+    const range = await resolveRange(root, rangeConfig, tipRef ?? "HEAD");
     if ("error" in range) {
-      return postCurrent({ type: "state", error: range.error, rebaseInProgress });
+      return postCurrent({ type: "state", error: range.error, rebaseInProgress, ...presentation, collapseLockedRuns: getCollapseLockedRuns() });
     }
 
     let commits: Commit[];
@@ -360,6 +390,8 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
       undoAvailable: !!this.undo.latestCompleted(root),
       currentUserEmail: userEmail,
       currentAuthorKnown: !!userEmail,
+      ...presentation,
+      collapseLockedRuns: getCollapseLockedRuns(),
       hasStaged: status.hasStaged,
       hasUnstaged: status.hasUnstaged,
       stagedCount: status.stagedCount,
@@ -381,6 +413,10 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
 
   private post(msg: any): void {
     this.view?.webview.postMessage(msg);
+  }
+
+  private postInlineToast(message: string, duration = 2500): void {
+    this.post({ type: "inlineToast", level: "success", message, duration });
   }
 
   private isCurrentCommitHash(value: unknown): value is string {
@@ -1235,7 +1271,14 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     const { operation, affectedCount, ...rebasePlan } = plan;
     void operation;
     void affectedCount;
-    const outcome = await executeRebase(cwd, { ...rebasePlan, onto });
+    const outcome = await vscode.window.withProgress(
+      {
+        location: vscode.ProgressLocation.SourceControl,
+        title: `${plan.operation ?? "变基"}中…`,
+        cancellable: false,
+      },
+      () => executeRebase(cwd, { ...rebasePlan, onto })
+    );
 
     if (!outcome.ok && !outcome.stopped) {
       this.log("rebase", `失败 ${outcome.message}`);
@@ -1493,7 +1536,7 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     }
     await vscode.window.withProgress(
       {
-        location: vscode.ProgressLocation.Notification,
+        location: vscode.ProgressLocation.SourceControl,
         title: "AI 生成 commit message 中…",
         cancellable: true,
       },
@@ -1821,7 +1864,7 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
 
     await vscode.window.withProgress(
       {
-        location: vscode.ProgressLocation.Notification,
+        location: vscode.ProgressLocation.SourceControl,
         title: `推送中：${refspec} → ${up.remote}`,
         cancellable: true,
       },
@@ -1862,7 +1905,9 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
 <title>Git Rebase</title>
 </head>
 <body>
+<div id="inline-toast" class="inline-toast hidden" role="status" aria-live="polite"></div>
 <div id="banner" class="banner hidden" role="status" aria-live="polite"></div>
+<div id="context" class="branch-context hidden"></div>
 <div id="changes" class="changes hidden"></div>
 <div id="direction" class="direction" role="status" aria-live="polite"></div>
 <div id="list" class="list" role="list"></div>
@@ -1910,23 +1955,24 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
 }
 
 /**
- * Shows a non-modal notification that auto-dismisses after `ms` (default 10s).
- * VSCode keeps warning/error toasts open until dismissed, so we render them as
- * a progress notification with a codicon prefix and resolve on a timer — this
- * gives consistent auto-dismissal for all plugin messages. Fire-and-forget.
+ * Success feedback belongs to the active rebase panel and is deliberately
+ * short-lived. Warnings and errors are actionable system notifications: VS
+ * Code owns their dismissal, rather than hiding them after an arbitrary timer.
  */
-function toast(level: "info" | "warn" | "error", message: string, ms = 10000): void {
-  // Progress-notification titles do not parse `$(codicon)` syntax, so use plain
-  // Unicode glyphs for the severity prefix.
-  const icon = level === "error" ? "✕" : level === "warn" ? "⚠" : "✓";
-  void vscode.window.withProgress(
-    {
-      location: vscode.ProgressLocation.Notification,
-      title: `${icon} ${message}`,
-      cancellable: true,
-    },
-    () => new Promise<void>((resolve) => setTimeout(resolve, ms))
-  );
+function toast(level: "info" | "warn" | "error", message: string, duration = 2500): void {
+  if (level === "info") {
+    if (inlineToastSink) {
+      inlineToastSink(message, duration);
+    } else {
+      void vscode.window.showInformationMessage(message);
+    }
+    return;
+  }
+  if (level === "warn") {
+    void vscode.window.showWarningMessage(message);
+  } else {
+    void vscode.window.showErrorMessage(message);
+  }
 }
 
 function getNonce(): string {

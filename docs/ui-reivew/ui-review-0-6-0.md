@@ -15,13 +15,13 @@
 - [x] **5 edit/conflict/locked 色彩分离。** edit 为 info/focus blue，conflict 为 error red，locked 为 warning orange，全部有图标或文字。
 - [x] **6 pending commits。** `rebaseProgressState` 解析 interactive done/todo 为 N/M 和 pending hashes；行显示“待重放：Continue 后 hash 将变化”和 `*`。不能可靠读取的外部 backend 显示 `unknown`，不虚构进度。
 - [x] **7 方向重复。** 去除固定重复 direction hint，仅保留 Base/HEAD 锚点；拖拽时才显示 live feedback。
-- [x] **8 头部 upstream 上下文。** 保持 range 的 Git 安全边界；本轮将状态栏作为跨编辑器上下文入口。真实 upstream divider 需要在 range 中同时包含 upstream 两侧 commit；当前 upstream range 本身不包含已推送段，强加 divider 会制造错误事实。
-- [x] **9 连续 locked run 折叠。** 已实施：连续两个及以上 locked commit 折叠为可展开摘要；active、pending、stopped、selected 项不会被折叠，摘要不作为 drag/drop target，避免隐藏安全关键状态。
+- [x] **8 头部 branch/upstream 上下文。** 面板顶部现在显示当前 branch（变基 detached 时显示被变基分支）、upstream、ahead/behind 与实际 range 标签；无 upstream 明确显示“未配置 upstream”。这不伪造 upstream divider。
+- [x] **9 连续 locked run 折叠。** 0.6 初版“连续两个及以上、刷新后保持展开、摘要不可 drop”的表述不准确，实测会因重建 DOM 自动关闭，且阻塞跨 run 重排。现改为可配置的 `collapseLockedRuns`（默认开启），仅连续 ≥3 且不含 active/pending/stopped/selected commit 的 run 折叠；摘要上/下半区分别接收插入 run 前/后，完整 canonical order 仍交由宿主验证。展开状态跨 state render 保持。
 - [x] **10 未提交改动主入口/危险 add -A 收纳。** staged 是 primary；working `git add -A` 置入“更多提交选项”并带 ⚠；新增只生成 message。
 - [x] **11 查看菜单。** 加入复制 message 与受控 readonly `git show --binary --find-renames` diff 文档；覆盖 binary、rename、root/merge 输出且不调用私有 Git extension command。
 - [x] **12 squash/fixup。** 扩展 todo/action；首项、locked 当前项或前驱、rebase 中均禁用；宿主二次检查并确认。
 - [x] **13 N/M、Skip、状态栏。** banner 显示步骤 N/M/unknown、冲突数、Continue guard；Skip 仅 conflict 可见，二次确认完整 patch 丢弃后果；状态栏显示 `rebase N/M · edit/conflict` 并可 reveal view。
-- [x] **14 Compose Panel。** `src/ui/composePanel.ts` 使用 editor-area `WebviewPanel` 和 retainContext session；subject/body、50/72、72 column guide、折叠 original/trailer、AI cancel/restore/model、Ctrl/Cmd+Enter/Escape、apply failure draft 保留均实现。
+- [x] **14 Compose Panel。** `src/ui/composePanel.ts` 使用 editor-area `WebviewPanel` 和 retainContext session；subject/body、50/72、72 column guide、折叠 original/trailer、AI cancel/restore/model、Ctrl/Cmd+Enter/Escape、apply failure draft 保留均实现。0.6 初版首次打开存在 host 早于 listener 发 payload 的竞态，导致 original/trailer 为空；现 listener 安装后先发 `composeReady`，host 保存并在每次 ready/reload 时重发最新 payload。
 - [x] **15 grip-only drag。** draggable 仅绑定 grip，正文可选。
 - [x] **16–30 P2。** 短 hash 统一为 8 位显示、pending `*`、作者/状态文字、fixed hover、危险文案、主题 token/high contrast fallback、菜单 roving navigation、搜索/过滤、多选、locked run 折叠均已实施；人工 High Contrast/屏幕阅读器逐屏验收保留为发布前人工检查。
 
@@ -47,12 +47,19 @@
 - [x] `src/git/commitLog.ts`、`media/main.js`、`media/style.css`：author email/current identity、pending non-color text、status color tokens、grip-only drag。
 - [x] `src/ui/rebaseViewProvider.ts`：conflict-only Skip、edit-stop whitelist、status bar、controlled diff document。
 
+## 0.6 UI 回归修复（发布后补充）
+
+- `media/main.js` 不再在 state render 后丢失搜索输入焦点/selection 或“更多提交选项”的 open 状态；locked run 使用稳定 hash 序列 key 保存 expanded 状态。
+- 成功反馈（复制、stash、rewrite、push 等）改为面板顶部单一可替换 inline toast，默认 2.5 秒；失败、冲突和需要用户决定的事项继续使用 VS Code warning/error 通知且不由插件计时关闭。
+- Push 与 AI 使用 Source Control 可取消进度；rebase 也使用 Source Control progress，避免一般右下角进度通知。
+- 增加 `test/composePanelState.test.ts` 覆盖 panel ready/reload payload 重发，`test/rebasePresentation.test.ts` 覆盖 branch context/range 映射。
+
 ## 0.6.0 验证结果
 
 | 命令 | 结果 |
 | --- | --- |
 | `npm run typecheck` | 通过 |
-| `npm test` | 通过，64/64（含 C 审查补充的选择校验、Undo 隔离/ref 清理、unknown todo、exec/merge workflow、fixup message 语义测试） |
+| `npm test` | 通过，69/69（含选择校验、Undo 隔离/ref 清理、unknown todo、exec/merge workflow、fixup message 语义，以及 compose ready/reload、branch context 与 ahead/behind integration 测试） |
 | `npm run compile` | 通过 |
 | `git diff --check` | 通过 |
 

@@ -3,6 +3,8 @@
 
   const listEl = document.getElementById("list");
   const bannerEl = document.getElementById("banner");
+  const contextEl = document.getElementById("context");
+  const inlineToastEl = document.getElementById("inline-toast");
   const changesEl = document.getElementById("changes");
   const menuEl = document.getElementById("menu");
   const tooltipEl = document.getElementById("tooltip");
@@ -32,6 +34,10 @@
   let selectedHashes = new Set();
   let keyboardPickupHash = null;
   let menuRestoreFocus = null;
+  const expandedLockedRuns = new Set();
+  let changesMoreOpen = false;
+  let inlineToastTimer = null;
+  let searchFocus = null;
 
   function announce(message) {
     const live = document.getElementById("live");
@@ -174,10 +180,48 @@
 
   // ---- rendering ----------------------------------------------------------
 
+  function captureSearchFocus() {
+    const active = document.activeElement;
+    if (active && active.classList?.contains("commit-search")) {
+      searchFocus = { start: active.selectionStart, end: active.selectionEnd };
+    } else {
+      searchFocus = null;
+    }
+  }
+
+  function restoreSearchFocus() {
+    if (!searchFocus) return;
+    const search = listEl.querySelector(".commit-search");
+    if (!search) return;
+    search.focus();
+    search.setSelectionRange(searchFocus.start ?? search.value.length, searchFocus.end ?? search.value.length);
+    searchFocus = null;
+  }
+
   function render() {
+    captureSearchFocus();
     renderBanner();
+    renderContext();
     renderChanges();
     renderList();
+    restoreSearchFocus();
+  }
+
+  function renderContext() {
+    if (!state.branchName) {
+      contextEl.classList.add("hidden");
+      return;
+    }
+    contextEl.textContent = `${state.branchName} · ${state.upstreamRef} · ↑${state.aheadCount || 0} ↓${state.behindCount || 0} · ${state.rangeLabel || ""}`;
+    contextEl.classList.remove("hidden");
+  }
+
+  function showInlineToast(message, duration) {
+    if (!inlineToastEl) return;
+    if (inlineToastTimer) clearTimeout(inlineToastTimer);
+    inlineToastEl.textContent = message || "";
+    inlineToastEl.classList.remove("hidden");
+    inlineToastTimer = setTimeout(() => inlineToastEl.classList.add("hidden"), duration || 2500);
   }
 
   function renderBanner() {
@@ -302,6 +346,8 @@
     }
     const more = document.createElement("details");
     more.className = "changes-more";
+    more.open = changesMoreOpen;
+    more.addEventListener("toggle", () => { changesMoreOpen = more.open; });
     const summary = document.createElement("summary");
     summary.textContent = "更多提交选项";
     more.appendChild(summary);
@@ -341,7 +387,8 @@
   }
 
   function isUnsafeToCollapse(c) {
-    return commitIsPending(c) || commitIsStopped(c) || selectedHashes.has(c.hash);
+    const active = state.activeHash && (c.hash.startsWith(state.activeHash) || state.activeHash.startsWith(c.hash));
+    return active || commitIsPending(c) || commitIsStopped(c) || selectedHashes.has(c.hash);
   }
 
   function filteredCommits() {
@@ -396,7 +443,7 @@
       if (eligible) {
         let end = index + 1;
         while (end < visible.length && visible[end].locked && !isUnsafeToCollapse(visible[end])) end += 1;
-        if (end - index >= 2) {
+        if (state.collapseLockedRuns && end - index >= 3) {
           listEl.appendChild(lockedRunRow(visible.slice(index, end)));
           index = end;
           continue;
@@ -415,11 +462,35 @@
   }
 
   function lockedRunRow(commits) {
+    const key = commits.map((commit) => commit.hash).join(":");
     const details = document.createElement("details");
     details.className = "locked-run";
+    details.open = expandedLockedRuns.has(key);
+    details.addEventListener("toggle", () => {
+      if (details.open) expandedLockedRuns.add(key); else expandedLockedRuns.delete(key);
+    });
     const summary = document.createElement("summary");
-    summary.textContent = `🔒 ${commits.length} 个连续锁定 commit（展开查看；重排前需展开）`;
-    summary.setAttribute("aria-label", `连续 ${commits.length} 个锁定 commit，展开后可查看，当前不可作为重排目标`);
+    summary.textContent = `🔒 ${commits.length} 个连续锁定 commit（可作为重排目标）`;
+    summary.setAttribute("aria-label", `连续 ${commits.length} 个锁定 commit；将非锁定 commit 拖到摘要上半部插入之前，下半部插入之后`);
+    summary.addEventListener("dragover", (event) => {
+      if (filterText || state.rebaseInProgress || !dragHash) return;
+      event.preventDefault();
+      clearDropMarkers();
+      const after = isAfter(event, summary);
+      details.classList.toggle("drop-before", !after);
+      details.classList.toggle("drop-after", after);
+      dragHint = `将移动到 locked run ${after ? "之后（较新）" : "之前（较早）"}`;
+      renderDirection();
+    });
+    summary.addEventListener("dragleave", () => details.classList.remove("drop-before", "drop-after"));
+    summary.addEventListener("drop", (event) => {
+      if (filterText || state.rebaseInProgress || !dragHash) return;
+      event.preventDefault();
+      const after = isAfter(event, summary);
+      details.classList.remove("drop-before", "drop-after");
+      clearDragHint();
+      reorderAtRunBoundary(dragHash, commits, after);
+    });
     details.appendChild(summary);
     for (const commit of commits) details.appendChild(commitRow(commit));
     return details;
@@ -588,7 +659,7 @@
 
   function clearDropMarkers() {
     document
-      .querySelectorAll(".commit.drop-before, .commit.drop-after")
+      .querySelectorAll(".commit.drop-before, .commit.drop-after, .locked-run.drop-before, .locked-run.drop-after")
       .forEach((el) => el.classList.remove("drop-before", "drop-after"));
   }
 
@@ -600,6 +671,13 @@
 
   // ---- reorder ------------------------------------------------------------
 
+  function applyReorder(order) {
+    const byHash = new Map(state.commits.map((c) => [c.hash, c]));
+    state.commits = order.map((h) => byHash.get(h));
+    renderList();
+    vscode.postMessage({ type: "reorder", order });
+  }
+
   function reorder(fromHash, targetHash, after) {
     // Filtering is a view projection only; a partial order must never be sent
     // to the host. Reorder always sends the complete canonical order.
@@ -609,20 +687,27 @@
     }
     const order = state.commits.map((c) => c.hash);
     const fromIdx = order.indexOf(fromHash);
-    if (fromIdx >= 0) {
-      order.splice(fromIdx, 1);
-    }
+    if (fromIdx < 0) return;
+    order.splice(fromIdx, 1);
     let targetIdx = order.indexOf(targetHash);
-    if (after) {
-      targetIdx += 1; // insert below the target (enables moving to the very end)
-    }
+    if (targetIdx < 0) return;
+    if (after) targetIdx += 1;
     order.splice(targetIdx, 0, fromHash);
+    applyReorder(order);
+  }
 
-    const byHash = new Map(state.commits.map((c) => [c.hash, c]));
-    state.commits = order.map((h) => byHash.get(h));
-    renderList();
-
-    vscode.postMessage({ type: "reorder", order });
+  function reorderAtRunBoundary(fromHash, commits, after) {
+    if (filterText || state.rebaseInProgress || commits.some((commit) => commit.hash === fromHash)) return;
+    const order = state.commits.map((commit) => commit.hash);
+    const fromIdx = order.indexOf(fromHash);
+    if (fromIdx < 0) return;
+    order.splice(fromIdx, 1);
+    const boundaryHash = after ? commits[commits.length - 1].hash : commits[0].hash;
+    let targetIdx = order.indexOf(boundaryHash);
+    if (targetIdx < 0) return;
+    if (after) targetIdx += 1;
+    order.splice(targetIdx, 0, fromHash);
+    applyReorder(order);
   }
 
   // ---- context menu -------------------------------------------------------
@@ -1011,6 +1096,9 @@
         break;
       case "detail":
         showDetail(m);
+        break;
+      case "inlineToast":
+        showInlineToast(m.message, m.duration);
         break;
     }
   });

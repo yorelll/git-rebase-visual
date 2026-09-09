@@ -1,7 +1,10 @@
 import "./appendGuard.integration.test";
+import "./branchContext.integration.test";
 import "./appendStaged.integration.test";
 import "./commitLog.integration.test";
 import "./composeDraft.test";
+import "./composePanelState.test";
+import "./rebasePresentation.test";
 import "./gitRunner.integration.test";
 import "./llmClient.test";
 import "./message.test";

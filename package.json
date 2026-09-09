@@ -168,6 +168,11 @@
           "type": "boolean",
           "default": true,
           "description": "When true, automatically stash a dirty working tree before a rebase and restore it after the rebase finishes (or after you Continue/Abort). When false, operations that need a clean tree are blocked with a warning asking you to stash manually."
+        },
+        "gitRebaseVisual.collapseLockedRuns": {
+          "type": "boolean",
+          "default": true,
+          "description": "Collapse runs of three or more locked commits in the rebase timeline."
         }
       }
     }
