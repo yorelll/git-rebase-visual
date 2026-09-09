@@ -284,7 +284,7 @@
         const messageOnly = document.createElement("button");
         messageOnly.className = "btn";
         messageOnly.textContent = "仅生成 message";
-        messageOnly.onclick = () => vscode.postMessage({ type: "openCompose", mode: "staged", ai: true, thenEdit: false });
+        messageOnly.onclick = () => vscode.postMessage({ type: "openCompose", mode: "staged", ai: true, thenEdit: false, messageOnly: true });
         editActions.append(counts, amend, create, messageOnly);
       }
       if (isConflict) {
