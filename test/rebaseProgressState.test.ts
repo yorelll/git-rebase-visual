@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { rebaseProgressState } from "../src/ui/rebaseState";
+import { currentCommitSelection, rebaseProgressState } from "../src/ui/rebaseState";
 
 test("progress distinguishes done executable steps and pending original hashes", () => {
   const state = rebaseProgressState({
@@ -41,4 +41,12 @@ test("unknown todo syntax suppresses progress and active hash", () => {
   assert.equal(state.completedSteps, undefined);
   assert.equal(state.activeHash, undefined);
   assert.deepEqual(state.pendingHashes, []);
+});
+
+test("currentCommitSelection accepts only exact unique hashes from the full snapshot", () => {
+  const first = "a".repeat(40); const second = "b".repeat(40);
+  assert.deepEqual(currentCommitSelection([second, first], [first, second]), [second, first]);
+  assert.equal(currentCommitSelection([first, first], [first, second]), undefined);
+  assert.equal(currentCommitSelection(["c".repeat(40)], [first, second]), undefined);
+  assert.equal(currentCommitSelection([], [first, second]), undefined);
 });

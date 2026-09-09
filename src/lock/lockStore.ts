@@ -35,17 +35,22 @@ export class LockStore {
   }
 
   async lock(repoRoot: string, hash: string, pid?: string): Promise<void> {
+    await this.lockMany(repoRoot, [{ hash, patchId: pid }]);
+  }
+
+  /** Writes a deduplicated multi-lock set with one memento update. */
+  async lockMany(repoRoot: string, entries: Array<{ hash: string; patchId?: string }>): Promise<void> {
     const map = this.read();
-    const list = map[repoRoot] ?? [];
-    // De-dupe by patchId when present, else by hash.
-    const exists = list.some((e) =>
-      pid ? e.patchId === pid : e.hash === hash
-    );
-    if (!exists) {
-      list.push({ hash, patchId: pid });
-      map[repoRoot] = list;
-      await this.write(map);
+    const list = [...(map[repoRoot] ?? [])];
+    for (const entry of entries) {
+      const exists = list.some((existing) =>
+        entry.patchId ? existing.patchId === entry.patchId : existing.hash === entry.hash
+      );
+      if (!exists) list.push(entry);
     }
+    if (list.length === 0) return;
+    map[repoRoot] = list;
+    await this.write(map);
   }
 
   /** Unlocks by matching either patch-id or hash. */

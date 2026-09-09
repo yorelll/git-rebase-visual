@@ -64,7 +64,7 @@ import {
   isLlmConfigured,
 } from "../config";
 import { SecretsAccessModule, fromSecretStorage } from "./secretsAccess";
-import { rebaseProgressState } from "./rebaseState";
+import { currentCommitSelection, rebaseProgressState } from "./rebaseState";
 import { ComposePanel } from "./composePanel";
 import { UndoJournal, UndoRecord, undoPreflight } from "../git/undo";
 
@@ -409,6 +409,8 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     const mutating = [
       "reorder",
       "drop",
+      "bulkDrop",
+      "bulkLock",
       "rebaseTo",
       "lock",
       "unlock",
@@ -521,25 +523,29 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
           await this.handleReorder(cwd!, m.order as string[]);
           break;
         case "drop": {
-          const commit = this.commits.find((c) => c.hash === m.hash)!;
-          const pid = await this.locks.computePatchId(cwd!, m.hash);
-          if (this.locks.isLocked(this.root!, m.hash, pid)) {
-            toast("warn", "目标 commit 已锁定。请先解除锁定，再删除 commit。");
+          await this.dropCommits(cwd!, [m.hash]);
+          await this.refresh();
+          break;
+        }
+        case "bulkDrop": {
+          const hashes = this.selectedHashes(m.hashes);
+          if (!hashes) {
+            toast("warn", "批量选择已过期；请刷新后重试。 ");
+            await this.refresh();
             return;
           }
-          const confirm = await vscode.window.showWarningMessage(
-            `删除 ${commit.shortHash} “${commit.subject}”？此操作会改写其后的提交历史。`,
-            { modal: true },
-            "删除"
-          );
-          if (confirm !== "删除") {
+          await this.dropCommits(cwd!, hashes);
+          await this.refresh();
+          break;
+        }
+        case "bulkLock": {
+          const hashes = this.selectedHashes(m.hashes);
+          if (!hashes) {
+            toast("warn", "批量选择已过期；请刷新后重试。 ");
+            await this.refresh();
             return;
           }
-          await this.runRebase(cwd!, {
-            items: this.itemsWith((h) => (h === m.hash ? "drop" : undefined)),
-            operation: "删除 commit (drop)",
-            affectedCount: 1,
-          });
+          await this.lockCommits(cwd!, hashes);
           await this.refresh();
           break;
         }
@@ -694,6 +700,63 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
       toast("error", message);
       await this.refresh();
     }
+  }
+
+  /** Revalidates a webview multi-selection against the current full snapshot. */
+  private selectedHashes(value: unknown): string[] | undefined {
+    return currentCommitSelection(value, this.commits.map((commit) => commit.hash));
+  }
+
+  /** Locks all requested current commits after resolving each patch identity. */
+  private async lockCommits(cwd: string, hashes: string[]): Promise<void> {
+    const selected = this.selectedHashes(hashes);
+    if (!selected) throw new Error("批量锁定选择已失效；未修改任何锁定状态。 ");
+    const entries = await Promise.all(selected.map(async (hash) => ({
+      hash, patchId: await this.locks.computePatchId(cwd, hash),
+    })));
+    // Revalidate after all asynchronous patch-id lookups and before the single
+    // persistence write, so a refreshed snapshot cannot receive partial locks.
+    if (!this.selectedHashes(selected)) {
+      throw new Error("批量锁定期间 commit 列表已变化；未修改任何锁定状态。 ");
+    }
+    await this.locks.lockMany(this.root!, entries);
+    toast("info", `已锁定 ${selected.length} 个 commit。`);
+  }
+
+  /**
+   * Builds exactly one rebase plan for a selection. Revalidation and all lock
+   * checks happen before confirmation and before any write, so a stale bulk
+   * request cannot partially drop a changed list.
+   */
+  private async dropCommits(cwd: string, hashes: string[]): Promise<void> {
+    const selected = this.selectedHashes(hashes);
+    if (!selected) throw new Error("删除选择已失效；未删除任何 commit。 ");
+    const selectedSet = new Set(selected);
+    const commits = this.commits.filter((commit) => selectedSet.has(commit.hash));
+    for (const commit of commits) {
+      const patch = await this.locks.computePatchId(cwd, commit.hash);
+      if (this.locks.isLocked(this.root!, commit.hash, patch)) {
+        throw new Error(`目标 ${commit.shortHash} 已锁定；未删除任何 commit。`);
+      }
+    }
+    const preview = commits.map((commit) => `${commit.shortHash} “${commit.subject}”`).join("\n");
+    const confirm = await vscode.window.showWarningMessage(
+      `删除以下 ${commits.length} 个 commit？此操作会在一个 rebase 计划中改写后续历史：\n${preview}`,
+      { modal: true },
+      "删除所选 commit"
+    );
+    if (confirm !== "删除所选 commit") return;
+    // Re-check immediately after the modal: user events may have refreshed the
+    // view while it was open. No partial plan is ever sent to Git.
+    const revalidated = this.selectedHashes(selected);
+    if (!revalidated || revalidated.length !== selected.length) {
+      throw new Error("删除确认期间 commit 列表已变化；未删除任何 commit。 ");
+    }
+    await this.runRebase(cwd, {
+      items: this.itemsWith((hash) => (selectedSet.has(hash) ? "drop" : undefined)),
+      operation: commits.length === 1 ? "删除 commit (drop)" : `批量删除 ${commits.length} 个 commit`,
+      affectedCount: commits.length,
+    });
   }
 
   private async combineWithPrevious(cwd: string, hash: string, action: "squash" | "fixup"): Promise<void> {

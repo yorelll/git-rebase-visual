@@ -1,5 +1,19 @@
 export type RebasePauseReason = "conflict" | "edit" | "paused" | undefined;
 
+/** Validates an exact, non-empty commit-hash selection against one snapshot. */
+export function currentCommitSelection(value: unknown, currentHashes: Iterable<string>): string[] | undefined {
+  if (!Array.isArray(value) || value.length === 0) return undefined;
+  const known = new Set(currentHashes);
+  const selected = new Set<string>();
+  for (const hash of value) {
+    if (typeof hash !== "string" || !/^[0-9a-f]{40}$/i.test(hash) || !known.has(hash) || selected.has(hash)) {
+      return undefined;
+    }
+    selected.add(hash);
+  }
+  return [...selected];
+}
+
 export interface RebasePauseState {
   conflictFiles: string[];
   conflictCount: number;

@@ -28,6 +28,10 @@
   let dialogApplying = false;
   let dialogError = "";
   let dragHint = "";
+  let filterText = "";
+  let selectedHashes = new Set();
+  let keyboardPickupHash = null;
+  let menuRestoreFocus = null;
 
   function announce(message) {
     const live = document.getElementById("live");
@@ -97,6 +101,7 @@
     const el = document.createElement("button");
     el.type = "button";
     el.setAttribute("role", "menuitem");
+    el.tabIndex = -1;
     setMenuItemDisabled(el, !!item.disabled, item.disabledReason);
     if (item.danger) {
       el.classList.add("danger");
@@ -109,6 +114,28 @@
       };
     }
     return el;
+  }
+
+  function menuButtons() {
+    return [...menuEl.querySelectorAll("button:not(.disabled)")];
+  }
+
+  function focusMenuButton(index) {
+    const buttons = menuButtons();
+    if (!buttons.length) return;
+    const next = (index + buttons.length) % buttons.length;
+    buttons.forEach((button, i) => { button.tabIndex = i === next ? 0 : -1; });
+    buttons[next].focus();
+  }
+
+  function menuKeydown(event) {
+    const buttons = menuButtons();
+    const index = buttons.indexOf(document.activeElement);
+    if (event.key === "ArrowDown") { event.preventDefault(); focusMenuButton(Math.max(0, index) + 1); }
+    else if (event.key === "ArrowUp") { event.preventDefault(); focusMenuButton((index < 0 ? 0 : index) - 1); }
+    else if (event.key === "Home") { event.preventDefault(); focusMenuButton(0); }
+    else if (event.key === "End") { event.preventDefault(); focusMenuButton(buttons.length - 1); }
+    else if (event.key === "Escape") { event.preventDefault(); closeMenu(); }
   }
 
   function isDialogOpen() {
@@ -305,8 +332,28 @@
     return b;
   }
 
+  function commitIsPending(c) {
+    return (state.pendingHashes || []).some((hash) => c.hash.startsWith(hash) || hash.startsWith(c.hash));
+  }
+
+  function commitIsStopped(c) {
+    return state.pausedReason === "edit" && state.stoppedAt && c.hash === state.stoppedAt;
+  }
+
+  function isUnsafeToCollapse(c) {
+    return commitIsPending(c) || commitIsStopped(c) || selectedHashes.has(c.hash);
+  }
+
+  function filteredCommits() {
+    const query = filterText.trim().toLowerCase();
+    if (!query) return state.commits;
+    return state.commits.filter((c) => [c.shortHash, c.hash, c.subject, c.author, c.date].join(" ").toLowerCase().includes(query));
+  }
+
   function renderList() {
     listEl.innerHTML = "";
+    const selectedKnown = new Set((state.commits || []).map((c) => c.hash));
+    selectedHashes = new Set([...selectedHashes].filter((hash) => selectedKnown.has(hash)));
     if (!state.commits || state.commits.length === 0) {
       const d = document.createElement("div");
       d.className = "empty";
@@ -314,13 +361,52 @@
       listEl.appendChild(d);
       return;
     }
-    listEl.setAttribute("aria-label", `Commit 时间轴，共 ${state.commits.length} 个 commit，顶部较早，底部较新`);
+    const controls = document.createElement("div");
+    controls.className = "list-controls";
+    const search = document.createElement("input");
+    search.type = "search"; search.className = "commit-search"; search.placeholder = "搜索 hash、message、作者";
+    search.value = filterText; search.setAttribute("aria-label", "过滤 commit；过滤时禁用重排");
+    search.oninput = () => {
+      const cursor = search.selectionStart;
+      filterText = search.value; keyboardPickupHash = null; renderList();
+      const replacement = listEl.querySelector(".commit-search");
+      replacement?.focus();
+      if (cursor !== null) replacement?.setSelectionRange(cursor, cursor);
+    };
+    controls.appendChild(search);
+    if (selectedHashes.size) {
+      const selected = document.createElement("span"); selected.className = "selection-count"; selected.textContent = `已选 ${selectedHashes.size}`;
+      const lock = document.createElement("button"); lock.className = "btn small"; lock.textContent = "批量锁定";
+      lock.onclick = () => vscode.postMessage({ type: "bulkLock", hashes: [...selectedHashes] });
+      const drop = document.createElement("button"); drop.className = "btn small danger-btn"; drop.textContent = "批量删除";
+      drop.onclick = () => vscode.postMessage({ type: "bulkDrop", hashes: [...selectedHashes] });
+      controls.append(selected, lock, drop);
+    }
+    listEl.appendChild(controls);
+    const visible = filteredCommits();
+    listEl.setAttribute("aria-label", `Commit 时间轴，共 ${state.commits.length} 个 commit，显示 ${visible.length} 个，顶部较早，底部较新`);
     const top = document.createElement("div");
     top.className = "timeline-end";
     top.textContent = "↑ Base / 较早";
     listEl.appendChild(top);
-    for (const c of state.commits) {
-      listEl.appendChild(commitRow(c));
+    let index = 0;
+    while (index < visible.length) {
+      const first = visible[index];
+      const eligible = first.locked && !isUnsafeToCollapse(first);
+      if (eligible) {
+        let end = index + 1;
+        while (end < visible.length && visible[end].locked && !isUnsafeToCollapse(visible[end])) end += 1;
+        if (end - index >= 2) {
+          listEl.appendChild(lockedRunRow(visible.slice(index, end)));
+          index = end;
+          continue;
+        }
+      }
+      listEl.appendChild(commitRow(first));
+      index += 1;
+    }
+    if (!visible.length) {
+      const empty = document.createElement("div"); empty.className = "empty"; empty.textContent = "没有匹配的 commit。"; listEl.appendChild(empty);
     }
     const bottom = document.createElement("div");
     bottom.className = "timeline-end";
@@ -328,21 +414,34 @@
     listEl.appendChild(bottom);
   }
 
+  function lockedRunRow(commits) {
+    const details = document.createElement("details");
+    details.className = "locked-run";
+    const summary = document.createElement("summary");
+    summary.textContent = `🔒 ${commits.length} 个连续锁定 commit（展开查看；重排前需展开）`;
+    summary.setAttribute("aria-label", `连续 ${commits.length} 个锁定 commit，展开后可查看，当前不可作为重排目标`);
+    details.appendChild(summary);
+    for (const commit of commits) details.appendChild(commitRow(commit));
+    return details;
+  }
+
   function commitRow(c) {
     const row = document.createElement("div");
-    const stopped = state.pausedReason === "edit" && state.stoppedAt && c.hash === state.stoppedAt;
+    const stopped = commitIsStopped(c);
     const index = state.commits.indexOf(c) + 1;
-    const pending = (state.pendingHashes || []).some((hash) => c.hash.startsWith(hash) || hash.startsWith(c.hash));
+    const pending = commitIsPending(c);
+    const selected = selectedHashes.has(c.hash);
     row.className =
-      "commit" + (c.locked ? " locked" : "") + (stopped ? " stopped" : "") + (pending ? " pending" : "");
+      "commit" + (c.locked ? " locked" : "") + (stopped ? " stopped" : "") + (pending ? " pending" : "") + (selected ? " selected" : "") + (keyboardPickupHash === c.hash ? " keyboard-pickup" : "");
     // HTML drag is enabled only while pointer starts on the grip below.
     row.draggable = false;
     row.dataset.hash = c.hash;
     row.tabIndex = 0;
     row.setAttribute("role", "listitem");
+    row.setAttribute("aria-selected", String(selected));
     row.setAttribute(
       "aria-label",
-      `第 ${index} 个，共 ${state.commits.length} 个，${c.subject}，${pending ? "待重放，原 hash 将在 Continue 后变化，" : ""}${c.shortHash}，${c.author}，${c.date}${c.locked ? "，已锁定" : ""}${stopped ? "，变基停靠于此" : ""}`
+      `第 ${index} 个，共 ${state.commits.length} 个，${c.subject}，${pending ? "待重放，原 hash 将在 Continue 后变化，" : ""}${c.shortHash}，${c.author}，${c.date}${c.locked ? "，已锁定" : ""}${stopped ? "，变基停靠于此" : ""}${selected ? "，已选择" : ""}${keyboardPickupHash === c.hash ? "，已拾取，使用上下箭头选择位置，Enter 放下，Escape 取消" : ""}`
     );
 
     const grip = document.createElement("span");
@@ -390,7 +489,7 @@
     }
 
     grip.addEventListener("dragstart", (e) => {
-      if (state.rebaseInProgress) { e.preventDefault(); return; }
+      if (state.rebaseInProgress || filterText) { e.preventDefault(); return; }
       dragHash = c.hash;
       row.classList.add("dragging");
       e.dataTransfer.effectAllowed = "move";
@@ -405,6 +504,7 @@
       clearDragHint();
     });
     row.addEventListener("dragover", (e) => {
+      if (filterText || state.rebaseInProgress) return;
       e.preventDefault();
       clearDropMarkers();
       const after = isAfter(e, row);
@@ -412,6 +512,7 @@
       setDragHint(c, after);
     });
     row.addEventListener("drop", (e) => {
+      if (filterText || state.rebaseInProgress) return;
       e.preventDefault();
       const after = isAfter(e, row);
       clearDropMarkers();
@@ -423,13 +524,58 @@
 
     row.addEventListener("contextmenu", (e) => {
       e.preventDefault();
-      openMenu(e.clientX, e.clientY, c);
+      openMenu(e.clientX, e.clientY, c, row);
+    });
+    row.addEventListener("click", (e) => {
+      if (e.target.closest(".grip")) return;
+      if (e.ctrlKey || e.metaKey) {
+        if (selectedHashes.has(c.hash)) selectedHashes.delete(c.hash); else selectedHashes.add(c.hash);
+        renderList();
+      }
     });
     row.addEventListener("keydown", (e) => {
       if ((e.key === "ContextMenu") || (e.shiftKey && e.key === "F10")) {
         e.preventDefault();
         const rect = row.getBoundingClientRect();
-        openMenu(rect.left + 8, rect.bottom, c);
+        openMenu(rect.left + 8, rect.bottom, c, row);
+        return;
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key === " ") {
+        e.preventDefault();
+        if (selectedHashes.has(c.hash)) selectedHashes.delete(c.hash); else selectedHashes.add(c.hash);
+        renderList();
+        return;
+      }
+      if (state.rebaseInProgress || filterText) return;
+      if (e.key === " ") {
+        e.preventDefault();
+        keyboardPickupHash = keyboardPickupHash ? null : c.hash;
+        announce(keyboardPickupHash ? `已拾取 ${c.shortHash}；使用上下箭头选择位置，Enter 放下。` : "已取消移动。");
+        renderList();
+        return;
+      }
+      if (!keyboardPickupHash) return;
+      if (e.key === "Escape") {
+        e.preventDefault(); keyboardPickupHash = null; announce("已取消移动。"); renderList(); return;
+      }
+      if (e.key === "Enter") {
+        e.preventDefault();
+        if (keyboardPickupHash !== c.hash) reorder(keyboardPickupHash, c.hash, false);
+        keyboardPickupHash = null;
+        return;
+      }
+      if (["ArrowUp", "ArrowDown", "Home", "End"].includes(e.key)) {
+        e.preventDefault();
+        const source = state.commits.find((commit) => commit.hash === keyboardPickupHash);
+        const position = state.commits.indexOf(c);
+        let target = position;
+        if (e.key === "ArrowUp") target = Math.max(0, position - 1);
+        if (e.key === "ArrowDown") target = Math.min(state.commits.length - 1, position + 1);
+        if (e.key === "Home") target = 0;
+        if (e.key === "End") target = state.commits.length - 1;
+        const targetRow = document.querySelector(`.commit[data-hash="${state.commits[target].hash}"]`);
+        targetRow?.focus();
+        announce(`移动 ${source?.shortHash ?? "commit"} 到第 ${target + 1} 个位置；Enter 放下。`);
       }
     });
 
@@ -455,6 +601,12 @@
   // ---- reorder ------------------------------------------------------------
 
   function reorder(fromHash, targetHash, after) {
+    // Filtering is a view projection only; a partial order must never be sent
+    // to the host. Reorder always sends the complete canonical order.
+    if (filterText || state.rebaseInProgress) {
+      announce("过滤或变基期间不能重排。 ");
+      return;
+    }
     const order = state.commits.map((c) => c.hash);
     const fromIdx = order.indexOf(fromHash);
     if (fromIdx >= 0) {
@@ -475,8 +627,9 @@
 
   // ---- context menu -------------------------------------------------------
 
-  function openMenu(x, y, c) {
+  function openMenu(x, y, c, origin) {
     hideTooltip();
+    menuRestoreFocus = origin || document.activeElement;
     menuEl.innerHTML = "";
     menuEl.setAttribute("role", "menu");
     const header = document.createElement("div");
@@ -551,12 +704,16 @@
     const mh = menuEl.offsetHeight;
     menuEl.style.left = Math.max(4, Math.min(x, window.innerWidth - mw - 4)) + "px";
     menuEl.style.top = Math.max(4, Math.min(y, window.innerHeight - mh - 4)) + "px";
-    menuEl.querySelector("button:not(.disabled)")?.focus();
+    menuEl.onkeydown = menuKeydown;
+    focusMenuButton(0);
   }
 
   function closeMenu() {
     menuEl.classList.add("hidden");
     menuEl.innerHTML = "";
+    const restore = menuRestoreFocus;
+    menuRestoreFocus = null;
+    restore?.focus?.();
   }
 
   function send(type, c) {
