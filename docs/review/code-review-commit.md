@@ -19,6 +19,9 @@
 | `fb8b6726fbd8b1cb6353a23542e4eca34e42f478` | `fix: preserve compose input when reword pauses` | [`code-review-0-5-0.md`](code-review-0-5-0.md) | [`review-response-0-5-0.md`](review-response-0-5-0.md) | 已评审；Compose 输入保留有效 | 2026-09-05 | 主 agent 发现并修正普通 reword 暂停误发成功协议。 |
 | `e623b497c2062a8bcbc40f7bf66fddc7f5a09970` | `docs: add UI review suggestions` | [`code-review-0-5-0.md`](code-review-0-5-0.md) | [`review-response-0-5-0.md`](review-response-0-5-0.md) | 已评审；原始建议归档 | 2026-09-05 | 用户提供的 UI 建议作为 0.5.0 评审输入保留。 |
 | `e54c03b` | `fix: avoid optional index lock contention` | [`code-review-0-5-1.md`](code-review-0-5-1.md) | [`review-response-0-5-1.md`](review-response-0-5-1.md) — 0-5-1 回复 | 已评审；后台 status optional lock 修复 | 2026-09-07 | Linux 实际 index.lock 观测、最小环境修复、临时仓库回归测试和发布 body 工作流升级。 |
+| `ff260667727ba3c92dde861c74b2f594ec736ca5` | `feat: implement 0.6 rebase experience` | [`code-review-0-6-0.md`](code-review-0-6-0.md) | [`review-response-0-6-0.md`](review-response-0-6-0.md) — 0-6-0 回复 | 已评审；rebase session/Undo/Panel/操作升级通过 | 2026-09-09 | 由两轮 UI 建议、截图、Agent A/B/C 和主 agent 复核覆盖。 |
+| `02ff57da31d2f2a8a485ab7446417f8bc0caf492` | `fix: harden 0.6 rebase experience` | [`code-review-0-6-0.md`](code-review-0-6-0.md) | [`review-response-0-6-0.md`](review-response-0-6-0.md) | 已评审；Undo/progress/Compose 安全修正 | 2026-09-09 | Agent C 第一轮深审修正。 |
+| `612556664652601269438156fc5df8cec1ceac99` | `fix: harden 0.6 rebase experience` | [`code-review-0-6-0.md`](code-review-0-6-0.md) | [`review-response-0-6-0.md`](review-response-0-6-0.md) | 已评审；多选/过滤/locked run/键盘修正 | 2026-09-09 | Agent C 按大版本价值要求补齐的安全实现。 |
 
 ## 待评审 Commit
 
@@ -36,6 +39,9 @@
 | `fb8b6726fbd8b1cb6353a23542e4eca34e42f478` | `fix: preserve compose input when reword pauses` | ✅ 已在 2026-09-05 的 `code-review-0-5-0.md` 中评审；保留此上下文作为历史记录。 |
 | `e623b497c2062a8bcbc40f7bf66fddc7f5a09970` | `docs: add UI review suggestions` | ✅ 已在 2026-09-05 的 `code-review-0-5-0.md` 中评审；保留此上下文作为历史记录。 |
 | `e54c03b` | `fix: avoid optional index lock contention` | ✅ 已在 2026-09-07 的 `code-review-0-5-1.md` 中评审；保留此上下文作为历史记录。 |
+| `ff260667727ba3c92dde861c74b2f594ec736ca5` | `feat: implement 0.6 rebase experience` | ✅ 已在 2026-09-09 的 `code-review-0-6-0.md` 中评审；保留此上下文作为历史记录。 |
+| `02ff57da31d2f2a8a485ab7446417f8bc0caf492` | `fix: harden 0.6 rebase experience` | ✅ 已在 2026-09-09 的 `code-review-0-6-0.md` 中评审；保留此上下文作为历史记录。 |
+| `612556664652601269438156fc5df8cec1ceac99` | `fix: harden 0.6 rebase experience` | ✅ 已在 2026-09-09 的 `code-review-0-6-0.md` 中评审；保留此上下文作为历史记录。 |
 
 > 未来评审覆盖上述任一 commit 时，必须在“已评审 Commit”表中新增或补充对应记录，写明完整 SHA、评审文件、回复章节、状态和日期；保留“待评审 Commit”中的历史上下文，不得直接删除。
 >

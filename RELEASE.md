@@ -105,6 +105,15 @@ code --install-extension git-rebase-visual-<version>.vsix
 
 ### 更新记录
 
+- **0.6.0** — 大版本 rebase 状态模型、恢复能力与编辑体验升级：
+  - **受控 Undo 与操作历史**：历史改写前创建私有 `refs/gitRebaseVisual/undo/<id>` checkpoint，并记录仓库、分支、before/after tip 与操作类型。工具栏、成功结果和历史入口可 Undo；Undo 会验证 rebase、分支、HEAD、工作区、checkpoint 和已推送风险，优先 `reset --keep`，不使用不安全的裸 `ORIG_HEAD + reset --hard`。
+  - **真实 rebase 状态**：新增 rebase session/progress，显示步骤 N/M、edit/conflict/paused 原因、当前/待重放 commit；待重放行明确 hash 将变化，外部无法可靠解析时显示 unknown，不虚构进度。增加可点击状态栏提示。
+  - **暂停工作区**：edit stop 提供 Amend 当前 commit、新建 commit、仅生成 message；conflict-only Skip 显示将丢弃 patch 的完整后果并确认；Continue 始终宿主复查冲突。
+  - **提交操作升级**：新增 squash/fixup、复制 message、受控只读 Git diff；首项、locked 当前/前驱和 rebase 中操作均防御式禁用并说明原因。
+  - **Compose Panel**：message 编辑迁移到编辑器区 WebviewPanel，支持 subject/body、50/72 提示、72 列参考、原 message/trailer 折叠、AI cancel/replace/append/restore、draft/session 保留和 Apply 失败保留输入。
+  - **UI/无障碍**：作者 email 稳定色与首字母、状态颜色语义分离、grip-only drag、文本可选择、搜索/多选/安全 locked-run 折叠、键盘 pickup/drop、菜单 roving focus、状态栏、High Contrast fallback。
+  - **安全修正与测试**：Undo journal 按仓库隔离并在淘汰时清理私有 refs；todo parser 正确处理 exec/merge workflow 并对未知语法降级；`messageOnly` 不再误提交；fixup message 丢弃语义有真实 Git 回归测试。测试套件扩展至 **64 项**。
+
 - **0.5.1** — 后台 Git 状态轮询的 index-lock 竞争修复：
   - **终端切分支/stash 并发保护**：面板可见时后台 `git status` 刷新可能触发 Git 的可选 index metadata refresh，短暂创建 `.git/index.lock`，与终端 `git switch`、`git stash` 等写 index 操作竞争。后台 `workingStatus()` 与 `isDirty()` 现使用 `GIT_OPTIONAL_LOCKS=0`，状态结果保持正确但不再获取 optional index lock；rebase、stash、commit、push 等写操作仍保留正常 Git lock。
   - **回归测试**：真实临时仓库中预先创建 `index.lock`，验证后台状态读取仍能正确返回 staged/unstaged 状态和 dirty 结果。

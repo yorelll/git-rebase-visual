@@ -9,7 +9,7 @@
 ```markdown
 ## Git Rebase Visual {{VERSION}}
 
-可视化交互式 Git rebase VS Code 扩展：在侧边栏中安全地重排、编辑、锁定和推送 commit，并支持 AI message、stash 与 staged append。
+用于 VS Code 的可视化交互式 Git rebase 扩展：在侧边栏中安全地重排、编辑、锁定和推送 commit，支持 AI commit message、stash 与暂存区追加。
 
 > 来源：Git tag `v{{VERSION}}` · GitHub Actions 自动构建 · CI 已通过 `npm run test:release`、VSIX 内容校验与版本记录校验。
 
@@ -52,9 +52,10 @@
 
 ## 填写规则
 
-1. 删除不适用的小节，而不是保留空标题。
-2. `{{VERSION}}` 必须替换为不带 `v` 的语义化版本。
-3. 每条修复都写明**用户影响/触发条件 → 修复后行为**；不只罗列文件名或 commit。
-4. 每条新功能都写明**入口与行为边界**；尤其是 rebase、drop、append、stash 等历史操作。
-5. 与 `RELEASE.md` 保持一致，但 Release body 应是面向下载者的完整最终说明；`RELEASE.md` 是仓库内版本历史。
-6. 工作流会校验该文件存在、版本标题匹配且不为空；缺失或模板占位符未替换时，发布失败。
+1. **Release body 必须使用简体中文**；可保留 Git/VS Code 的原生命令、配置名、文件名和代码标识为英文。
+2. 删除不适用的小节，而不是保留空标题。
+3. `{{VERSION}}` 必须替换为不带 `v` 的语义化版本。
+4. 每条修复都写明**用户影响/触发条件 → 修复后行为**；不只罗列文件名或 commit。
+5. 每条新功能都写明**入口与行为边界**；尤其是 rebase、drop、append、stash 等历史操作。
+6. 与 `RELEASE.md` 保持一致，但 Release body 应是面向下载者的完整最终说明；`RELEASE.md` 是仓库内版本历史。
+7. 工作流会校验该文件存在、版本标题匹配且不为空；缺失或模板占位符未替换时，发布失败。

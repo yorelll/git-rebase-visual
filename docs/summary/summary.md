@@ -1,6 +1,6 @@
 # Git Rebase Visual — 功能、架构与测试总结
 
-> 当前基线：v0.5.0 UI/UX 安全反馈、历史改写状态机与可访问性增强。
+> 当前基线：v0.6.0 受控 Undo、真实 rebase session/progress、编辑器区 Compose 与高频 rebase 决策升级。
 
 ## 1. 项目定位
 
@@ -20,17 +20,17 @@ Webview (media/main.js)
 
 | 功能 | 行为与保护 |
 |---|---|
-| 拖拽重排 | 通过 scripted interactive rebase 重排 oldest-first todo；后端验证 webview 提交集合完整，UI 显示 Base/HEAD 方向、拖拽前后语义和历史改写确认。 |
-| edit / reword / drop | 在原生 rebase 中执行；暂停时提供 Continue / Abort。Compose reword 失败或暂停时保留输入，不会错误报告成功。 |
-| commit 锁定 | 使用稳定 `patch-id`，重排/cherry-pick 后仍能识别同一修改；push 前阻止包含锁定 commit 的范围。locked commit 必须先解锁才能 Drop。 |
-| AI message | 对 commit、暂存区或工作区 diff 流式生成可编辑消息；保留常见 trailer，支持取消与可配置 deadline。 |
-| stash | autoStash 以 stash commit SHA 持久化定位，避免 `stash@{0}` 因外部操作漂移；append Abort 避免完整 snapshot 与 keep-index stash 的重复恢复。 |
-| push | 普通分支使用 `--force-with-lease`；可选评审 refspec；可取消进度和 OutputChannel 诊断；rebase edit 停靠时仍可推送。 |
-| 自动状态同步 | 文件事件与节流 index 轮询自动刷新 staged/unstaged 状态和文件数，终端 `git add` 后无需手动刷新；后台 status 使用 `GIT_OPTIONAL_LOCKS=0`，避免 optional `index.lock` 与终端写操作竞争。 |
-| 暂停 rebase 反馈 | 刷新时派生冲突文件、数量和暂停原因；未解决冲突会禁用 Continue，宿主仍二次检查。 |
-| 危险操作 UX | Drop、reorder、edit-stop、Abort 均有明确确认；成功改写记录 operation、old/new tip 和影响范围到 Output/通知。 |
-| staged append | 目标 commit `edit` 停靠后恢复初始 index，`--amend --no-edit`，再重放其后的提交。 | 
-| UI/可访问性基线 | message 主行/metadata 次行、菜单风险分组、Base/HEAD 方向、最小 ARIA、Escape、Menu 键与 Ctrl/Cmd+Enter。 |
+| 拖拽重排 | scripted interactive rebase 的 oldest-first todo；Base/HEAD、拖拽前后语义、grip-only drag、键盘 pickup/drop 与历史改写确认。 |
+| edit / reword / drop / Skip | 原生 rebase 中执行；暂停时提供 Continue / Abort；Skip 仅 conflict pause 可用且强确认 patch 丢弃。Compose reword 失败/暂停保留输入。 |
+| squash / fixup / diff | 首项、locked current/前驱和 rebase 中时防御式禁用；受控只读 Git diff、复制完整 message。 |
+| commit 锁定 | 稳定 `patch-id`，重排/cherry-pick 后仍识别同一修改；push 前阻止 locked 范围；locked commit 不能被 Drop/squash/fixup/append 静默修改。 |
+| Undo 与操作历史 | 每次成功 rewrite 创建私有 before ref/journal；Undo 验证仓库、分支、HEAD、rebase、工作区、checkpoint 与 pushed 风险，使用 `reset --keep`。 |
+| rebase session | 解析步骤 N/M、completed/active/pending、edit/conflict/paused/unknown；待重放 hash 明确会变化，不伪造外部 rebase 进度。 |
+| Compose Panel / AI | 编辑器区 subject/body Panel、50/72、72 列参考、原 message/trailer 折叠、AI draft/取消/替换/追加/恢复、失败保留输入。 |
+| stash | autoStash 以 stash commit SHA 持久化定位，避免 `stash@{0}` 漂移；append Abort 避免完整 snapshot 与 keep-index stash 重复恢复。 |
+| push | 普通分支 `--force-with-lease`；可选评审 refspec；可取消进度/Output；rebase edit 停靠时仍可推送，并明确 detached HEAD 的分支/upstream 语义。 |
+| 自动状态同步 | 文件事件与节流 index 轮询刷新 staged/unstaged 文件数；后台 status 使用 `GIT_OPTIONAL_LOCKS=0`，避免 optional `index.lock` 与终端写操作竞争。 |
+| 列表/上下文/可访问性 | 作者首字母和稳定语义色、pending 文本、branch/upstream/ahead-behind、搜索、多选、安全 locked-run 折叠、ARIA、roving menu、状态栏和 High Contrast fallback。 |
 
 ## 3. 「将暂存区文件添加到此 commit」事务
 
@@ -73,14 +73,18 @@ src/
 │  ├─ message.ts                   message trailer 拆分与保留
 │  ├─ pushGuard.ts                 upstream/refspec/锁定范围检查
 │  └─ seq-editor.js                Git 调用的 sequence editor
-├─ lock/lockStore.ts               patch-id 持久化锁
+├─ lock/lockStore.ts               patch-id 持久化锁与批量 lockMany
 ├─ llm/client.ts                   OpenAI-compatible chat / streamChat、deadline、错误脱敏
 ├─ llm/messageGen.ts               diff 和提示词构造、流式生成入口
-├─ ui/rebaseViewProvider.ts        webview 协调、历史事务、暂停/冲突状态、OutputChannel、自动刷新
-├─ ui/rebaseState.ts               由 Git 未合并路径/explicit edit action 派生的暂停状态
+├─ ui/rebaseViewProvider.ts        webview 协调、历史事务、session/progress、Undo、暂停/冲突、状态栏
+├─ ui/rebaseState.ts               pause/progress/pending/unknown rebase 状态派生
+├─ ui/undo.ts                      私有 before ref、操作 journal、Undo preflight/reset --keep
+├─ ui/composePanel.ts              编辑器区 Compose WebviewPanel 与 draft/session 状态
 ├─ ui/secretsAccess.ts             SecretStorage 访问器注入桩（安全降级）
 
-media/main.js                      webview DOM、拖拽、菜单、弹窗
+media/main.js                      sidebar DOM、拖拽/键盘重排、菜单、筛选/多选/locked 折叠
+media/style.css                    主题语义、pending/status/高对比度 fallback
+.github/workflows/release.yml      tag 发布门禁与 GitHub Release
 .github/workflows/release.yml      tag 发布门禁与 GitHub Release
 ```
 
@@ -92,6 +96,10 @@ media/main.js                      webview DOM、拖拽、菜单、弹窗
 |---|---|---|
 | 逻辑 | `test/message.test.ts` | trailer 拆分、保留、显式替换、通用 trailer |
 | 逻辑 | `test/rebaseEngine.test.ts` | todo 顺序、各种 rebase action、空 todo |
+| Undo/Git 集成 | `test/undo.integration.test.ts` | 私有 ref、journal、reset --keep、dirty/HEAD/branch/rebase/ref 拒绝、跨仓库隔离 |
+| session/progress | `test/rebaseProgressState.test.ts` | done/todo、pending、unknown todo、exec/merge workflow、选择完整性 |
+| rebase 合并 | `test/squashFixup.integration.test.ts` | squash message、fixup 丢弃 message、todo action |
+| Compose 草稿 | `test/composeDraft.test.ts` | subject/body、字数阈值、恢复 draft 状态 |
 | 逻辑 | `test/pushGuard.test.ts` | 默认/refspec 模板/空白模板 |
 | 边界 | `test/gitRunner.integration.test.ts` | 非零 Git 结果、输出上限、取消信号 |
 | Git 集成 | `test/commitLog.integration.test.ts` | staged/unstaged 文件数、commit 顺序、absolute git-path、edit stop/rebase-apply 分支 |
@@ -103,7 +111,7 @@ media/main.js                      webview DOM、拖拽、菜单、弹窗
 | Git 集成（推送/守卫） | `test/pushGuard.integration.test.ts` | bare-remote：force-with-lease 并发拒绝、lockedInPush 拦截/解锁 |
 | Git 集成（append 守卫） | `test/appendGuard.integration.test.ts` | 已推 upstream 守卫、锁定 commit patch-id 跨重写稳定 |
 | 注入桩 | `test/secretsAccess.test.ts` | SecretStorage 访问器安全降级与委托 |
-当前测试套件含 48 项测试（UI/Git 安全裁决见 [`../ui-reivew/ui-review-0-5-0.md`](../ui-reivew/ui-review-0-5-0.md)，覆盖条目的完整裁决见 improvement.md）。
+当前测试套件含 64 项测试（0.6 UI/Git 安全裁决见 [`../ui-reivew/ui-review-0-6-0.md`](../ui-reivew/ui-review-0-6-0.md)，覆盖条目的完整裁决见 improvement.md）。
 
 命令：
 
@@ -134,10 +142,10 @@ npm run package         # 编译并生成 VSIX
 - ~~大仓库 patch-id 缓存~~（✅ v0.4.0 已实施：session cache）与结构化变更统计（✅ v0.4.0 已实施：`--numstat`）；
 - ~~append/stash 恢复可见性~~（✅ v0.4.0 已实施：精确 stash@{n} 提示 + `stashList` 命令）；
 - 多根工作区、`all` 模式虚拟滚动/上限、provider 模块拆分、SecretStorage 完整读写迁移和 l10n；
-- squash/fixup、多选合并、搜索过滤、双 commit diff、**安全事务式**历史撤销和多远端；
-- 精确 rebase N/M 进度、状态栏常驻状态、完整键盘重排和人工 High Contrast/辅助技术验收；
-- 性能测试仓库与刷新延迟基准；
+- 多远端选择、完整 upstream divider、density 配置、通知分层、空/加载态和性能测试仓库；
+- 真实 VS Code High Contrast Dark/Light、screen reader、Compose Panel/AI 状态和 keyboard-flow 人工验收；
+- 刷新延迟基准与大仓库性能测量；
 
-UI 建议的逐项事实纠正、已修复项与未修改原因见 [`../ui-reivew/ui-review-0-5-0.md`](../ui-reivew/ui-review-0-5-0.md)；代码评审处理记录见 [`../review/review-response-0-5-0.md`](../review/review-response-0-5-0.md)。
+UI 建议的逐项事实纠正、已修复项与未修改原因见 [`../ui-reivew/ui-review-0-6-0.md`](../ui-reivew/ui-review-0-6-0.md)；代码评审处理记录见 [`../review/review-response-0-6-0.md`](../review/review-response-0-6-0.md)。
 
 外部版本化评审原文位于 `../review/code-review-<major>-<minor>-<patch>.md`；项目回复按相同版本号放在 `review-response-<major>-<minor>-<patch>.md`。开始评审前需读取 [`../review/code-review-commit.md`](../review/code-review-commit.md) 确认未覆盖 commit，完成后将精确 SHA 与对应报告写回该台账。

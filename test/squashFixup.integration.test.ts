@@ -16,6 +16,27 @@ test("squash preserves both messages while fixup discards its message", async (t
   assert.match(message, /first message/); assert.match(message, /second message/);
 });
 
+test("fixup discards the fixup commit message", async (t) => {
+  const cwd = createRepo();
+  t.after(() => removeRepo(cwd));
+  const base = commitFile(cwd, "base", "base\n", "base");
+  const first = commitFile(cwd, "one", "one\n", "kept message");
+  const second = commitFile(cwd, "two", "two\n", "discarded fixup message");
+
+  const outcome = await executeRebase(cwd, {
+    onto: await resolveBase(cwd, base),
+    items: [
+      { hash: base, action: "pick", subject: "base" },
+      { hash: first, action: "pick", subject: "kept message" },
+      { hash: second, action: "fixup", subject: "discarded fixup message" },
+    ],
+  });
+  assert.equal(outcome.ok, true);
+  const message = git(cwd, ["log", "-1", "--format=%B"]);
+  assert.match(message, /kept message/);
+  assert.doesNotMatch(message, /discarded fixup message/);
+});
+
 test("todo emits squash and fixup actions", () => {
   const todo = buildTodo([{ hash: "a".repeat(40), action: "squash", subject: "joined" }, { hash: "b".repeat(40), action: "fixup", subject: "discarded" }]);
   assert.match(todo, /^squash/m); assert.match(todo, /^fixup/m);

@@ -76,6 +76,15 @@
 - **自动刷新暂存状态**：通过 VS Code 源代码管理或终端 `git add` 暂存文件后，面板会自动更新菜单状态；无需手动点击 Refresh。后台只读状态查询使用 `GIT_OPTIONAL_LOCKS=0`，避免与终端 `git switch` / `git stash` 的 optional `index.lock` 刷新竞争。
 - **危险操作确认**：删除 commit 前会显示目标 commit 与历史重写确认；edit 停靠横幅会明确显示当前目标及 Continue / Abort 下一步。
 
+### 7. 受控 Undo、步骤进度与编辑器 Compose（0.6.0）
+
+- **受控 Undo**：每次成功历史改写都会记录私有 checkpoint、操作、before/after tip；工具栏、成功结果和历史入口可撤销。Undo 会验证当前分支、HEAD、工作区、rebase 状态、checkpoint 与已推送风险，优先使用 `git reset --keep`，不会把 `ORIG_HEAD + reset --hard` 作为不安全快捷方式。
+- **rebase 状态模型**：横幅与状态栏显示步骤 `N/M`、edit/conflict/paused 原因、冲突文件与待重放数量；待重放 commit 明确提示 hash 将在 Continue 后变化。无法可靠解析的外部 rebase 会显示未知状态，而不伪造进度。
+- **停靠工作区与 Skip**：edit 停靠提供 Amend 当前 commit、新建 commit、仅生成 message；Skip 仅在冲突暂停时可用，且会确认即将丢弃的 patch。
+- **更完整的操作能力**：支持 squash、fixup、复制 message 和只读 diff；首项、locked 当前/前驱及 rebase 中等不安全场景会禁用并解释。
+- **编辑器区 Compose Panel**：message 编辑迁移到独立编辑器区 Panel，支持 subject/body、50/72 提示、72 列参考、折叠原 message/trailer、AI cancel/replace/append/恢复 draft。
+- **筛选与键盘**：支持搜索、Ctrl/Cmd 多选、连续 locked run 安全折叠；可用 Space、Arrow、Home/End、Alt+Arrow 和 Escape 完成键盘重排，菜单支持方向键导航。
+
 ### 测试与发布校验
 
 - 本地执行 `npm run test`：运行逻辑、边界和真实 Git 临时仓库集成测试。

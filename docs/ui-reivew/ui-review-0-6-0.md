@@ -16,14 +16,14 @@
 - [x] **6 pending commits。** `rebaseProgressState` 解析 interactive done/todo 为 N/M 和 pending hashes；行显示“待重放：Continue 后 hash 将变化”和 `*`。不能可靠读取的外部 backend 显示 `unknown`，不虚构进度。
 - [x] **7 方向重复。** 去除固定重复 direction hint，仅保留 Base/HEAD 锚点；拖拽时才显示 live feedback。
 - [x] **8 头部 upstream 上下文。** 保持 range 的 Git 安全边界；本轮将状态栏作为跨编辑器上下文入口。真实 upstream divider 需要在 range 中同时包含 upstream 两侧 commit；当前 upstream range 本身不包含已推送段，强加 divider 会制造错误事实。
-- [ ] **9 连续 locked run 折叠。** 未实施：当前 locked 行仍需要展示其准确顺序和 pending/edit 状态；在小范围、可变状态的 rebase todo 中自动折叠会隐藏安全关键的前驱关系，降低 Git 历史正确性可见性。
+- [x] **9 连续 locked run 折叠。** 已实施：连续两个及以上 locked commit 折叠为可展开摘要；active、pending、stopped、selected 项不会被折叠，摘要不作为 drag/drop target，避免隐藏安全关键状态。
 - [x] **10 未提交改动主入口/危险 add -A 收纳。** staged 是 primary；working `git add -A` 置入“更多提交选项”并带 ⚠；新增只生成 message。
 - [x] **11 查看菜单。** 加入复制 message 与受控 readonly `git show --binary --find-renames` diff 文档；覆盖 binary、rename、root/merge 输出且不调用私有 Git extension command。
 - [x] **12 squash/fixup。** 扩展 todo/action；首项、locked 当前项或前驱、rebase 中均禁用；宿主二次检查并确认。
 - [x] **13 N/M、Skip、状态栏。** banner 显示步骤 N/M/unknown、冲突数、Continue guard；Skip 仅 conflict 可见，二次确认完整 patch 丢弃后果；状态栏显示 `rebase N/M · edit/conflict` 并可 reveal view。
 - [x] **14 Compose Panel。** `src/ui/composePanel.ts` 使用 editor-area `WebviewPanel` 和 retainContext session；subject/body、50/72、72 column guide、折叠 original/trailer、AI cancel/restore/model、Ctrl/Cmd+Enter/Escape、apply failure draft 保留均实现。
 - [x] **15 grip-only drag。** draggable 仅绑定 grip，正文可选。
-- [x] **16–30 P2。** 短 hash 统一为 8 位显示、pending `*`、作者/状态文字、fixed hover、危险文案、主题 token/high contrast fallback 已实现；菜单完整 roving navigation、多选/搜索、locked run 折叠未实施（见下方复评）。
+- [x] **16–30 P2。** 短 hash 统一为 8 位显示、pending `*`、作者/状态文字、fixed hover、危险文案、主题 token/high contrast fallback、菜单 roving navigation、搜索/过滤、多选、locked run 折叠均已实施；人工 High Contrast/屏幕阅读器逐屏验收保留为发布前人工检查。
 
 ## 上轮 suggestion / 0.5.0 未完成项复评
 
@@ -33,9 +33,9 @@
 - [ ] **newest-first 配置。** 不实施：interactive todo 的 oldest-first 是 Git 执行顺序；再提供反向 display/order 转换会降低重排和 locked predecessor 的历史正确性。
 - [ ] **density 设置。** 不实施：两行 message-first 布局已解决可读性；额外配置没有独立产品价值，且会增加状态组合。
 - [ ] **完整 upstream divider。** 不实施：当前 `upstream..HEAD` range 的事实是只含未推送 commits；不存在 divider 的两侧内容，伪造分界会误导。
-- [ ] **自动折叠 locked runs。** 不实施：如上，隐藏具体顺序/前驱会降低安全性。
-- [ ] **多选批量 lock/drop、搜索过滤。** 延后不是因为工作量：对于 rebase todo，批量 drop 需要显示每个 patch 的独立安全后果并逐项确认；单一“批量确认”会降低数据正确性。搜索过滤会改变排序/selection 与拖拽可见集合的对应关系，必须先有不丢失隐藏 commit 的安全模型。
-- [ ] **完整 roving menu/listbox、Space pickup/drop、Home/End。** 延后：现有 Enter/Shift+F10/Escape/Ctrl+Enter 和 focus ring 保留；以不完整实现替换浏览器原生可预测焦点会降低无障碍。后续应以真实 screen reader E2E 验证为前提。
+- [x] **自动折叠 locked runs。** 已实施：连续 ≥2 个 locked commit 可折叠；active/pending/stopped/selected commit 不会被隐藏，折叠摘要不能作为 drag/drop target。
+- [x] **多选批量 lock/drop、搜索过滤。** 已实施：过滤是 view-only projection，拖拽/键盘重排在过滤时禁用，canonical todo 不会丢 hidden commit；批量 lock/drop 对每个完整 hash 做宿主校验，批量 drop 经完整清单确认后构造单个原子 rebase plan。
+- [x] **完整 roving menu/listbox、Space pickup/drop、Home/End。** 已实施：列表支持 Space pickup/drop、Arrow/Home/End、Escape 取消、Alt+Arrow 快速移动；菜单支持 Arrow/Home/End/Enter/Escape roving focus。实际屏幕阅读器流程仍需人工验收。
 - [ ] **人工 High Contrast Light/Dark 逐屏。** 本次加入 token/forced-colors fallback；未声称完成实际 VS Code 人工验收，因为当前自动测试环境无交互主题实例。这不是能力拒绝，必须作为发布前人工验收。
 
 ## 具体实施与测试证据
@@ -52,7 +52,7 @@
 | 命令 | 结果 |
 | --- | --- |
 | `npm run typecheck` | 通过 |
-| `npm test` | 通过，57/57 |
+| `npm test` | 通过，64/64（含 C 审查补充的选择校验、Undo 隔离/ref 清理、unknown todo、exec/merge workflow、fixup message 语义测试） |
 | `npm run compile` | 通过 |
 | `git diff --check` | 通过 |
 
