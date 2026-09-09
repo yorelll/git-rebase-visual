@@ -42,7 +42,33 @@ export function rebasePauseState(
   };
 }
 
-/** Parse interactive-rebase todo/done lines. Comments and commands without a hash are ignored. */
+interface ParsedTodoStep {
+  /** Original commit hash when this command replays one; never inferred. */
+  hash?: string;
+}
+
+/**
+ * Parses one known interactive-rebase command. `exec`, `break`, and the merge
+ * workflow commands are real executable steps but deliberately have no hash.
+ * Unknown lines make the whole progress view unknown rather than guessing.
+ */
+function parseTodoStep(line: string): ParsedTodoStep | undefined | "unknown" {
+  const trimmed = line.trim();
+  if (!trimmed || trimmed.startsWith("#")) return undefined;
+  const commit = trimmed.match(/^(?:pick|p|reword|r|edit|e|squash|s|fixup|f|drop|d)\s+([0-9a-f]{7,40})\b/i);
+  if (commit) return { hash: commit[1] };
+  if (/^(?:exec|x)\s+\S/i.test(trimmed) || /^(?:break|b|label|l|reset|t|merge|m|update-ref|u)\b/i.test(trimmed)) {
+    return {};
+  }
+  return "unknown";
+}
+
+/**
+ * Parse interactive-rebase todo/done files. A progress count is emitted only
+ * when every non-comment command uses a known rebase-todo syntax. Commands
+ * without an original commit (`exec`, `break`, labels, and merges) count as
+ * steps but are never represented as pending hashes.
+ */
 export function rebaseProgressState(input: {
   rebaseInProgress: boolean;
   atEditStop: boolean;
@@ -55,13 +81,22 @@ export function rebaseProgressState(input: {
   if (!input.rebaseInProgress || !input.doneLines || !input.todoLines) {
     return { ...pause, pendingHashes: [] };
   }
-  const parse = (lines: string[]) => lines
-    .map((line) => line.trim())
-    .filter((line) => line && !line.startsWith("#"))
-    .map((line) => line.match(/^(?:pick|p|reword|r|edit|e|squash|s|fixup|f|drop|d)\s+([0-9a-f]{7,40})\b/i)?.[1])
-    .filter((hash): hash is string => !!hash);
+  const parse = (lines: string[]): ParsedTodoStep[] | undefined => {
+    const steps: ParsedTodoStep[] = [];
+    for (const line of lines) {
+      const step = parseTodoStep(line);
+      if (step === "unknown") return undefined;
+      if (step) steps.push(step);
+    }
+    return steps;
+  };
   const done = parse(input.doneLines);
   const todo = parse(input.todoLines);
+  if (!done || !todo) {
+    // A custom/unknown backend command cannot be mapped faithfully to N/M or a
+    // stable original hash. Preserve only the independently derived pause state.
+    return { ...pause, pendingHashes: [] };
+  }
   // A current edit is already represented by `done`; a conflict's failed pick
   // remains in todo. Both interpretations preserve the safety rule: only todo
   // hashes are pending originals.
@@ -69,7 +104,7 @@ export function rebaseProgressState(input: {
     ...pause,
     totalSteps: done.length + todo.length,
     completedSteps: done.length,
-    activeHash: input.stoppedHash,
-    pendingHashes: todo,
+    activeHash: /^[0-9a-f]{7,40}$/i.test(input.stoppedHash ?? "") ? input.stoppedHash : undefined,
+    pendingHashes: todo.flatMap((step) => step.hash ? [step.hash] : []),
   };
 }

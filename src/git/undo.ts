@@ -7,6 +7,8 @@ export interface UndoRecord {
   beforeTip: string;
   afterTip?: string;
   branch?: string;
+  /** Absolute repository root that owns this private ref and checkpoint. */
+  repository: string;
   affectedHashes: string[];
   affectedSteps: number;
   createdAt: string;
@@ -21,7 +23,7 @@ export interface UndoMemento {
 
 export const UNDO_WORKSPACE_KEY = "gitRebaseVisual.undoJournal.workspace";
 export const UNDO_GLOBAL_KEY = "gitRebaseVisual.undoJournal.global";
-const MAX_RECORDS = 30;
+export const MAX_UNDO_RECORDS = 30;
 
 export function undoRef(id: string): string {
   return `refs/gitRebaseVisual/undo/${id}`;
@@ -52,8 +54,10 @@ export class UndoJournal {
     return [...byId.values()].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   }
 
-  latestCompleted(): UndoRecord | undefined {
-    return this.records().find((record) => record.status === "completed");
+  latestCompleted(repository?: string): UndoRecord | undefined {
+    return this.records().find(
+      (record) => record.status === "completed" && (!repository || record.repository === repository)
+    );
   }
 
   async start(
@@ -89,11 +93,32 @@ export class UndoJournal {
   }
 
   private async save(record: UndoRecord): Promise<void> {
-    const merge = (records: UndoRecord[]) => [record, ...records.filter((item) => item.id !== record.id)].slice(0, MAX_RECORDS);
+    const workspaceRecords = this.workspace.get<UndoRecord[]>(UNDO_WORKSPACE_KEY, []) ?? [];
+    const globalRecords = this.global.get<UndoRecord[]>(UNDO_GLOBAL_KEY, []) ?? [];
+    const merge = (records: UndoRecord[]) =>
+      [record, ...records.filter((item) => item.id !== record.id)].slice(0, MAX_UNDO_RECORDS);
+    const nextWorkspace = merge(workspaceRecords);
+    const nextGlobal = merge(globalRecords);
     await Promise.all([
-      this.workspace.update(UNDO_WORKSPACE_KEY, merge(this.workspace.get<UndoRecord[]>(UNDO_WORKSPACE_KEY, []) ?? [])),
-      this.global.update(UNDO_GLOBAL_KEY, merge(this.global.get<UndoRecord[]>(UNDO_GLOBAL_KEY, []) ?? [])),
+      this.workspace.update(UNDO_WORKSPACE_KEY, nextWorkspace),
+      this.global.update(UNDO_GLOBAL_KEY, nextGlobal),
     ]);
+
+    // Journal retention must bound the Git-side checkpoint refs too. A record
+    // retained by either memento remains recoverable; only evicted records are
+    // pruned, and a failed best-effort deletion never invalidates the journal.
+    const retained = new Set([...nextWorkspace, ...nextGlobal].map((item) => item.id));
+    const evicted = new Map<string, UndoRecord>();
+    for (const item of [...workspaceRecords, ...globalRecords]) {
+      if (!retained.has(item.id)) evicted.set(item.id, item);
+    }
+    await Promise.all([...evicted.values()].map(async (item) => {
+      try {
+        await runGit(["update-ref", "-d", item.beforeRef], { cwd: item.repository });
+      } catch {
+        // A repository may have been removed since this global journal entry.
+      }
+    }));
   }
 }
 

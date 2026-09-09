@@ -356,8 +356,8 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
       stoppedAt,
       ...progress,
       llmConfigured: isLlmConfigured(),
-      undoHistory: this.undo.records(),
-      undoAvailable: !!this.undo.latestCompleted(),
+      undoHistory: this.undo.records().filter((record) => record.repository === root),
+      undoAvailable: !!this.undo.latestCompleted(root),
       currentUserEmail: userEmail,
       currentAuthorKnown: !!userEmail,
       hasStaged: status.hasStaged,
@@ -425,7 +425,6 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
       "fixup",
       "commitEditAmend",
       "commitEditNew",
-      "cancelGeneration",
     ];
     if (mutating.includes(m.type)) {
       if (this.busy) {
@@ -475,11 +474,12 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     if (!cwd && m.type !== "ready") {
       return;
     }
-    // A paused rebase has a deliberately narrow mutation allow-list. An edit
-    // stop may amend/create a commit only when stopped HEAD is verified below;
-    // a conflict never gets those paths. This replaces the former blanket guard.
+    // A paused rebase has a deliberately narrow mutation allow-list. Compose
+    // reword/apply would otherwise start or modify an unrelated external rebase.
+    // An edit stop may amend/create only after ensureEditStop verifies it below;
+    // a conflict never gets those paths.
     if (cwd && (await isRebaseInProgress(cwd))) {
-      const allowed = new Set(["continueRebase", "abortRebase", "skipRebase", "commitEditAmend", "commitEditNew", "openCompose", "generate", "apply"]);
+      const allowed = new Set(["continueRebase", "abortRebase", "skipRebase", "commitEditAmend", "commitEditNew"]);
       if (!allowed.has(m.type)) {
         const message = "变基进行中：此操作不能在当前暂停状态执行。";
         if (m.type === "apply") this.compose.post({ type: "applyFailed", message });
@@ -769,17 +769,28 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async undoLatest(cwd: string, requestedId?: unknown): Promise<void> {
+    const recordRoot = await repoRoot(cwd);
+    if (!recordRoot) {
+      toast("warn", "当前目录不是 Git 仓库，不能撤销。 ");
+      return;
+    }
     const record = typeof requestedId === "string"
-      ? this.undo.records().find((item) => item.id === requestedId && item.status === "completed")
-      : this.undo.latestCompleted();
+      ? this.undo.records().find(
+          (item) => item.id === requestedId && item.status === "completed" && item.repository === recordRoot
+        )
+      : this.undo.latestCompleted(recordRoot);
     if (!record) {
       toast("warn", "没有可安全撤销的操作。 ");
       return;
     }
-    const [inProgress, branch, head, dirty, ref] = await Promise.all([
+    const [inProgress, branch, head, dirty, ref, root] = await Promise.all([
       isRebaseInProgress(cwd), currentBranch(cwd), this.headTip(cwd), isDirty(cwd),
-      runGit(["show-ref", "--verify", "--quiet", record.beforeRef], { cwd }),
+      runGit(["show-ref", "--verify", "--quiet", record.beforeRef], { cwd }), repoRoot(cwd),
     ]);
+    if (!root || root !== record.repository) {
+      toast("warn", "Undo 记录属于另一个仓库，不能在当前仓库撤销。 ");
+      return;
+    }
     const safe = undoPreflight({
       rebaseInProgress: inProgress, currentBranch: branch, expectedBranch: record.branch,
       head, expectedAfterTip: record.afterTip, dirty, refExists: ref.code === 0,
@@ -801,7 +812,13 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async showUndoHistory(): Promise<void> {
-    const items = this.undo.records().map((record) => ({
+    const cwd = this.cwd();
+    const root = cwd ? await repoRoot(cwd) : undefined;
+    if (!root) {
+      toast("warn", "当前目录不是 Git 仓库，无法显示 Undo 历史。 ");
+      return;
+    }
+    const items = this.undo.records().filter((record) => record.repository === root).map((record) => ({
       label: `${record.operation} · ${record.status}`,
       description: `${record.beforeTip.slice(0, 10)} → ${record.afterTip?.slice(0, 10) ?? "pending"}`,
       detail: `${record.createdAt} · ${record.affectedSteps} steps`,
@@ -809,8 +826,7 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     }));
     const choice = await vscode.window.showQuickPick(items, { placeHolder: "最近操作历史；仅 completed 项可撤销" });
     if (choice?.record.status === "completed") {
-      const cwd = this.cwd();
-      if (cwd) await this.undoLatest(cwd, choice.record.id);
+      await this.undoLatest(cwd!, choice.record.id);
     }
   }
 
@@ -1087,8 +1103,12 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     undoRecord?: UndoRecord
   ): Promise<void> {
     const newTip = await this.headTip(cwd);
+    if (!newTip) {
+      if (undoRecord) await this.undo.mark(undoRecord, "aborted");
+      throw new Error("改写完成后无法读取 HEAD；Undo 记录未启用，以免错误回退。 ");
+    }
     if (undoRecord) await this.undo.complete(undoRecord, newTip);
-    const details = `${operation}; 范围 ${affectedCount} 个 commit; old tip ${oldTip ?? "unknown"}; new tip ${newTip ?? "unknown"}`;
+    const details = `${operation}; 范围 ${affectedCount} 个 commit; old tip ${oldTip ?? "unknown"}; new tip ${newTip}`;
     this.log("rebase", `完成 ${details}`);
     const choice = await vscode.window.showInformationMessage(
       `${operation} 已完成：${oldTip?.slice(0, 10) ?? "unknown"} → ${newTip?.slice(0, 10) ?? "unknown"}（${affectedCount} 个 commit）。`,
@@ -1126,10 +1146,25 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
 
     const oldTip = await this.headTip(cwd);
     if (!oldTip) throw new Error("无法读取 rewrite 前的 HEAD，已取消操作。");
+    const [branch, upstream] = await Promise.all([
+      currentBranch(cwd), runGit(["rev-parse", "--verify", "--quiet", "@{upstream}"], { cwd }),
+    ]);
+    const rewritesPushed = upstream.code === 0 && (await isAncestor(cwd, oldTip, "@{upstream}"));
+    if (rewritesPushed) {
+      const confirmation = await vscode.window.showWarningMessage(
+        "当前 HEAD 已推送到 upstream。此操作会改写共享历史；后续必须由你确认并使用 force-with-lease，插件不会自动推送。继续？",
+        { modal: true },
+        "仍要改写"
+      );
+      if (confirmation !== "仍要改写") {
+        return undefined;
+      }
+    }
     const undoRecord = await this.undo.start(cwd, {
       operation: plan.operation ?? "变基",
       beforeTip: oldTip,
-      branch: await currentBranch(cwd),
+      branch,
+      repository: root,
       affectedHashes: plan.items.map((item) => item.hash),
       affectedSteps: plan.affectedCount ?? plan.items.length,
     });
@@ -1345,10 +1380,16 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     messageOnly = false
   ): Promise<void> {
     if (ai && !isLlmConfigured()) {
-      toast("error", 
+      toast("error",
         "请先在设置中配置 gitRebaseVisual.llm.baseUrl 与 apiKey。"
       );
       return;
+    }
+    if (!["commit", "staged", "working"].includes(mode)) {
+      throw new Error("未知 Compose 模式，无法打开。 ");
+    }
+    if (await isRebaseInProgress(cwd)) {
+      throw new Error("变基进行中：不能打开 Compose 或生成 message。请先 Continue 或 Abort。 ");
     }
     let body = "";
     let trailers = "";
@@ -1380,6 +1421,12 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     if (!isLlmConfigured()) {
       toast("error", "请先配置 LLM。");
       return;
+    }
+    if (!["commit", "staged", "working"].includes(mode) || (mode === "commit" && !hash)) {
+      throw new Error("未知 Compose 目标，不能生成 message。 ");
+    }
+    if (await isRebaseInProgress(cwd)) {
+      throw new Error("变基进行中：不能生成 Compose message。请先 Continue 或 Abort。 ");
     }
     await vscode.window.withProgress(
       {
@@ -1435,6 +1482,9 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     if (!message.trim()) {
       return;
     }
+    if (await isRebaseInProgress(cwd)) {
+      throw new Error("变基进行中：不能应用 Compose message。请先 Continue 或 Abort。 ");
+    }
     if (mode === "commit" && hash) {
       // Preserve Change-Id / Signed-off-by trailers from the original message.
       const original = await fullMessage(cwd, hash);
@@ -1475,11 +1525,20 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
         }
       }
     } else if (mode === "staged") {
+      if (!(await workingStatus(cwd)).hasStaged) {
+        throw new Error("暂存区为空，message 未提交。 ");
+      }
       await commitIndex(cwd, message.replace(/\s+$/, "") + "\n");
       toast("info", "已用生成的 message 提交暂存区改动。");
     } else if (mode === "working") {
+      const status = await workingStatus(cwd);
+      if (!status.hasStaged && !status.hasUnstaged) {
+        throw new Error("工作区为空，message 未提交。 ");
+      }
       await commitAll(cwd, message.replace(/\s+$/, "") + "\n");
       toast("info", "已暂存并提交工作区改动。");
+    } else {
+      throw new Error("未知 Compose 模式，message 未应用。 ");
     }
     await this.refresh();
     this.compose.post({ type: "applySucceeded" });
@@ -1488,8 +1547,20 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
   private async openDiffDocument(cwd: string, hash: string): Promise<void> {
     // A controlled read-only virtual document avoids invoking private Git
     // extension commands and keeps binary/rename/root/merge output faithful.
-    const result = await runGit(["show", "--no-ext-diff", "--binary", "--find-renames", "--format=fuller", hash], { cwd, maxBuffer: 12 * 1024 * 1024 });
-    if (result.code !== 0) throw new Error(result.stderr || "无法读取 commit diff。");
+    // Do not let a binary patch fill the extension-host heap: Git's complete
+    // output is useful only while it fits within this deliberate display limit.
+    const limit = 12 * 1024 * 1024;
+    const result = await runGit(
+      ["show", "--no-ext-diff", "--binary", "--find-renames", "--format=fuller", hash],
+      { cwd, maxBuffer: limit }
+    );
+    if (result.code !== 0) {
+      const message = result.stderr || result.stdout || "无法读取 commit diff。";
+      if (message.includes("output limit")) {
+        throw new Error("Commit diff 超过 12 MiB 显示上限；请在终端使用 git show 查看完整内容。 ");
+      }
+      throw new Error(message);
+    }
     const document = await vscode.workspace.openTextDocument({ content: result.stdout, language: "diff" });
     await vscode.window.showTextDocument(document, { preview: true });
   }
