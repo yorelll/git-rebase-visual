@@ -70,6 +70,73 @@ test("a drop plan that conflicts remains paused until Abort, so a caller can ret
   clearPatchIdCache();
 });
 
+test("a replayed locked patch stays locked by patch-id after an earlier edit", async (t) => {
+  const cwd = createRepo();
+  t.after(() => {
+    cleanupRebase(cwd);
+    removeRepo(cwd);
+    clearPatchIdCache();
+  });
+
+  const base = commitFile(cwd, "base.txt", "base\n", "base");
+  const editable = commitFile(cwd, "editable.txt", "before\n", "editable");
+  const locked = commitFile(cwd, "locked.txt", "locked\n", "locked");
+  const locks = new LockStore(memoryMemento() as any);
+  const lockedPatch = await patchId(cwd, locked);
+  assert.ok(lockedPatch);
+  await locks.lock(cwd, locked, lockedPatch);
+
+  const outcome = await executeRebase(cwd, {
+    onto: await resolveBase(cwd, base),
+    items: [
+      { hash: base, action: "pick", subject: "base" },
+      { hash: editable, action: "edit", subject: "editable" },
+      { hash: locked, action: "pick", subject: "locked" },
+    ],
+  });
+  assert.equal(outcome.stopped, true);
+  git(cwd, ["commit", "--amend", "-m", "editable rewritten"]);
+  const completed = await continueRebase(cwd);
+  assert.equal(completed.ok, true);
+
+  const replayedLocked = git(cwd, ["rev-parse", "HEAD"]);
+  assert.notEqual(replayedLocked, locked);
+  const replayedPatch = await patchId(cwd, replayedLocked);
+  assert.equal(replayedPatch, lockedPatch);
+  assert.equal(locks.isLocked(cwd, replayedLocked, replayedPatch), true);
+  assert.deepEqual(locks.missingPatchIds(cwd, new Set([replayedPatch!])), []);
+});
+
+test("a missing locked patch remains persisted and is detectable after a rewrite", async (t) => {
+  const cwd = createRepo();
+  t.after(() => {
+    cleanupRebase(cwd);
+    removeRepo(cwd);
+    clearPatchIdCache();
+  });
+
+  const base = commitFile(cwd, "base.txt", "base\n", "base");
+  const locked = commitFile(cwd, "locked.txt", "locked\n", "locked");
+  const locks = new LockStore(memoryMemento() as any);
+  const lockedPatch = await patchId(cwd, locked);
+  assert.ok(lockedPatch);
+  await locks.lock(cwd, locked, lockedPatch);
+
+  const outcome = await executeRebase(cwd, {
+    onto: await resolveBase(cwd, base),
+    items: [
+      { hash: base, action: "pick", subject: "base" },
+      { hash: locked, action: "drop", subject: "locked" },
+    ],
+  });
+  assert.equal(outcome.ok, true);
+  assert.deepEqual(
+    locks.missingPatchIds(cwd, new Set(), new Set([lockedPatch!])),
+    [lockedPatch]
+  );
+  assert.equal(locks.lockedPatchIds(cwd).has(lockedPatch!), true);
+});
+
 test("Continue reports a stopped conflict until it is resolved, then completes", async (t) => {
   const cwd = createRepo();
   t.after(() => {

@@ -1303,6 +1303,72 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     return result.code === 0 ? result.stdout.trim() : undefined;
   }
 
+  /**
+   * Audits patch-id locks after a completed rewrite. A normal replay is allowed:
+   * its hash changes while its patch-id remains locked. If a direct or indirect
+   * rewrite loses a locked patch instead, keep the original persisted lock and
+   * make the existing private-ref Undo checkpoint immediately actionable.
+   */
+  private async warnMissingLockedPatches(
+    cwd: string,
+    root: string,
+    beforeTip: string | undefined,
+    undoRecord?: UndoRecord
+  ): Promise<boolean> {
+    const lockedPatchIds = this.locks.lockedPatchIds(root);
+    if (lockedPatchIds.size === 0 || !beforeTip) {
+      return false;
+    }
+    // Only inspect the diverged sides of this rewrite. Common ancestors keep
+    // their original objects, while scanning all of HEAD would make a completed
+    // rebase unnecessarily expensive in a long-lived repository.
+    const revisionRange = `${beforeTip}...HEAD`;
+    const [before, after] = await Promise.all([
+      runGit(["rev-list", "--left-only", revisionRange], { cwd }),
+      runGit(["rev-list", "--right-only", revisionRange], { cwd }),
+    ]);
+    if (before.code !== 0 || after.code !== 0) {
+      this.log("lock", `改写后无法枚举 commit，跳过锁定 patch 连续性检查：${before.stderr || before.stdout || after.stderr || after.stdout}`);
+      return false;
+    }
+    const beforeHashes = before.stdout.split(/\r?\n/).map((hash) => hash.trim()).filter(Boolean);
+    const expectedPatchIds = new Set<string>();
+    for (const hash of beforeHashes) {
+      const patchId = await this.locks.computePatchId(cwd, hash);
+      if (patchId && lockedPatchIds.has(patchId)) {
+        expectedPatchIds.add(patchId);
+      }
+    }
+    if (expectedPatchIds.size === 0) {
+      return false;
+    }
+    const hashes = after.stdout.split(/\r?\n/).map((hash) => hash.trim()).filter(Boolean);
+    const presentPatchIds = new Set<string>();
+    for (const hash of hashes) {
+      const patchId = await this.locks.computePatchId(cwd, hash);
+      if (patchId && expectedPatchIds.has(patchId)) {
+        presentPatchIds.add(patchId);
+      }
+    }
+    const missing = this.locks.missingPatchIds(root, presentPatchIds, expectedPatchIds);
+    if (missing.length === 0) {
+      return false;
+    }
+    const short = missing.map((patchId) => patchId.slice(0, 10)).join("、");
+    this.log("lock", `改写后未找到 ${missing.length} 个锁定 patch-id：${short}`);
+    const message = undoRecord
+      ? `改写后未找到 ${missing.length} 个锁定 patch（${short}）。原锁定记录已保留，避免该改动被静默解锁。请确认结果，或使用 Undo 恢复改写前历史。`
+      : `改写后未找到 ${missing.length} 个锁定 patch（${short}）。原锁定记录已保留，避免该改动被静默解锁；此操作没有自动 Undo 检查点，请确认结果。`;
+    const choice = undoRecord
+      ? await vscode.window.showWarningMessage(message, "Undo")
+      : await vscode.window.showWarningMessage(message);
+    if (choice === "Undo" && undoRecord) {
+      await this.undoLatest(cwd, undoRecord.id);
+      return true;
+    }
+    return false;
+  }
+
   /** Records a completed rewrite without offering an unsafe ORIG_HEAD reset. */
   private async reportRewrite(
     cwd: string,
@@ -1310,7 +1376,7 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     oldTip: string | undefined,
     affectedCount: number,
     undoRecord?: UndoRecord
-  ): Promise<void> {
+  ): Promise<boolean> {
     const newTip = await this.headTip(cwd);
     if (!newTip) {
       if (undoRecord) await this.undo.mark(undoRecord, "aborted");
@@ -1319,11 +1385,19 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     if (undoRecord) await this.undo.complete(undoRecord, newTip);
     const details = `${operation}; 范围 ${affectedCount} 个 commit; old tip ${oldTip ?? "unknown"}; new tip ${newTip}`;
     this.log("rebase", `完成 ${details}`);
+    const undone = await this.warnMissingLockedPatches(cwd, this.root!, oldTip, undoRecord);
+    if (undone) {
+      return true;
+    }
     const choice = await vscode.window.showInformationMessage(
       `${operation} 已完成：${oldTip?.slice(0, 10) ?? "unknown"} → ${newTip?.slice(0, 10) ?? "unknown"}（${affectedCount} 个 commit）。`,
       "Undo"
     );
-    if (choice === "Undo") await this.undoLatest(cwd, undoRecord?.id);
+    if (choice === "Undo") {
+      await this.undoLatest(cwd, undoRecord?.id);
+      return true;
+    }
+    return false;
   }
 
   private async runRebase(
@@ -1337,22 +1411,39 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     }
   ): Promise<{ ok: boolean; stopped: boolean } | undefined> {
     const root = this.root!;
-    // Reject before preparing a clean tree: otherwise a blocked drop could
-    // auto-stash user changes even though no Git operation is allowed to run.
-    // A locked patch can stay in an unchanged prefix, but it must not be
-    // dropped, reordered, or have its action changed. Compare the complete
-    // proposed plan with the canonical snapshot rather than trusting a caller
-    // to protect only individual operation types.
+    // Reject direct actions on a locked commit before preparing a clean tree:
+    // otherwise a blocked drop could auto-stash user changes even though no Git
+    // operation is allowed to run. A preceding edit/reword or an unlocked commit
+    // moving across a lock may legitimately replay the locked patch under a new
+    // hash. `runRebase` receives only the final todo, so it cannot tell that
+    // permitted case from a source drag; source-lock validation remains in
+    // handleReorder. Completed rewrites are audited by patch-id in reportRewrite.
     const originalItems = this.itemsWith();
-    for (let index = 0; index < originalItems.length; index++) {
-      const original = originalItems[index];
-      const proposed = plan.items[index];
-      const unchanged = proposed?.hash === original.hash && proposed.action === original.action;
-      if (unchanged) continue;
-      const pid = await this.locks.computePatchId(cwd, original.hash);
-      if (this.locks.isLocked(root, original.hash, pid)) {
-        toast("warn", "变基计划会改写或删除已锁定的 commit；请先解除锁定或选择不改写它。");
+    const originalHashes = new Set(originalItems.map((item) => item.hash));
+    for (const proposed of plan.items) {
+      if (!originalHashes.has(proposed.hash)) {
+        throw new Error("变基计划包含未知 commit；未执行 Git 写入。");
+      }
+      if (proposed.action === "pick") {
+        continue;
+      }
+      const pid = await this.locks.computePatchId(cwd, proposed.hash);
+      if (this.locks.isLocked(root, proposed.hash, pid)) {
+        toast("warn", "已锁定的 commit 不能删除或变更 rebase 操作；请先解除锁定。");
         return undefined;
+      }
+    }
+    if (plan.items.length !== originalItems.length) {
+      const proposedHashes = new Set(plan.items.map((item) => item.hash));
+      for (const original of originalItems) {
+        if (proposedHashes.has(original.hash)) {
+          continue;
+        }
+        const pid = await this.locks.computePatchId(cwd, original.hash);
+        if (this.locks.isLocked(root, original.hash, pid)) {
+          toast("warn", "已锁定的 commit 不能从 rebase 计划中删除；请先解除锁定。");
+          return undefined;
+        }
       }
     }
 
@@ -1439,13 +1530,16 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
       }
       const newTip = await this.headTip(cwd);
       if (oldTip !== newTip) {
-        await this.reportRewrite(
+        const undone = await this.reportRewrite(
           cwd,
           plan.operation ?? "变基",
           oldTip,
           plan.affectedCount ?? plan.items.length,
           undoRecord
         );
+        if (undone) {
+          await this.refresh();
+        }
       } else {
         await this.undo.mark(undoRecord, "aborted");
         this.log("rebase", `${plan.operation ?? "变基"} 未改变 HEAD；未报告历史改写。`);
@@ -1510,8 +1604,19 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     }
 
     let restoredForAmend = false;
+    let undoRecord: UndoRecord | undefined;
     try {
       const oldTip = await this.headTip(cwd);
+      if (!oldTip) throw new Error("无法读取 rewrite 前的 HEAD，已取消追加操作。");
+      const branch = await currentBranch(cwd);
+      undoRecord = await this.undo.start(cwd, {
+        operation: "追加暂存区",
+        beforeTip: oldTip,
+        branch,
+        repository: this.root!,
+        affectedHashes: this.itemsWith().map((item) => item.hash),
+        affectedSteps: this.commits.length,
+      });
       const outcome = await executeRebase(cwd, {
         items: this.itemsWith((h) => (h === hash ? "edit" : undefined)),
         onto: await this.computeBase(cwd),
@@ -1540,6 +1645,7 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
         operation: "追加暂存区",
         oldTip,
         affectedCount: this.commits.length,
+        undoRecord,
       };
 
       // The amend consumed the index. If the user also had worktree-only
@@ -1564,7 +1670,16 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
       const pending = this.pendingRewrite;
       this.pendingRewrite = undefined;
       if (pending) {
-        await this.reportRewrite(cwd, pending.operation, pending.oldTip, pending.affectedCount);
+        const undone = await this.reportRewrite(
+          cwd,
+          pending.operation,
+          pending.oldTip,
+          pending.affectedCount,
+          pending.undoRecord
+        );
+        if (undone) {
+          return;
+        }
       }
       toast("info", `已将暂存区文件追加到 ${commit.shortHash}。`);
     } catch (e) {
@@ -1586,6 +1701,7 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
         await this.restoreAppendSnapshot(cwd, changeStash);
         this.pendingRewrite = undefined;
       }
+      if (undoRecord) await this.undo.mark(undoRecord, "aborted");
       throw e;
     } finally {
       if (!(await isRebaseInProgress(cwd))) {

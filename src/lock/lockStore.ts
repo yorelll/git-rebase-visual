@@ -100,6 +100,21 @@ export class LockStore {
   }
 
   /**
+   * Returns expected locked patch identities that were not found after a
+   * rewrite. Hash-only locks intentionally do not participate: commits with no
+   * patch-id (for example merges) cannot be matched safely after their hash
+   * changes. Callers should pass only identities reachable before that rewrite,
+   * so locks on an unrelated branch do not create a false warning.
+   */
+  missingPatchIds(
+    repoRoot: string,
+    presentPatchIds: ReadonlySet<string>,
+    expectedPatchIds: ReadonlySet<string> = this.lockedPatchIds(repoRoot)
+  ): string[] {
+    return [...expectedPatchIds].filter((patchId) => !presentPatchIds.has(patchId));
+  }
+
+  /**
    * Computes the patch-id for a commit (helper so callers don't import both).
    */
   computePatchId(cwd: string, hash: string): Promise<string | undefined> {

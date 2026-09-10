@@ -35,3 +35,21 @@ test("LockStore lockMany persists a deduplicated atomic selection", async () => 
   assert.equal(store.isLocked("repo", "b".repeat(40), "same"), true);
   assert.equal(store.isLocked("repo", "c".repeat(40), "other"), true);
 });
+
+test("LockStore reports only expected missing patch identities after a rewrite", async () => {
+  const values = new Map<string, unknown>();
+  const store = new LockStore({
+    get<T>(key: string, fallback?: T) { return (values.get(key) ?? fallback) as T; },
+    async update(key: string, value: unknown) { values.set(key, value); },
+  } as any);
+  await store.lockMany("repo", [
+    { hash: "a".repeat(40), patchId: "replayed" },
+    { hash: "b".repeat(40), patchId: "removed" },
+    { hash: "c".repeat(40), patchId: "other-branch" },
+  ]);
+  assert.deepEqual(
+    store.missingPatchIds("repo", new Set(["replayed"]), new Set(["replayed", "removed"])),
+    ["removed"]
+  );
+  assert.equal(store.lockedPatchIds("repo").has("other-branch"), true);
+});
