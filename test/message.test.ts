@@ -45,3 +45,16 @@ test("applyTrailers uses an intentionally edited trailing block", () => {
 test("applyTrailers handles messages without trailers", () => {
   assert.equal(applyTrailers("new subject  ", "old subject"), "new subject\n");
 });
+
+test("applyTrailers preserves trailers for an edit-stop amend only", () => {
+  const original = "feat: target\n\nChange-Id: I123\nSigned-off-by: Test <t@example.com>\n";
+  const composeMessage = "feat: amended target\n\nExplain the correction";
+  assert.equal(
+    applyTrailers(composeMessage, original),
+    "feat: amended target\n\nExplain the correction\n\nChange-Id: I123\nSigned-off-by: Test <t@example.com>\n"
+  );
+  assert.equal(
+    applyTrailers("feat: separate follow-up", ""),
+    "feat: separate follow-up\n"
+  );
+});

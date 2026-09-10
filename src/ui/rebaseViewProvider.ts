@@ -67,6 +67,8 @@ import {
 import { SecretsAccessModule, fromSecretStorage } from "./secretsAccess";
 import { currentCommitSelection, rebaseProgressState } from "./rebaseState";
 import { branchContext } from "./rebasePresentation";
+import { ensureEditStopTarget, writeEditStopCommit } from "./editStopCommit";
+import { validateReorderRequest } from "./rebaseReorderState";
 import { isDraftOnlyComposeAllowedDuringRebase } from "./composePolicy";
 import { ComposePanel } from "./composePanel";
 import { UndoJournal, UndoRecord, undoPreflight } from "../git/undo";
@@ -104,6 +106,11 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
   private busy = false;
   private refreshQueued = false;
   private refreshGeneration = 0;
+  /** Stable IDs distinguish Compose targets without coupling them to refreshes. */
+  private readonly composeTargetRevisions = new Map<string, number>();
+  private nextComposeTargetRevision = 1;
+  /** Hashes that are protected in the currently rendered canonical snapshot. */
+  private lockedHashes = new Set<string>();
   private refreshTimer?: NodeJS.Timeout;
   private statusPoller?: NodeJS.Timeout;
   private statusPollerStarted = false;
@@ -378,6 +385,9 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
       return;
     }
     this.commits = commits;
+    this.lockedHashes = new Set(
+      commits.filter((commit) => lockedFlags.get(commit.hash)).map((commit) => commit.hash)
+    );
 
     // Send oldest-first (root at top, newest at bottom) for a natural timeline.
     const ordered = [...commits].reverse();
@@ -397,6 +407,8 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
       hasUnstaged: status.hasUnstaged,
       stagedCount: status.stagedCount,
       unstagedCount: status.unstagedCount,
+      canonicalRevision: generation,
+      canonicalOrder: ordered.map((commit) => commit.hash),
       commits: ordered.map((c) => ({
         hash: c.hash,
         shortHash: c.shortHash,
@@ -464,6 +476,7 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
       "fixup",
       "commitEditAmend",
       "commitEditNew",
+      "bulkSquash",
     ];
     if (mutating.includes(m.type)) {
       if (this.busy) {
@@ -498,13 +511,18 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
       "unlock",
       "appendStaged",
     ]);
+    // At an edit stop, the exact stopped SHA is valid target context even when
+    // the branch-range projection is temporarily unavailable/detached.
+    const editStopCompose =
+      m.type === "openCompose" && m.mode === "commit" && m.thenEdit === true && typeof m.hash === "string";
     const requiresCurrentCommit =
       hashActions.has(m.type) ||
-      ((m.type === "openCompose" || m.type === "apply") && m.mode === "commit");
+      ((m.type === "openCompose" || m.type === "apply") && m.mode === "commit" && !editStopCompose);
     if (requiresCurrentCommit && !this.isCurrentCommitHash(m.hash)) {
       const message = "commit 列表已更新，请刷新后重试。";
       if (m.type === "apply") {
         this.compose.post({ type: "applyFailed", message });
+        this.compose.post({ type: "staleTarget", message: "目标 commit 已变化；草稿仍保留，建议确认后重新打开。" });
       }
       toast("warn", message);
       await this.refresh();
@@ -522,7 +540,11 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
       const draftOnlyCompose =
         m.type === "openCompose" &&
         isDraftOnlyComposeAllowedDuringRebase(m.mode, m.messageOnly === true);
-      if (!allowed.has(m.type) && m.type !== "copyText" && !draftOnlyCompose) {
+      const editStopCompose =
+        m.type === "openCompose" && m.mode === "commit" && m.thenEdit === true && typeof m.hash === "string";
+      const editStopNewCompose =
+        m.type === "openCompose" && m.mode === "staged" && m.editKind === "new" && m.ai !== true;
+      if (!allowed.has(m.type) && m.type !== "copyText" && !draftOnlyCompose && !editStopCompose && !editStopNewCompose) {
         const message = "变基进行中：此操作不能在当前暂停状态执行。";
         if (m.type === "apply") this.compose.post({ type: "applyFailed", message });
         vscode.window.showWarningMessage(message);
@@ -560,7 +582,7 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
           await this.sendDetail(cwd!, m.hash);
           break;
         case "reorder":
-          await this.handleReorder(cwd!, m.order as string[]);
+          await this.handleReorder(cwd!, m);
           break;
         case "drop": {
           await this.dropCommits(cwd!, [m.hash]);
@@ -586,6 +608,11 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
             return;
           }
           await this.lockCommits(cwd!, hashes);
+          await this.refresh();
+          break;
+        }
+        case "bulkSquash": {
+          await this.squashSelection(cwd!, m.hashes);
           await this.refresh();
           break;
         }
@@ -626,14 +653,18 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
           break;
         }
         case "closeCompose":
-          // Panel retains context until explicitly closed by the user; no host
-          // draft is discarded here.
+          // The page sends this only after its dirty-draft discard confirmation.
+          // Never let a stale retained document close a newer Compose target.
+          if (!this.compose.discardActiveDraft(m.sessionId, m.revision)) {
+            return;
+          }
+          this.compose.close();
           break;
         case "cancelGeneration":
           this.generationCancel?.abort();
           break;
         case "openCompose":
-          await this.openCompose(cwd!, m.mode, m.hash, m.thenEdit === true, m.ai === true, m.messageOnly === true);
+          await this.openCompose(cwd!, m.mode, m.hash, m.thenEdit === true, m.ai === true, m.messageOnly === true, m.editKind);
           break;
         case "appendStaged":
           await this.appendStagedToCommit(cwd!, m.hash);
@@ -642,12 +673,30 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
           await this.generate(cwd!, m.mode, m.hash, m.extra ?? "");
           break;
         case "apply":
-          await this.apply(cwd!, m.mode, m.hash, m.message, m.thenEdit === true);
+          // A retained/reloaded webview can otherwise apply an old draft to a
+          // newer target. Git target checks below are necessary but not enough
+          // for staged/working Compose, which has no commit hash.
+          if (!this.compose.acceptsActiveSession(m.sessionId, m.revision)) {
+            this.compose.post({ type: "applyFailed", message: "Compose 会话已过期；草稿未应用，请重新打开目标。" });
+            this.compose.post({ type: "staleTarget", message: "目标或编辑会话已变化；未执行 Git 写入。" });
+            return;
+          }
+          await this.apply(cwd!, m.mode, m.hash, m.message, m.thenEdit === true, m.sessionId, m.revision);
           break;
         case "commitEditAmend":
         case "commitEditNew": {
-          await this.commitAtEditStop(cwd!, m.type === "commitEditAmend" ? "amend" : "new", m.message);
-          await this.refresh();
+          if (!this.compose.acceptsActiveSession(m.sessionId, m.revision)) {
+            this.compose.post({ type: "applyFailed", message: "Compose 会话已过期；草稿未应用，请重新打开目标。" });
+            this.compose.post({ type: "staleTarget", message: "目标或编辑会话已变化；未执行 Git 写入。" });
+            return;
+          }
+          await this.commitAtEditStop(
+            cwd!,
+            m.type === "commitEditAmend" ? "amend" : "new",
+            m.message,
+            m.sessionId,
+            m.revision
+          );
           break;
         }
         case "skipRebase": {
@@ -799,6 +848,42 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     });
   }
 
+  /** Safely squash an exact contiguous selection into its first commit. */
+  private async squashSelection(cwd: string, value: unknown): Promise<void> {
+    const selected = this.selectedHashes(value);
+    if (!selected || selected.length < 2) {
+      toast("warn", "请选择至少两个当前 commit 以批量 squash。 ");
+      return;
+    }
+    const ordered = [...this.commits].reverse();
+    const indexes = selected.map((hash) => ordered.findIndex((commit) => commit.hash === hash)).sort((a, b) => a - b);
+    if (indexes.some((index) => index < 0) || indexes.some((index, i) => i > 0 && index !== indexes[i - 1] + 1)) {
+      toast("warn", "批量 squash 只接受连续的完整选择；不会猜测跨越隐藏 commit 的顺序。 ");
+      return;
+    }
+    if (indexes[0] === 0 || indexes.some((index) => this.lockedHashes.has(ordered[index].hash))) {
+      toast("warn", "首个 commit 或任何已锁定 commit 不能参与批量 squash。 ");
+      return;
+    }
+    const selectedSet = new Set(selected);
+    const names = indexes.map((index) => ordered[index].shortHash).join("、");
+    const confirmation = await vscode.window.showWarningMessage(
+      `将连续的 ${selected.length} 个 commit（${names}）合并为一个 commit，并改写后续历史。继续吗？`,
+      { modal: true },
+      "批量 Squash"
+    );
+    if (confirmation !== "批量 Squash") return;
+    const rechecked = this.selectedHashes(selected);
+    if (!rechecked || rechecked.length !== selected.length) {
+      throw new Error("确认期间选择已变化；未执行批量 squash。 ");
+    }
+    await this.runRebase(cwd, {
+      items: this.itemsWith((hash) => selectedSet.has(hash) && hash !== ordered[indexes[0]].hash ? "squash" : undefined),
+      operation: `批量 squash ${selected.length} 个 commit`,
+      affectedCount: ordered.length - indexes[0],
+    });
+  }
+
   private async combineWithPrevious(cwd: string, hash: string, action: "squash" | "fixup"): Promise<void> {
     const ordered = [...this.commits].reverse();
     const index = ordered.findIndex((commit) => commit.hash === hash);
@@ -830,25 +915,36 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async ensureEditStop(cwd: string): Promise<void> {
-    const [atEdit, stopped, conflicts] = await Promise.all([rebaseAtEditStop(cwd), rebaseStoppedSha(cwd), conflictedFiles(cwd)]);
-    if (!atEdit || !stopped || conflicts.length > 0) {
-      throw new Error("当前不是可提交的 edit 停靠；冲突必须先解决并暂存。 ");
-    }
+    await ensureEditStopTarget(cwd);
   }
 
-  private async commitAtEditStop(cwd: string, kind: "amend" | "new", message: unknown): Promise<void> {
-    await this.ensureEditStop(cwd);
-    const status = await workingStatus(cwd);
-    if (!status.hasStaged) throw new Error("暂存区为空；请先在 SCM 中暂存改动。 ");
+  private async commitAtEditStop(
+    cwd: string,
+    kind: "amend" | "new",
+    message: unknown,
+    sessionId?: unknown,
+    revision?: unknown
+  ): Promise<void> {
     if (typeof message !== "string" || !message.trim()) {
       this.compose.post({ type: "applyFailed", message: "Commit message 不能为空。" });
       return;
     }
-    if (kind === "amend") {
-      await git(["commit", "--amend", "-m", message.trim()], { cwd });
-    } else {
-      await git(["commit", "-m", message.trim()], { cwd });
+    // Resolve the target once before the active-session comparison, then the
+    // helper repeats the Git-state/staged guard immediately before its write.
+    const stopped = await ensureEditStopTarget(cwd);
+    const active = this.compose.activeSession();
+    if (kind === "amend" && active?.hash !== stopped) {
+      this.compose.post({ type: "applyFailed", message: "目标 edit commit 已变化；未执行 amend。" });
+      this.compose.post({ type: "staleTarget", message: "当前停靠目标已变化；草稿仍保留。" });
+      return;
     }
+    if (kind === "new" && (active?.mode !== "staged" || active.editKind !== "new")) {
+      this.compose.post({ type: "applyFailed", message: "新建 commit 的 Compose 上下文已过期；未执行 Git 写入。" });
+      return;
+    }
+    await writeEditStopCommit(cwd, kind, message);
+    this.compose.clearDraft(sessionId, revision);
+    this.compose.post({ type: "applySucceeded" });
     this.post({ type: "applySucceeded" });
     toast("info", kind === "amend" ? "已 amend 当前 edit commit。" : "已在 edit 停靠创建新 commit。 ");
   }
@@ -922,7 +1018,7 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
       return;
     }
     const items = this.undo.records().filter((record) => record.repository === root).map((record) => ({
-      label: `${record.operation} · ${record.status}`,
+      label: `${record.status === "completed" ? "↺" : "—"} ${record.operation} · ${record.status}`,
       description: `${record.beforeTip.slice(0, 10)} → ${record.afterTip?.slice(0, 10) ?? "pending"}`,
       detail: `${record.createdAt} · ${record.affectedSteps} steps`,
       record,
@@ -933,35 +1029,27 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  private async handleReorder(cwd: string, displayOrder: unknown): Promise<void> {
-    // displayOrder is oldest-first (top->bottom), which is already todo order.
-    const expected = new Set(this.commits.map((c) => c.hash));
-    const valid =
-      Array.isArray(displayOrder) &&
-      displayOrder.length === expected.size &&
-      new Set(displayOrder).size === expected.size &&
-      displayOrder.every(
-        (hash) => typeof hash === "string" && /^[0-9a-f]{40}$/i.test(hash) && expected.has(hash)
-      );
-    if (!valid) {
-      toast("warn", "commit 列表已更新，已取消重排。请刷新后重试。");
+  private async handleReorder(cwd: string, request: FromWebview): Promise<void> {
+    // A webview may be stale, filtered, or tampered with. Derive the only valid
+    // result from source/anchor/placement and require its full canonical order.
+    const canonicalOrder = [...this.commits].reverse().map((commit) => commit.hash);
+    const checked = validateReorderRequest(
+      request,
+      canonicalOrder,
+      this.refreshGeneration,
+      this.lockedHashes
+    );
+    if (!checked.ok) {
+      toast("warn", checked.reason);
       await this.refresh();
       return;
     }
-    const bySubject = new Map(this.commits.map((c) => [c.hash, c.subject]));
-    const items: RebaseItem[] = displayOrder.map((hash) => ({
-      hash,
-      action: "pick",
-      subject: bySubject.get(hash)!,
-    }));
-    const changed = displayOrder.some(
-      (hash, index) => hash !== [...this.commits].reverse()[index]?.hash
-    );
-    if (!changed) {
-      return;
-    }
+    const { sourceHash, anchorHash, placement, affectedCount } = checked.value;
+    const byHash = new Map(this.commits.map((commit) => [commit.hash, commit]));
+    const source = byHash.get(sourceHash)!;
+    const anchor = byHash.get(anchorHash)!;
     const confirm = await vscode.window.showWarningMessage(
-      `重排 ${displayOrder.length} 个 commit 会改写受影响的提交历史。继续吗？`,
+      `将 ${source.shortHash} “${source.subject}” 移动到 ${anchor.shortHash} “${anchor.subject}”${placement === "after" ? "之后" : "之前"}；将改写至少 ${affectedCount} 个 commit 的 hash。继续吗？`,
       { modal: true },
       "重排"
     );
@@ -969,10 +1057,28 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
       await this.refresh();
       return;
     }
+    // Revalidate after the confirmation. The view can refresh while its modal is open.
+    const finalCheck = validateReorderRequest(
+      request,
+      [...this.commits].reverse().map((commit) => commit.hash),
+      this.refreshGeneration,
+      this.lockedHashes
+    );
+    if (!finalCheck.ok) {
+      toast("warn", `${finalCheck.reason} 未执行 Git 写入。`);
+      await this.refresh();
+      return;
+    }
+    const finalByHash = new Map(this.commits.map((commit) => [commit.hash, commit]));
+    const items: RebaseItem[] = finalCheck.value.order.map((hash) => ({
+      hash,
+      action: "pick",
+      subject: finalByHash.get(hash)!.subject,
+    }));
     await this.runRebase(cwd, {
       items,
       operation: "拖拽重排",
-      affectedCount: displayOrder.length,
+      affectedCount: finalCheck.value.affectedCount,
     });
     await this.refresh();
   }
@@ -1480,6 +1586,15 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  private composeRevision(target: string): number {
+    let revision = this.composeTargetRevisions.get(target);
+    if (revision === undefined) {
+      revision = this.nextComposeTargetRevision++;
+      this.composeTargetRevisions.set(target, revision);
+    }
+    return revision;
+  }
+
   /** Opens the compose dialog for a reword / AI / staged / working message. */
   private async openCompose(
     cwd: string,
@@ -1487,7 +1602,8 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     hash: string | undefined,
     thenEdit: boolean,
     ai: boolean,
-    messageOnly = false
+    messageOnly = false,
+    editKind?: unknown
   ): Promise<void> {
     if (ai && !isLlmConfigured()) {
       toast("error",
@@ -1498,19 +1614,59 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     if (!["commit", "staged", "working"].includes(mode)) {
       throw new Error("未知 Compose 模式，无法打开。 ");
     }
+    const normalizedEditKind = editKind === "amend" || editKind === "new" ? editKind : undefined;
+    let stoppedHash: string | undefined;
     if (await isRebaseInProgress(cwd)) {
-      if (!isDraftOnlyComposeAllowedDuringRebase(mode, messageOnly)) {
+      if (ai && !messageOnly) {
+        throw new Error("变基进行中：不能调用 AI 生成 message；仅可保留 draft-only Compose。 ");
+      }
+      const editStopAmend = mode === "commit" && thenEdit === true && typeof hash === "string" && normalizedEditKind === "amend";
+      const editStopNew = mode === "staged" && normalizedEditKind === "new" && ai === false;
+      if (!isDraftOnlyComposeAllowedDuringRebase(mode, messageOnly) && !editStopAmend && !editStopNew) {
         throw new Error("变基进行中：不能打开 Compose 或生成 message。请先 Continue 或 Abort。 ");
+      }
+      if (editStopAmend || editStopNew) {
+        await this.ensureEditStop(cwd);
+        stoppedHash = await rebaseStoppedSha(cwd);
+      }
+      // The stopped hash is authority; never let a stale webview select a
+      // different commit and amend whichever stop happens to be active.
+      if (editStopAmend && hash !== stoppedHash) {
+        throw new Error("目标 edit commit 已变化；未打开 Compose，请刷新后重试。");
       }
     }
     let body = "";
     let trailers = "";
+    let subject: string | undefined;
     if (mode === "commit" && hash) {
+      // A stopped edit commit is detached from the normal range projection. It
+      // remains valid only after ensureEditStop verified this exact Git state.
+      const commit = this.commits.find((item) => item.hash === hash);
+      if (!commit && !(thenEdit && stoppedHash === hash)) {
+        throw new Error("目标 commit 已变化；请刷新后重新打开 Compose。");
+      }
       const original = await fullMessage(cwd, hash);
       const split = splitTrailers(original);
       body = split.body;
       trailers = split.trailers;
+      subject = commit?.subject ?? body.split(/\r?\n/, 1)[0];
     }
+    // A staged/working Compose remains the same target across harmless view
+    // refreshes, but changing its underlying diff invalidates a recovered draft.
+    // Do not use refreshGeneration: it changes for unrelated file/UI updates.
+    const changesRevision = mode === "staged"
+      ? await getStagedDiff(cwd)
+      : mode === "working"
+        ? await getWorkingDiff(cwd)
+        : undefined;
+    const statusRevision = mode === "staged" || mode === "working"
+      ? await workingStatus(cwd)
+      : undefined;
+    const targetRevision = mode === "commit" && hash
+      ? `${hash}:${body} ${trailers}`
+      : stoppedHash
+        ? `edit-stop:${stoppedHash}:${normalizedEditKind ?? "draft"}`
+        : `${mode}:${changesRevision ?? ""}:${statusRevision?.hasStaged ? "staged" : ""}:${statusRevision?.hasUnstaged ? "unstaged" : ""}`;
     this.compose.open({
       mode,
       hash,
@@ -1519,6 +1675,9 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
       messageOnly,
       original: body,
       trailers,
+      subject,
+      editKind: normalizedEditKind,
+      revision: this.composeRevision(targetRevision),
       model: getLlmConfig().model,
     });
   }
@@ -1589,7 +1748,9 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     mode: string,
     hash: string | undefined,
     message: string,
-    thenEdit: boolean
+    thenEdit: boolean,
+    sessionId?: unknown,
+    revision?: unknown
   ): Promise<void> {
     if (!message.trim()) {
       return;
@@ -1617,7 +1778,7 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
               "变基未能安全停靠在目标 commit；请先处理当前暂停状态。message 仍保留在对话框中。"
             );
           }
-          await git(["commit", "--amend", "-m", finalMsg], { cwd });
+          await git(["commit", "--amend", "-F", "-"], { cwd, input: finalMsg });
         } else if (!outcome?.ok) {
           throw new Error("未能停靠在目标 commit，message 未应用。");
         }
@@ -1653,6 +1814,7 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
       throw new Error("未知 Compose 模式，message 未应用。 ");
     }
     await this.refresh();
+    this.compose.clearDraft(sessionId, revision);
     this.compose.post({ type: "applySucceeded" });
   }
 
