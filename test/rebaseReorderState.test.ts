@@ -21,3 +21,12 @@ test("drag reorder rejects stale session, partial order and locked source", () =
   assert.equal(validateReorderRequest(valid, canonical, 7, new Set([d])).ok, false);
   assert.equal(validateReorderRequest({ ...valid, order: [a, d, c, b] }, canonical, 7, new Set()).ok, false);
 });
+
+test("a locked commit that would be shifted by a reorder is distinguishable from an unchanged prefix", () => {
+  const proposed = reorderAround(canonical, d, a, "before");
+  assert.deepEqual(proposed, [d, a, b, c]);
+  // `b` remains in the payload but moves from index 1 to 2, so a host rewrite
+  // guard must inspect canonical positions, not merely reject a locked source.
+  assert.notEqual(proposed?.indexOf(b), canonical.indexOf(b));
+  assert.equal(canonical.indexOf(a), 0);
+});

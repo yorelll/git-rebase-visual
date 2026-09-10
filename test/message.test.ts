@@ -34,11 +34,11 @@ test("applyTrailers preserves original trailer block when editing body", () => {
   );
 });
 
-test("applyTrailers uses an intentionally edited trailing block", () => {
-  const original = "old subject\n\nChange-Id: I123\n";
+test("applyTrailers retains the original identity when a trailer is pasted into the editable body", () => {
+  const original = "old subject\n\nChange-Id: I123\nSigned-off-by: Test <t@example.com>\n";
   assert.equal(
     applyTrailers("new subject\n\nChange-Id: I456", original),
-    "new subject\n\nChange-Id: I456\n"
+    "new subject\n\nChange-Id: I123\nSigned-off-by: Test <t@example.com>\n"
   );
 });
 

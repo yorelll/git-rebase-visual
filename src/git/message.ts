@@ -70,11 +70,11 @@ export function applyTrailers(editedBody: string, originalMessage: string): stri
   if (!trailers) {
     return body + "\n";
   }
-  // If the edited text itself ends in recognized trailers, it deliberately
-  // replaces the original trailer block. Otherwise append the preserved block.
+  // The compose surface exposes trailers as read-only context. Treat a trailer
+  // pasted into the editable body as body-editor input, not permission to alter
+  // review/DCO identity: preserve the original block exactly and avoid a second
+  // conflicting copy.
   const edited = splitTrailers(editedBody);
-  if (edited.trailers) {
-    return `${edited.body}\n\n${edited.trailers}\n`;
-  }
-  return `${body}\n\n${trailers}\n`;
+  const editableBody = edited.trailers ? edited.body : body;
+  return `${editableBody}\n\n${trailers}\n`;
 }

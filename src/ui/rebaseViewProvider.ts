@@ -1339,11 +1339,19 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     const root = this.root!;
     // Reject before preparing a clean tree: otherwise a blocked drop could
     // auto-stash user changes even though no Git operation is allowed to run.
-    const lockedDrop = plan.items.find((item) => item.action === "drop");
-    if (lockedDrop) {
-      const pid = await this.locks.computePatchId(cwd, lockedDrop.hash);
-      if (this.locks.isLocked(root, lockedDrop.hash, pid)) {
-        toast("warn", "目标 commit 已锁定。请先解除锁定，再删除 commit。");
+    // A locked patch can stay in an unchanged prefix, but it must not be
+    // dropped, reordered, or have its action changed. Compare the complete
+    // proposed plan with the canonical snapshot rather than trusting a caller
+    // to protect only individual operation types.
+    const originalItems = this.itemsWith();
+    for (let index = 0; index < originalItems.length; index++) {
+      const original = originalItems[index];
+      const proposed = plan.items[index];
+      const unchanged = proposed?.hash === original.hash && proposed.action === original.action;
+      if (unchanged) continue;
+      const pid = await this.locks.computePatchId(cwd, original.hash);
+      if (this.locks.isLocked(root, original.hash, pid)) {
+        toast("warn", "变基计划会改写或删除已锁定的 commit；请先解除锁定或选择不改写它。");
         return undefined;
       }
     }
@@ -1634,6 +1642,12 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
       if (editStopAmend && hash !== stoppedHash) {
         throw new Error("目标 edit commit 已变化；未打开 Compose，请刷新后重试。");
       }
+      // `new` has no commit hash, but it still belongs to this exact stopped
+      // target. Carry it into the target revision so a later edit stop cannot
+      // inherit or apply its earlier new-commit draft.
+      if (editStopNew && !stoppedHash) {
+        throw new Error("无法确认当前 edit 停靠目标；未打开新建 commit Compose。");
+      }
     }
     let body = "";
     let trailers = "";
@@ -1663,7 +1677,7 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
       ? await workingStatus(cwd)
       : undefined;
     const targetRevision = mode === "commit" && hash
-      ? `${hash}:${body} ${trailers}`
+      ? `${hash}:${body}\0${trailers}`
       : stoppedHash
         ? `edit-stop:${stoppedHash}:${normalizedEditKind ?? "draft"}`
         : `${mode}:${changesRevision ?? ""}:${statusRevision?.hasStaged ? "staged" : ""}:${statusRevision?.hasUnstaged ? "unstaged" : ""}`;

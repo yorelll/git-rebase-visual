@@ -63,3 +63,28 @@ test("edit-stop writer refuses an empty staged index before creating a commit", 
   await startEditStop(cwd);
   await assert.rejects(() => writeEditStopCommit(cwd, "amend", "feat: should not write"), /暂存区为空/);
 });
+
+test("a real edit stop remains writable when the next todo command is another edit", async (t) => {
+  const cwd = createRepo();
+  t.after(async () => {
+    await abortRebase(cwd);
+    removeRepo(cwd);
+  });
+  const base = commitFile(cwd, "base.txt", "base\n", "base");
+  const first = commitFile(cwd, "first.txt", "first\n", "first\n\nChange-Id: I111");
+  const second = commitFile(cwd, "second.txt", "second\n", "second");
+  const outcome = await executeRebase(cwd, {
+    onto: await resolveBase(cwd, base),
+    items: [
+      { hash: base, action: "pick", subject: "base" },
+      { hash: first, action: "edit", subject: "first" },
+      { hash: second, action: "edit", subject: "second" },
+    ],
+  });
+  assert.equal(outcome.stopped, true);
+  fs.writeFileSync(path.join(cwd, "first.txt"), "amended\n", "utf8");
+  git(cwd, ["add", "first.txt"]);
+
+  await writeEditStopCommit(cwd, "amend", "first: amended");
+  assert.equal(await fullMessage(cwd, "HEAD"), "first: amended\n\nChange-Id: I111");
+});

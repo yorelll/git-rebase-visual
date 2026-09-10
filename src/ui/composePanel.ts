@@ -3,7 +3,6 @@ import {
   ComposeDraft,
   ComposePanelDelivery,
   ComposeSessionPayload,
-  matchesComposeDraft,
 } from "./composePanelState";
 
 export interface ComposePayload {
@@ -136,9 +135,6 @@ export class ComposePanel implements vscode.Disposable {
   private deliver(payload: ComposeSessionPayload): void {
     const draft = this.delivery.draftFor(payload, this.recoveredDraft);
     this.post({ type: "openCompose", ...payload, draft });
-    if (matchesComposeDraft(payload, this.recoveredDraft)) {
-      this.recoveredDraft = undefined;
-    }
   }
 
   private title(payload: ComposeSessionPayload): string {

@@ -280,16 +280,13 @@ export async function rebaseTodoFiles(cwd: string): Promise<{ doneLines?: string
 }
 
 export async function rebaseAtEditStop(cwd: string): Promise<boolean> {
-  const [donePath, todoPath] = await Promise.all([
-    rebaseMergePath(cwd, "done"),
-    rebaseMergePath(cwd, "git-rebase-todo"),
-  ]);
-  if (!donePath || !todoPath) {
+  const donePath = await rebaseMergePath(cwd, "done");
+  if (!donePath) {
     return false;
   }
   const fs = await import("fs");
   try {
-    if (!fs.existsSync(donePath) || !fs.existsSync(todoPath)) {
+    if (!fs.existsSync(donePath)) {
       return false;
     }
     const doneLines = fs.readFileSync(donePath, "utf8").split(/\r?\n/);
@@ -304,18 +301,11 @@ export async function rebaseAtEditStop(cwd: string): Promise<boolean> {
     // `stopped-sha` is updated to the currently replayed commit. A conflict
     // after an earlier edit therefore has `done` ending in that edit but a
     // different stopped SHA; comparing them prevents the resolved-conflict
-    // polling window from being mislabeled as another edit stop.
+    // polling window from being mislabeled as another edit stop. The next todo
+    // command is deliberately irrelevant: a legitimate edit stop can be
+    // followed immediately by another `edit` command.
     const stopped = await rebaseStoppedSha(cwd);
-    if (!stopped || !stopped.startsWith(match[1])) {
-      return false;
-    }
-    // After Git stops for an edit, it removes that command from todo. During a
-    // conflict it has not consumed the failed command, which remains at top.
-    const nextAction = fs.readFileSync(todoPath, "utf8")
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .find((line) => line && !line.startsWith("#"));
-    return !nextAction || !/^edit\s+/i.test(nextAction);
+    return !!stopped && stopped.startsWith(match[1]);
   } catch {
     return false;
   }

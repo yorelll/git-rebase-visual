@@ -21,7 +21,7 @@ function sessionKey(sessionId: string, revision: number): string {
   return `${sessionId}|${revision}`;
 }
 
-function matchesComposeDraft(payload: ComposeSessionPayload, draft?: ComposeDraft): boolean {
+export function matchesComposeDraft(payload: ComposeSessionPayload, draft?: ComposeDraft): boolean {
   return !!draft && draft.sessionId === payload.sessionId && draft.revision === payload.revision;
 }
 
@@ -84,5 +84,3 @@ export class ComposePanelDelivery {
 export function composeSessionKey(sessionId: string, revision: number): string {
   return sessionKey(sessionId, revision);
 }
-
-export { matchesComposeDraft };
