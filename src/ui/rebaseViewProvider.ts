@@ -1319,13 +1319,13 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     if (lockedPatchIds.size === 0 || !beforeTip) {
       return false;
     }
-    // Only inspect the diverged sides of this rewrite. Common ancestors keep
-    // their original objects, while scanning all of HEAD would make a completed
-    // rebase unnecessarily expensive in a long-lived repository.
-    const revisionRange = `${beforeTip}...HEAD`;
+    // Only locks reachable from the pre-rewrite tip are expected. The post
+    // side must include all of HEAD, not just the divergent commits: Git can
+    // skip an already-applied patch during rebase, leaving its equivalent patch
+    // in the shared ancestry where it still correctly remains locked.
     const [before, after] = await Promise.all([
-      runGit(["rev-list", "--left-only", revisionRange], { cwd }),
-      runGit(["rev-list", "--right-only", revisionRange], { cwd }),
+      runGit(["rev-list", beforeTip], { cwd }),
+      runGit(["rev-list", "HEAD"], { cwd }),
     ]);
     if (before.code !== 0 || after.code !== 0) {
       this.log("lock", `改写后无法枚举 commit，跳过锁定 patch 连续性检查：${before.stderr || before.stdout || after.stderr || after.stdout}`);
