@@ -26,6 +26,10 @@
 | `e8a6027` | `fix: stabilize rebase panel interactions` | [`code-review-0-6-1.md`](code-review-0-6-1.md) | [`review-response-0-6-1.md`](review-response-0-6-1.md) | 已评审；交互状态持久化与上下文修复 | 2026-09-09 | locked run、search、inline toast、branch context、SourceControl progress。 |
 | `6a71abb` | `fix: keep edit-stop message generation draft-only` | [`code-review-0-6-1.md`](code-review-0-6-1.md) | [`review-response-0-6-1.md`](review-response-0-6-1.md) | 已评审；draft-only 语义修复 | 2026-09-09 | edit stop 的仅生成 message 不再进入提交路径。 |
 | `ca1801d` | `fix: harden 0.6.1 panel interactions` | [`code-review-0-6-1.md`](code-review-0-6-1.md) | [`review-response-0-6-1.md`](review-response-0-6-1.md) | 已评审；暂停 Compose policy 加固 | 2026-09-09 | Agent 审查修正 host allow-list。 |
+| `06476b3050dc3b4f884663c63dbd45cd94e7a92b` | `feat: implement 0.6.2 rebase UX` | [`code-review-0-6-2.md`](code-review-0-6-2.md) | [`review-response-0-6-2.md`](review-response-0-6-2.md) — 0-6-2 回复 | 已评审；第三轮 UI/状态升级通过 | 2026-09-10 | 基于 review3、Agent A/B/C 与主 agent 复核。 |
+| `b259d4e7a1116ab618885fb99f808bc902c9067e` | `fix: harden 0.6.2 rebase interactions` | [`code-review-0-6-2.md`](code-review-0-6-2.md) | [`review-response-0-6-2.md`](review-response-0-6-2.md) | 已评审；Compose/trailer/edit-stop 修正 | 2026-09-10 | Agent C 第一轮深审修正。 |
+| `fba41f8d1ce1fbe351bd6c35ac0f234064d96e17` | `fix: harden 0.6.2 rebase interactions` | [`code-review-0-6-2.md`](code-review-0-6-2.md) | [`review-response-0-6-2.md`](review-response-0-6-2.md) | 已评审；locked continuity/Undo 修正 | 2026-09-10 | 保留正常 locked replay 的 patch-id 语义。 |
+| `03c05065fbaf5c50b274acdf46295608a6831e38` | `fix: harden 0.6.2 rebase interactions` | [`code-review-0-6-2.md`](code-review-0-6-2.md) | [`review-response-0-6-2.md`](review-response-0-6-2.md) | 已评审；共同祖先审计修正 | 2026-09-10 | 避免 locked patch continuity 审计假阳性。 |
 
 ## 待评审 Commit
 
@@ -50,6 +54,10 @@
 | `e8a6027` | `fix: stabilize rebase panel interactions` | ✅ 已在 2026-09-09 的 `code-review-0-6-1.md` 中评审；保留此上下文作为历史记录。 |
 | `6a71abb` | `fix: keep edit-stop message generation draft-only` | ✅ 已在 2026-09-09 的 `code-review-0-6-1.md` 中评审；保留此上下文作为历史记录。 |
 | `ca1801d` | `fix: harden 0.6.1 panel interactions` | ✅ 已在 2026-09-09 的 `code-review-0-6-1.md` 中评审；保留此上下文作为历史记录。 |
+| `06476b3050dc3b4f884663c63dbd45cd94e7a92b` | `feat: implement 0.6.2 rebase UX` | ✅ 已在 2026-09-10 的 `code-review-0-6-2.md` 中评审；保留此上下文作为历史记录。 |
+| `b259d4e7a1116ab618885fb99f808bc902c9067e` | `fix: harden 0.6.2 rebase interactions` | ✅ 已在 2026-09-10 的 `code-review-0-6-2.md` 中评审；保留此上下文作为历史记录。 |
+| `fba41f8d1ce1fbe351bd6c35ac0f234064d96e17` | `fix: harden 0.6.2 rebase interactions` | ✅ 已在 2026-09-10 的 `code-review-0-6-2.md` 中评审；保留此上下文作为历史记录。 |
+| `03c05065fbaf5c50b274acdf46295608a6831e38` | `fix: harden 0.6.2 rebase interactions` | ✅ 已在 2026-09-10 的 `code-review-0-6-2.md` 中评审；保留此上下文作为历史记录。 |
 
 > 未来评审覆盖上述任一 commit 时，必须在“已评审 Commit”表中新增或补充对应记录，写明完整 SHA、评审文件、回复章节、状态和日期；保留“待评审 Commit”中的历史上下文，不得直接删除。
 >

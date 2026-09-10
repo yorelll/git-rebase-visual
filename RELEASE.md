@@ -105,6 +105,14 @@ code --install-extension git-rebase-visual-<version>.vsix
 
 ### 更新记录
 
+- **0.6.2** — 第三轮 UI 交互可靠性与 Compose/拖拽修复：
+  - **拖拽稳定性**：仅 grip 可拖且扩大热区，显式 `dataTransfer`、drag session 与 refresh defer 防止 1.5 秒轮询销毁原生拖拽 DOM；宿主以 source/anchor/placement/revision/完整 canonical todo 重新验证并展示具体改写确认。
+  - **锁定分组与刷新状态**：`collapseLockedRuns` 默认 true，连续 ≥3 锁定 commit 才折叠；展开、搜索 focus/selection 和“更多提交选项”状态跨 refresh 保持。锁定摘要支持将提交插入整组前/后，不必先展开。
+  - **Compose 可靠交付**：重构 Panel 为 session/revision/ready/ack delivery queue，修复首次打开/reload 时原 message、trailer 和 draft 为空；同 target dirty draft 不被覆盖，旧 target/session 不能写入新 target。
+  - **edit 停靠与 draft-only**：实际渲染 Amend/New/Draft-only 操作；Amend 保留 trailer，新 commit 不继承目标 trailer；仅生成 message 严格不进入提交路径。
+  - **通知/上下文**：成功 inline toast、错误系统通知、长任务 SourceControl progress；显示 branch/upstream/ahead/behind/range；scroll 关闭菜单不发 mutation 的协议回归测试。
+  - **安全审查**：Undo/locked patch continuity、trailer 粘贴、edit-stop、drag canonical order 由独立审查修正；测试套件扩展至 **89 项**。
+
 - **0.6.1** — rebase 面板交互稳定性修复：
   - **Compose 原 message / trailer 可靠交付**：修复首次打开或 Webview reload 时宿主在 listener 就绪前发送 payload，导致原 message 与 trailer 为空的竞态。Compose Panel 现通过 `composeReady` handshake 保存并重发最新 payload。
   - **locked run 交互稳定性**：连续 locked commit 仅在数量 **≥3** 且 `gitRebaseVisual.collapseLockedRuns=true`（默认）时折叠；用户展开状态跨 refresh 保持。折叠摘要支持将非 locked commit 拖到 run 前/后，不必展开。
