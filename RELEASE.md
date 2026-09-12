@@ -105,6 +105,14 @@ code --install-extension git-rebase-visual-<version>.vsix
 
 ### 更新记录
 
+- **0.6.3** — 文件级工作区管理、左右 Diff、IME 搜索与拖拽可靠性升级：
+  - **文件级变更区**：更多提交选项展示 porcelain v2 -z 结构化状态，清晰区分 staged/working/untracked 与 Modify/Add/Delete/Rename/Conflict；支持单文件暂存，处理空格路径、删除、rename 和 `XY=RM` staged rename+working modify。
+  - **统一左右 Diff**：工作区文件、commit 右键/hover/Compose 的“打开变更”均通过受控 opaque content provider 打开 VS Code parent↔commit 或 index↔working 左右 Diff；支持 root/add/delete/rename/multi-file，binary/merge 提供明确 fallback；嵌套路径递归枚举避免将目录误当 diff 文件。
+  - **搜索与交互状态**：支持 `author:`、`msg:`、`hash:`、`hash:0x...` 与中文 IME composition；refresh 后保持焦点/selection、搜索、locked-run 展开和更多选项状态。成功通知复用固定 branch context 区 overlay，不推动 commit 列表。
+  - **可靠重排**：pointer drag 与 native drag 共用 canonical reorder intent，自动 refresh 在拖拽期间延迟；Alt+上下键作为完整 order 的键盘兜底，所有操作仍由宿主 revision/lock/order 验证和确认。
+  - **edit/AI 安全**：edit stop 真实渲染 Amend/New/Draft-only 操作；Amend 保 trailer，新 commit 不继承 trailer；AI 在暂停 rebase 中仅生成 draft。Compose session/revision 保护原 message/trailer/draft 不被首次加载或 reload 丢失。
+  - **评审与测试**：A 实现 → B 文档 review → A response → B 独立复核循环完成；新增状态、stage、diff、IME、drag、scroll、Compose、edit-stop、nested commit 等测试，测试套件扩展至 **103 项**。
+
 - **0.6.2** — 第三轮 UI 交互可靠性与 Compose/拖拽修复：
   - **拖拽稳定性**：仅 grip 可拖且扩大热区，显式 `dataTransfer`、drag session 与 refresh defer 防止 1.5 秒轮询销毁原生拖拽 DOM；宿主以 source/anchor/placement/revision/完整 canonical todo 重新验证并展示具体改写确认。
   - **锁定分组与刷新状态**：`collapseLockedRuns` 默认 true，连续 ≥3 锁定 commit 才折叠；展开、搜索 focus/selection 和“更多提交选项”状态跨 refresh 保持。锁定摘要支持将提交插入整组前/后，不必先展开。
