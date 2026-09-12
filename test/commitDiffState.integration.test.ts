@@ -8,8 +8,8 @@ import { createRepo, commitFile, git, removeRepo } from "./helpers/gitTestRepo";
 
 async function planFor(cwd: string, commit: string) {
   const parents = git(cwd, ["show", "-s", "--format=%P", commit]).split(/\s+/).filter(Boolean);
-  const names = git(cwd, ["diff-tree", "--no-commit-id", "--name-status", "-z", "-M", "--root", commit]);
-  const numstat = git(cwd, ["diff-tree", "--no-commit-id", "--numstat", "-z", "-M", "--root", commit]);
+  const names = git(cwd, ["diff-tree", "--no-commit-id", "--name-status", "-z", "-M", "--root", "-r", commit]);
+  const numstat = git(cwd, ["diff-tree", "--no-commit-id", "--numstat", "-z", "-M", "--root", "-r", commit]);
   return commitDiffPlan(commit, parents, applyCommitBinaryStatus(parseCommitChangedFiles(names), numstat));
 }
 
@@ -58,6 +58,23 @@ test("commit diff planner resolves root, add/delete, rename, multi-file selectio
   const binary = binaryPlan.files.find((file) => file.path === "asset.bin")!;
   assert.equal(binary.binary, true);
   assert.match(commitDiffSpec(binaryPlan.parent, binaryPlan.commit, binary).fallbackReason ?? "", /二进制文件/);
+});
+
+test("commit diff planner retains nested paths from recursive Git output", async (t) => {
+  const cwd = createRepo();
+  t.after(() => removeRepo(cwd));
+  fs.mkdirSync(path.join(cwd, "nested"));
+  fs.writeFileSync(path.join(cwd, "nested", "entry.txt"), "one\n", "utf8");
+  git(cwd, ["add", "nested/entry.txt"]);
+  git(cwd, ["commit", "-qm", "nested root"]);
+  const rootPlan = await planFor(cwd, git(cwd, ["rev-parse", "HEAD"]));
+  assert.deepEqual(rootPlan.files, [{ kind: "add", path: "nested/entry.txt", binary: false }]);
+
+  fs.writeFileSync(path.join(cwd, "nested", "entry.txt"), "two\n", "utf8");
+  git(cwd, ["add", "nested/entry.txt"]);
+  git(cwd, ["commit", "-qm", "nested modify"]);
+  const modifyPlan = await planFor(cwd, git(cwd, ["rev-parse", "HEAD"]));
+  assert.deepEqual(modifyPlan.files, [{ kind: "modify", path: "nested/entry.txt", binary: false }]);
 });
 
 test("commit diff planner rejects ambiguous merge parents", async (t) => {

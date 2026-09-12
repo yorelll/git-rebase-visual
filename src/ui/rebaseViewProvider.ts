@@ -2033,8 +2033,8 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     if (!plan) {
       const [parentsResult, namesResult, numstatResult] = await Promise.all([
         runGit(["show", "-s", "--format=%P", hash], { cwd }),
-        runGit(["diff-tree", "--no-commit-id", "--name-status", "-z", "-M", "--root", hash], { cwd }),
-        runGit(["diff-tree", "--no-commit-id", "--numstat", "-z", "-M", "--root", hash], { cwd }),
+        runGit(["diff-tree", "--no-commit-id", "--name-status", "-z", "-M", "--root", "-r", hash], { cwd }),
+        runGit(["diff-tree", "--no-commit-id", "--numstat", "-z", "-M", "--root", "-r", hash], { cwd }),
       ]);
       if (parentsResult.code !== 0 || namesResult.code !== 0 || numstatResult.code !== 0) {
         throw new Error(
