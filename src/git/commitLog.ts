@@ -1,4 +1,5 @@
 import { git, runGit } from "./gitRunner";
+import { getWorktreeChanges, summarizeWorktreeChanges } from "./worktreeChanges";
 
 export interface Commit {
   hash: string;
@@ -34,17 +35,6 @@ export type RangeConfig =
 
 const SEP = "\x1f"; // unit separator, safe inside git format
 const REC = "\x1e"; // record separator
-
-/**
- * Read-only status queries run from the visible webview and its periodic
- * refresh path. Git may otherwise opportunistically refresh index metadata,
- * briefly creating index.lock and racing an interactive terminal `switch`,
- * `stash`, or `commit`. The status result remains correct when optional locks
- * are disabled; Git simply skips that cache-refresh optimization.
- */
-const BACKGROUND_STATUS_ENV: NodeJS.ProcessEnv = {
-  GIT_OPTIONAL_LOCKS: "0",
-};
 
 /**
  * The minimum Git version the extension supports (2.31.0, the first Git with
@@ -426,6 +416,9 @@ export async function commitDetail(cwd: string, hash: string): Promise<CommitDet
   return { author, email, relDate, absDate, message, stat: shortstatLine };
 }
 
+// `isDirty` remains a light read-only query outside the structured file list.
+const BACKGROUND_STATUS_ENV: NodeJS.ProcessEnv = { GIT_OPTIONAL_LOCKS: "0" };
+
 export interface WorkingStatus {
   hasStaged: boolean;
   hasUnstaged: boolean; // includes untracked
@@ -437,39 +430,10 @@ export interface WorkingStatus {
 
 /** Reports staged/unstaged state and file counts. */
 export async function workingStatus(cwd: string): Promise<WorkingStatus> {
-  // Git's default untracked mode collapses a directory into one `?? dir/`
-  // entry, which would make the UI claim there is one changed file even when
-  // it contains many. Expand untracked files so both counters reflect files;
-  // tracked renames and submodules remain one porcelain entry each.
-  const res = await runGit(
-    ["status", "--porcelain", "--untracked-files=all"],
-    { cwd, env: BACKGROUND_STATUS_ENV }
-  );
-  let stagedCount = 0;
-  let unstagedCount = 0;
-  for (const line of res.stdout.split("\n")) {
-    if (line.length < 2) {
-      continue;
-    }
-    const x = line[0]; // staged column
-    const y = line[1]; // worktree column
-    if (line.startsWith("??")) {
-      unstagedCount += 1;
-      continue;
-    }
-    if (x !== " " && x !== "?") {
-      stagedCount += 1;
-    }
-    if (y !== " " && y !== "?") {
-      unstagedCount += 1;
-    }
-  }
-  return {
-    hasStaged: stagedCount > 0,
-    hasUnstaged: unstagedCount > 0,
-    stagedCount,
-    unstagedCount,
-  };
+  // Share the porcelain v2 -z parser with the file list. This keeps counts and
+  // per-file UI semantics identical for spaces/newlines, renames and entries
+  // with both index and working-tree changes.
+  return summarizeWorktreeChanges(await getWorktreeChanges(cwd));
 }
 
 /** True when the working tree has any staged or unstaged changes. */

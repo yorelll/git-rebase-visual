@@ -3,6 +3,7 @@
   const listEl = document.getElementById("list");
   const bannerEl = document.getElementById("banner");
   const contextEl = document.getElementById("context");
+  const contextTextEl = document.getElementById("context-text");
   const inlineToastEl = document.getElementById("inline-toast");
   const changesEl = document.getElementById("changes");
   const menuEl = document.getElementById("menu");
@@ -63,7 +64,9 @@
   }
   function renderContext() {
     if (!state.branchName) { contextEl.classList.add("hidden"); return; }
-    contextEl.textContent = `${state.branchName} · ${state.upstreamRef} · ↑${state.aheadCount || 0} ↓${state.behindCount || 0} · ${state.rangeLabel || ""}`;
+    // Keep the stable branch text in a child: the toast is an absolute overlay,
+    // not a sibling inserted before the list, so document flow never changes.
+    contextTextEl.textContent = `${state.branchName} · ${state.upstreamRef} · ↑${state.aheadCount || 0} ↓${state.behindCount || 0} · ${state.rangeLabel || ""}`;
     contextEl.classList.remove("hidden");
   }
   function showInlineToast(message, duration) {
@@ -111,7 +114,7 @@
       editActions.append(
         button(amendLabel, () => vscode.postMessage({ type: "openCompose", mode: "commit", hash: stopped.hash, ai: false, thenEdit: true, editKind: "amend" }), { primary: true, disabled: !state.hasStaged, title: state.hasStaged ? "编辑 message 后 amend 当前 edit commit" : "请先在 SCM 中暂存改动。" }),
         button("新建 commit…", () => vscode.postMessage({ type: "openCompose", mode: "staged", ai: false, thenEdit: false, editKind: "new" }), { disabled: !state.hasStaged, title: state.hasStaged ? "创建新 commit；变基暂停时不调用 AI。" : "请先在 SCM 中暂存改动。" }),
-        button("仅生成 message", () => vscode.postMessage({ type: "openCompose", mode: "staged", ai: true, thenEdit: false, messageOnly: true }))
+        button("AI 仅生成 message（不提交）", () => vscode.postMessage({ type: "openCompose", mode: state.hasStaged ? "staged" : "working", ai: true, thenEdit: false, messageOnly: true }), { disabled: !state.llmConfigured, title: state.llmConfigured ? "仅生成草稿，不执行提交" : "请先配置 LLM。" })
       );
       bannerEl.appendChild(editActions);
     }
@@ -123,31 +126,61 @@
     bannerEl.classList.remove("hidden");
   }
 
+  function changeKind(kind) { return ({ modify: "Modify", add: "Add", delete: "Delete", rename: "Rename", untracked: "Untracked", unmerged: "Conflict" })[kind] || "Modify"; }
+  function appendChangeFiles(parent, changes) {
+    const staged = changes.filter((change) => change.staged);
+    const unstaged = changes.filter((change) => change.unstaged);
+    const appendGroup = (title, items, side) => {
+      if (!items.length) return;
+      const label = document.createElement("div"); label.className = "file-group-label"; label.textContent = `${title} (${items.length})`; parent.appendChild(label);
+      items.forEach((change) => {
+        const row = document.createElement("div"); row.className = "change-file";
+        const open = button(change.path, () => vscode.postMessage({ type: "openWorktreeDiff", path: change.path }));
+        open.classList.add("file-open"); open.title = `打开 ${side === "staged" ? "HEAD ↔ index" : "index ↔ working tree"} Diff: ${change.path}`;
+        const stateLabel = document.createElement("span"); stateLabel.className = "file-state";
+        const kind = side === "staged" ? change.indexKind : change.worktreeKind;
+        stateLabel.textContent = changeKind(kind);
+        row.append(open, stateLabel);
+        if (side === "unstaged" && !change.conflicted) {
+          const stage = button("暂存", () => vscode.postMessage({ type: "stageFile", path: change.path }));
+          stage.classList.add("file-stage"); stage.title = "git add -A -- 此文件"; row.appendChild(stage);
+        } else if (side === "staged") {
+          const ready = document.createElement("span"); ready.className = "file-staged"; ready.textContent = "已暂存"; row.appendChild(ready);
+        }
+        parent.appendChild(row);
+      });
+    };
+    appendGroup("Staged Changes", staged, "staged");
+    appendGroup("Changes", unstaged, "unstaged");
+  }
   function renderChanges() {
     changesEl.innerHTML = "";
-    // The edit-stop banner is the only place allowed to offer amend/new-commit
-    // writes. Do not duplicate normal change actions while a rebase is paused.
-    if (state.rebaseInProgress && state.pausedReason === "edit") { changesEl.classList.add("hidden"); return; }
     if (!state.hasStaged && !state.hasUnstaged) { changesEl.classList.add("hidden"); return; }
     changesEl.classList.remove("hidden");
     const label = document.createElement("div"); label.className = "changes-label";
     label.textContent = `未提交的改动：${[state.hasStaged ? `${state.stagedCount || 0} 个暂存文件` : "", state.hasUnstaged ? `${state.unstagedCount || 0} 个工作区文件` : ""].filter(Boolean).join(" · ")}`;
     changesEl.appendChild(label);
-    if (!state.llmConfigured) {
+    const atEditStop = state.rebaseInProgress && state.pausedReason === "edit";
+    if (!atEditStop && !state.llmConfigured) {
       const hint = document.createElement("div"); hint.className = "changes-hint"; hint.textContent = "配置 LLM 后可生成 AI commit message。";
       changesEl.append(hint, button("打开 LLM 设置", () => vscode.postMessage({ type: "openLlmSettings" })));
-      return;
     }
-    if (state.hasStaged && !state.rebaseInProgress) {
+    if (state.hasStaged && !state.rebaseInProgress && state.llmConfigured) {
       changesEl.appendChild(changeButton("生成 message 并提交暂存区", { mode: "staged", ai: true, primary: true }));
     }
-    const more = document.createElement("details"); more.className = "changes-more"; more.open = changesMoreOpen;
+    const more = document.createElement("details"); more.className = "changes-more"; more.open = changesMoreOpen || atEditStop;
     more.addEventListener("toggle", () => { changesMoreOpen = more.open; persistUi(); });
-    const summary = document.createElement("summary"); summary.textContent = "更多提交选项"; more.appendChild(summary);
-    if (state.hasUnstaged && !state.rebaseInProgress) {
-      const all = changeButton("提交全部改动（git add -A）⚠", { mode: "working", ai: true }); all.classList.add("danger-choice"); more.appendChild(all);
+    const summary = document.createElement("summary"); summary.textContent = atEditStop ? "本次 edit stop 的文件" : "更多提交选项"; more.appendChild(summary);
+    appendChangeFiles(more, state.changes || []);
+    if (!atEditStop) {
+      if (state.hasUnstaged && state.llmConfigured && !state.rebaseInProgress) {
+        const all = changeButton("提交全部改动（git add -A）⚠", { mode: "working", ai: true }); all.classList.add("danger-choice"); more.appendChild(all);
+      }
+      if (state.llmConfigured) more.appendChild(button("仅生成 message（不提交）", () => vscode.postMessage({ type: "openCompose", mode: state.hasStaged ? "staged" : "working", ai: true, thenEdit: false, messageOnly: true })));
+    } else {
+      const draftMode = state.hasStaged ? "staged" : "working";
+      more.appendChild(button("AI 仅生成 message（不提交）", () => vscode.postMessage({ type: "openCompose", mode: draftMode, ai: true, thenEdit: false, messageOnly: true }), { disabled: !state.llmConfigured, title: state.llmConfigured ? "仅生成草稿，不执行提交" : "请先配置 LLM。" }));
     }
-    more.appendChild(button("仅生成 message（不提交）", () => vscode.postMessage({ type: "openCompose", mode: state.hasStaged ? "staged" : "working", ai: true, thenEdit: false, messageOnly: true })));
     changesEl.appendChild(more);
   }
   function changeButton(text, ctx) {
@@ -159,10 +192,13 @@
     if (!query) return true;
     const terms = query.split(/\s+/);
     return terms.every((term) => {
-      const field = term.match(/^(author|hash|msg):(.+)$/);
+      const field = term.match(/^(author|hash|msg):(.+)$/i);
       if (!field) return [c.shortHash, c.hash, c.subject, c.author, c.authorEmail, c.date].join(" ").toLowerCase().includes(term);
-      const [, name, value] = field;
-      const target = name === "author" ? `${c.author} ${c.authorEmail}` : name === "hash" ? `${c.hash} ${c.shortHash}` : c.subject;
+      const name = field[1].toLowerCase(); let value = field[2].toLowerCase();
+      // `hash:0x8e…` is a prefix spelling convenience, not a JavaScript number.
+      if (name === "hash" && /^0x[0-9a-f]+$/i.test(value)) value = value.slice(2);
+      if (name === "hash") return c.hash.toLowerCase().startsWith(value) || c.shortHash.toLowerCase().startsWith(value);
+      const target = name === "author" ? `${c.author} ${c.authorEmail}` : c.subject;
       return target.toLowerCase().includes(value);
     });
   }
@@ -194,8 +230,27 @@
     listEl.setAttribute("aria-label", `Commit 时间轴，共 ${state.commits.length} 个 commit，显示 ${visible.length} 个，顶部较早，底部较新`);
     const controls = document.createElement("div"); controls.className = "list-controls";
     const search = document.createElement("input"); search.type = "search"; search.className = "commit-search"; search.placeholder = "搜索 hash、message、作者"; search.value = filterText;
-    search.setAttribute("aria-label", "过滤 commit；过滤时禁用重排。支持 author:、hash:、msg:");
-    search.oninput = () => { filterText = search.value; keyboardPickupHash = null; persistUi(); renderList(); const current = listEl.querySelector(".commit-search"); current?.focus(); current?.setSelectionRange(search.selectionStart || 0, search.selectionEnd || 0); };
+    search.setAttribute("aria-label", "过滤 commit；过滤时禁用重排。支持 author:、hash:、msg:；hash:0x 前缀可省略。");
+    // IMEs own the input's composing range. Rendering during composition would
+    // replace the element and duplicate/corrupt Chinese input, so commit only
+    // after compositionend. The input and its selection remain untouched until then.
+    let composing = false;
+    let compositionFinalValue = null;
+    const applySearch = () => {
+      filterText = search.value; keyboardPickupHash = null; persistUi(); renderList();
+      const current = listEl.querySelector(".commit-search"); current?.focus();
+      current?.setSelectionRange(search.selectionStart || 0, search.selectionEnd || 0);
+    };
+    search.addEventListener("compositionstart", () => { composing = true; compositionFinalValue = null; });
+    search.addEventListener("compositionupdate", () => { /* Do not render while IME composes. */ });
+    search.addEventListener("compositionend", () => { composing = false; compositionFinalValue = search.value; applySearch(); });
+    search.addEventListener("input", (event) => {
+      if (composing || event.isComposing) return;
+      // Browsers commonly emit input again after compositionend. Its exact final
+      // value was already applied above, so suppress that duplicate only.
+      if (compositionFinalValue === search.value) { compositionFinalValue = null; return; }
+      compositionFinalValue = null; applySearch();
+    });
     controls.appendChild(search);
     const count = document.createElement("span"); count.className = "selection-count"; count.textContent = `${visible.length} / ${state.commits.length}`; controls.appendChild(count);
     if (filterText) controls.appendChild(button("清除", () => { filterText = ""; persistUi(); renderList(); listEl.querySelector(".commit-search")?.focus(); }));
@@ -244,7 +299,7 @@
     const row = document.createElement("div"); const pending = commitIsPending(c); const stopped = commitIsStopped(c); const selected = selectedHashes.has(c.hash); const index = state.commits.indexOf(c) + 1;
     row.className = `commit${c.locked ? " locked" : ""}${pending ? " pending" : ""}${stopped ? " stopped" : ""}${selected ? " selected" : ""}${keyboardPickupHash === c.hash ? " keyboard-pickup" : ""}`;
     row.dataset.hash = c.hash; row.tabIndex = 0; row.setAttribute("role", "option"); row.setAttribute("aria-selected", String(selected));
-    row.setAttribute("aria-label", `第 ${index} 项，共 ${state.commits.length} 项，${c.subject}，${short(c.hash)}，${c.author}${c.locked ? "，已锁定" : ""}${pending ? "，待重放" : ""}${stopped ? "，变基停靠于此" : ""}`);
+    row.setAttribute("aria-label", `第 ${index} 项，共 ${state.commits.length} 项，${c.subject}，${short(c.hash)}，${c.author}${c.locked ? "，已锁定" : ""}${pending ? "，待重放" : ""}${stopped ? "，变基停靠于此" : ""}。选择后可按 Alt+上/下 移动一位。`);
     const grip = document.createElement("span"); grip.className = "grip"; grip.textContent = "⋮⋮"; grip.title = isFilterActive() ? "过滤中无法重排，请先清空搜索。" : c.locked ? "已锁定的 commit 不能拖动。" : "拖拽重排；顶部较早，底部较新"; grip.setAttribute("aria-hidden", "true"); grip.draggable = !state.rebaseInProgress && !isFilterActive() && !c.locked;
     const dot = document.createElement("span"); dot.className = "dot"; dot.textContent = c.authorInitial || "?"; dot.style.setProperty("--author-hue", c.authorColorKey || "0"); dot.title = `${c.author} <${c.authorEmail || "unknown"}>${c.isCurrentAuthor === false ? "（非当前作者）" : c.isCurrentAuthor === "unknown" ? "（当前作者未知）" : "（当前作者）"}`;
     const content = document.createElement("div"); content.className = "commit-content";
@@ -254,11 +309,37 @@
     if (c.locked) { const lock = document.createElement("span"); lock.className = "lock-icon"; lock.textContent = "🔒"; lock.title = "已锁定：不可拖动、删除或追加。"; row.appendChild(lock); }
     if (stopped) { const badge = document.createElement("span"); badge.className = "stopped-badge"; badge.textContent = "⏸ 停在此"; row.appendChild(badge); }
 
+    function canStartDrag() { return !state.rebaseInProgress && !isFilterActive() && !c.locked; }
+    function startDrag(pointerId) {
+      if (!canStartDrag()) return false;
+      drag = { sourceHash: c.hash, revision: state.canonicalRevision, canonicalOrder: [...state.canonicalOrder], filter: isFilterActive(), pointerId };
+      row.classList.add("dragging"); hideTooltip(); setDragHint(`正在移动 ${short(c.hash)}；顶部为较早，底部为较新`); return true;
+    }
+    function pointerTarget(event) {
+      const target = document.elementFromPoint(event.clientX, event.clientY)?.closest(".commit");
+      if (!target || !drag) return undefined;
+      const hash = target.dataset.hash; if (!hash || hash === drag.sourceHash) return undefined;
+      return { row: target, hash, after: event.clientY > target.getBoundingClientRect().top + target.getBoundingClientRect().height / 2 };
+    }
+    grip.addEventListener("pointerdown", (event) => {
+      if (!startDrag(event.pointerId)) return;
+      event.preventDefault(); grip.setPointerCapture?.(event.pointerId); announce(`已开始移动 ${short(c.hash)}；移动到目标上方或下方后松开。`);
+    });
+    grip.addEventListener("pointermove", (event) => {
+      if (!drag || drag.pointerId !== event.pointerId) return;
+      const target = pointerTarget(event); clearDropMarkers();
+      if (target) { target.row.classList.add(target.after ? "drop-after" : "drop-before"); setDragHint(`将 ${short(drag.sourceHash)} 移动到 ${short(target.hash)} ${target.after ? "之后" : "之前"}`); }
+    });
+    grip.addEventListener("pointerup", (event) => {
+      if (!drag || drag.pointerId !== event.pointerId) return;
+      const target = pointerTarget(event); const source = drag.sourceHash; endDrag(false);
+      if (target) { announce(`将 ${short(source)} 移动到 ${short(target.hash)} ${target.after ? "之后" : "之前"}；等待确认。`); reorder(source, target.hash, target.after); }
+      else clearDragHint();
+    });
+    grip.addEventListener("pointercancel", (event) => { if (drag?.pointerId === event.pointerId) endDrag(); });
     grip.addEventListener("dragstart", (event) => {
-      if (state.rebaseInProgress || isFilterActive() || c.locked) { event.preventDefault(); return; }
-      drag = { sourceHash: c.hash, revision: state.canonicalRevision, canonicalOrder: [...state.canonicalOrder], filter: isFilterActive() };
-      event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", c.hash); event.dataTransfer.setData("application/x-git-rebase-visual", JSON.stringify({ sourceHash: c.hash, revision: state.canonicalRevision }));
-      row.classList.add("dragging"); hideTooltip(); setDragHint(`正在移动 ${short(c.hash)}；顶部为较早，底部为较新`);
+      if (!canStartDrag()) { event.preventDefault(); return; }
+      startDrag(undefined); event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", c.hash); event.dataTransfer.setData("application/x-git-rebase-visual", JSON.stringify({ sourceHash: c.hash, revision: state.canonicalRevision }));
     });
     grip.addEventListener("dragend", () => { row.classList.remove("dragging"); endDrag(); });
     row.addEventListener("dragover", (event) => { if (!drag || isFilterActive() || state.rebaseInProgress) return; event.preventDefault(); clearDropMarkers(); const after = isAfter(event, row); row.classList.add(after ? "drop-after" : "drop-before"); setDragHint(`将 ${short(drag.sourceHash)} 移动到 ${short(c.hash)} ${after ? "之后" : "之前"}`); });
@@ -281,6 +362,20 @@
   function rowKeydown(event, c) {
     if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) { event.preventDefault(); const r = event.currentTarget.getBoundingClientRect(); openMenu(r.left + 8, r.bottom, c, event.currentTarget); return; }
     if ((event.ctrlKey || event.metaKey) && event.key === " ") { event.preventDefault(); selectRow({ ctrlKey: true, target: event.currentTarget }, c); return; }
+    if (event.altKey && (event.key === "ArrowUp" || event.key === "ArrowDown")) {
+      event.preventDefault();
+      if (state.rebaseInProgress || isFilterActive() || c.locked) {
+        announce(state.rebaseInProgress ? "变基进行中，不能重排。" : isFilterActive() ? "过滤中无法重排，请先清空搜索。" : "已锁定的 commit 不能移动。"); return;
+      }
+      // A click/keyboard focus selects the source; then construct a complete,
+      // one-step canonical intent. The host still asks for confirmation.
+      selectedHashes = new Set([c.hash]); selectionAnchor = c.hash;
+      const order = [...state.canonicalOrder]; const sourceAt = order.indexOf(c.hash); const direction = event.key === "ArrowUp" ? -1 : 1; const anchor = order[sourceAt + direction];
+      if (!anchor) { announce(`已在${direction < 0 ? "最早" : "最新"}位置，不能继续移动。`); renderList(); return; }
+      const proposed = [...order]; proposed.splice(sourceAt, 1); const destination = proposed.indexOf(anchor); proposed.splice(destination + (direction > 0 ? 1 : 0), 0, c.hash);
+      announce(`将 ${short(c.hash)} 移动一位；等待宿主确认。`);
+      vscode.postMessage({ type: "reorder", sourceHash: c.hash, anchorHash: anchor, placement: direction < 0 ? "before" : "after", revision: state.canonicalRevision, order: proposed }); renderList(); return;
+    }
     if (state.rebaseInProgress || isFilterActive() || c.locked) return;
     if (event.key === " ") { event.preventDefault(); keyboardPickupHash = keyboardPickupHash ? null : c.hash; announce(keyboardPickupHash ? `已拾取 ${short(c.hash)}；使用箭头选择位置，Enter 放下。` : "已取消移动。"); renderList(); return; }
     if (!keyboardPickupHash) return;
@@ -289,7 +384,7 @@
   }
   function isAfter(event, target) { const r = target.getBoundingClientRect(); return event.clientY > r.top + r.height / 2; }
   function clearDropMarkers() { document.querySelectorAll(".commit.drop-before,.commit.drop-after,.locked-run.drop-before,.locked-run.drop-after").forEach((el) => el.classList.remove("drop-before", "drop-after")); }
-  function endDrag(clear = true) { drag = null; clearDropMarkers(); if (clear) clearDragHint(); if (deferredState) { state = deferredState; deferredState = null; render(); } }
+  function endDrag(clear = true) { document.querySelectorAll(".commit.dragging").forEach((row) => row.classList.remove("dragging")); drag = null; clearDropMarkers(); if (clear) clearDragHint(); if (deferredState) { state = deferredState; deferredState = null; render(); } }
   function reorder(sourceHash, anchorHash, after) {
     if (!sourceHash || isFilterActive() || state.rebaseInProgress || !state.canonicalOrder?.length) return;
     const order = [...state.canonicalOrder]; const sourceAt = order.indexOf(sourceHash); const anchorAt = order.indexOf(anchorHash);
@@ -345,6 +440,8 @@
   window.addEventListener("message", (event) => {
     const m = event.data;
     if (m.type === "state") {
+      // A refresh must not destroy a native or pointer drag session. It is
+      // applied after the shared session ends, preserving its revision guard.
       if (drag) { deferredState = m; return; }
       state = m; render();
     } else if (m.type === "detail") showDetail(m);

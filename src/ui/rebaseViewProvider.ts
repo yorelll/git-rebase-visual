@@ -67,9 +67,11 @@ import {
 import { SecretsAccessModule, fromSecretStorage } from "./secretsAccess";
 import { currentCommitSelection, rebaseProgressState } from "./rebaseState";
 import { branchContext } from "./rebasePresentation";
+import { getWorktreeChanges, stageWorktreeChange } from "../git/worktreeChanges";
+import { openWorktreeDiff } from "./worktreeDiff";
 import { ensureEditStopTarget, writeEditStopCommit } from "./editStopCommit";
 import { validateReorderRequest } from "./rebaseReorderState";
-import { isDraftOnlyComposeAllowedDuringRebase } from "./composePolicy";
+import { isDraftOnlyAiGenerationAllowedDuringRebase, isDraftOnlyComposeAllowedDuringRebase } from "./composePolicy";
 import { ComposePanel } from "./composePanel";
 import { UndoJournal, UndoRecord, undoPreflight } from "../git/undo";
 
@@ -380,7 +382,7 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
       lockedFlags.set(c.hash, isLocked);
     }
 
-    const status = await workingStatus(root);
+    const [status, changes] = await Promise.all([workingStatus(root), getWorktreeChanges(root)]);
     if (!isCurrent()) {
       return;
     }
@@ -407,6 +409,15 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
       hasUnstaged: status.hasUnstaged,
       stagedCount: status.stagedCount,
       unstagedCount: status.unstagedCount,
+      changes: changes.map((change) => ({
+        path: change.path,
+        originalPath: change.originalPath,
+        staged: change.staged,
+        unstaged: change.unstaged,
+        indexKind: change.indexKind,
+        worktreeKind: change.worktreeKind,
+        conflicted: change.conflicted,
+      })),
       canonicalRevision: generation,
       canonicalOrder: ordered.map((commit) => commit.hash),
       commits: ordered.map((c) => ({
@@ -504,6 +515,8 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
       "copyHash",
       "copyMessage",
       "openDiff",
+      "openWorktreeDiff",
+      "stageFile",
       "requestDetail",
       "drop",
       "rebaseTo",
@@ -536,15 +549,25 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     // An edit stop may amend/create only after ensureEditStop verifies it below;
     // a conflict never gets those paths.
     if (cwd && (await isRebaseInProgress(cwd))) {
-      const allowed = new Set(["continueRebase", "abortRebase", "skipRebase", "commitEditAmend", "commitEditNew"]);
+      const allowed = new Set(["continueRebase", "abortRebase", "skipRebase", "commitEditAmend", "commitEditNew", "stageFile"]);
       const draftOnlyCompose =
         m.type === "openCompose" &&
         isDraftOnlyComposeAllowedDuringRebase(m.mode, m.messageOnly === true);
+      const activeCompose = this.compose.activeSession();
+      const draftOnlyGeneration =
+        m.type === "generate" &&
+        !!activeCompose &&
+        this.compose.acceptsActiveSession(m.sessionId, m.revision) &&
+        activeCompose.mode === m.mode &&
+        activeCompose.messageOnly === true &&
+        isDraftOnlyComposeAllowedDuringRebase(activeCompose.mode, true);
       const editStopCompose =
         m.type === "openCompose" && m.mode === "commit" && m.thenEdit === true && typeof m.hash === "string";
       const editStopNewCompose =
         m.type === "openCompose" && m.mode === "staged" && m.editKind === "new" && m.ai !== true;
-      if (!allowed.has(m.type) && m.type !== "copyText" && !draftOnlyCompose && !editStopCompose && !editStopNewCompose) {
+      const editStopDraftCompose =
+        m.type === "openCompose" && m.messageOnly === true && isDraftOnlyComposeAllowedDuringRebase(m.mode, true);
+      if (!allowed.has(m.type) && m.type !== "copyText" && m.type !== "openWorktreeDiff" && !draftOnlyCompose && !draftOnlyGeneration && !editStopCompose && !editStopNewCompose && !editStopDraftCompose) {
         const message = "变基进行中：此操作不能在当前暂停状态执行。";
         if (m.type === "apply") this.compose.post({ type: "applyFailed", message });
         vscode.window.showWarningMessage(message);
@@ -567,6 +590,12 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
           break;
         case "openDiff":
           await this.openDiffDocument(cwd!, m.hash);
+          break;
+        case "openWorktreeDiff":
+          await this.openChangedFileDiff(cwd!, m.path);
+          break;
+        case "stageFile":
+          await this.stageChangedFile(cwd!, m.path);
           break;
         case "copyText":
           await vscode.env.clipboard.writeText(m.text ?? "");
@@ -670,7 +699,7 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
           await this.appendStagedToCommit(cwd!, m.hash);
           break;
         case "generate":
-          await this.generate(cwd!, m.mode, m.hash, m.extra ?? "");
+          await this.generate(cwd!, m.mode, m.hash, m.extra ?? "", m.sessionId, m.revision);
           break;
         case "apply":
           // A retained/reloaded webview can otherwise apply an old draft to a
@@ -1741,8 +1770,10 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     const normalizedEditKind = editKind === "amend" || editKind === "new" ? editKind : undefined;
     let stoppedHash: string | undefined;
     if (await isRebaseInProgress(cwd)) {
+      // AI is permitted only in the explicitly draft-only surface. It produces
+      // text, never a Git write; amend/new routes remain guarded below.
       if (ai && !messageOnly) {
-        throw new Error("变基进行中：不能调用 AI 生成 message；仅可保留 draft-only Compose。 ");
+        throw new Error("变基进行中：AI 仅可在“仅生成 message，不提交”模式中生成草稿。 ");
       }
       const editStopAmend = mode === "commit" && thenEdit === true && typeof hash === "string" && normalizedEditKind === "amend";
       const editStopNew = mode === "staged" && normalizedEditKind === "new" && ai === false;
@@ -1817,17 +1848,29 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     cwd: string,
     mode: string,
     hash: string | undefined,
-    extra: string
+    extra: string,
+    sessionId?: unknown,
+    revision?: unknown
   ): Promise<void> {
     if (!isLlmConfigured()) {
       toast("error", "请先配置 LLM。");
+      return;
+    }
+    if (!this.compose.acceptsActiveSession(sessionId, revision)) {
+      this.compose.post({ type: "genError", message: "Compose 会话已过期；未发送 AI 请求，请重新打开草稿。" });
       return;
     }
     if (!["commit", "staged", "working"].includes(mode) || (mode === "commit" && !hash)) {
       throw new Error("未知 Compose 目标，不能生成 message。 ");
     }
     if (await isRebaseInProgress(cwd)) {
-      throw new Error("变基进行中：不能生成 Compose message。请先 Continue 或 Abort。 ");
+      const active = this.compose.activeSession();
+      const hasConflicts = (await conflictedFiles(cwd)).length > 0;
+      if (!active || active.mode !== mode || !isDraftOnlyAiGenerationAllowedDuringRebase(active.mode, active.messageOnly === true, hasConflicts)) {
+        throw new Error(hasConflicts
+          ? "变基存在冲突：改动尚不稳定，不能生成 commit message 草稿。请先解决冲突。 "
+          : "变基进行中：仅可为当前 staged/working 的“仅生成 message，不提交”草稿生成 AI message。 ");
+      }
     }
     await vscode.window.withProgress(
       {
@@ -1843,7 +1886,9 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
           let text: string;
           const { timeout, ...extras } = getLlmExtras();
           const opts = { ...extras, extraInfo: extra };
-          const onDelta = (chunk: string) => this.compose.post({ type: "genDelta", text: chunk });
+          const onDelta = (chunk: string) => {
+            if (this.compose.acceptsActiveSession(sessionId, revision)) this.compose.post({ type: "genDelta", text: chunk });
+          };
           const requestOptions = { signal: ctrl.signal, timeout };
           if (mode === "commit" && hash) {
             text = await generateMessage(cwd, hash, getLlmConfig(), opts, onDelta, requestOptions);
@@ -1859,7 +1904,9 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
             }
             text = await generateFromDiff(diff, getLlmConfig(), opts, onDelta, requestOptions);
           }
-          this.compose.post({ type: "genResult", text: text || "" });
+          if (this.compose.acceptsActiveSession(sessionId, revision)) {
+            this.compose.post({ type: "genResult", text: text || "" });
+          }
         } catch (e: any) {
           if (ctrl.signal.aborted) {
             // User cancelled — reset the panel's generate button.
@@ -1946,6 +1993,25 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     await this.refresh();
     this.compose.clearDraft(sessionId, revision);
     this.compose.post({ type: "applySucceeded" });
+  }
+
+  /** Opens a structured working-tree entry through a controlled public-API diff. */
+  private async openChangedFileDiff(cwd: string, pathValue: unknown): Promise<void> {
+    if (typeof pathValue !== "string") throw new Error("缺少要比较的文件路径。 ");
+    const change = (await getWorktreeChanges(cwd)).find((item) => item.path === pathValue);
+    if (!change) throw new Error("文件状态已变化；请刷新后重试。 ");
+    const result = await openWorktreeDiff(cwd, change);
+    if (result.fallback) toast("warn", result.fallback);
+  }
+
+  /** Stages exactly the displayed working/untracked change after a fresh status read. */
+  private async stageChangedFile(cwd: string, pathValue: unknown): Promise<void> {
+    if (typeof pathValue !== "string") throw new Error("缺少要暂存的文件路径。 ");
+    const change = (await getWorktreeChanges(cwd)).find((item) => item.path === pathValue);
+    if (!change) throw new Error("文件状态已变化；请刷新后重试。 ");
+    await stageWorktreeChange(cwd, change);
+    toast("info", `已暂存 ${change.path}。`);
+    await this.refresh();
   }
 
   private async openDiffDocument(cwd: string, hash: string): Promise<void> {
@@ -2203,9 +2269,8 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
 <title>Git Rebase</title>
 </head>
 <body>
-<div id="inline-toast" class="inline-toast hidden" role="status" aria-live="polite"></div>
 <div id="banner" class="banner hidden" role="status" aria-live="polite"></div>
-<div id="context" class="branch-context hidden"></div>
+<div id="context" class="branch-context hidden"><span id="context-text"></span><div id="inline-toast" class="inline-toast hidden" role="status" aria-live="polite"></div></div>
 <div id="changes" class="changes hidden"></div>
 <div id="direction" class="direction" role="status" aria-live="polite"></div>
 <div id="list" class="list" role="list"></div>

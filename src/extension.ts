@@ -2,6 +2,7 @@ import * as vscode from "vscode";
 import { RebaseViewProvider } from "./ui/rebaseViewProvider";
 import { LockStore } from "./lock/lockStore";
 import { SecretsAccessModule, fromSecretStorage } from "./ui/secretsAccess";
+import { GitContentProvider, gitContentScheme } from "./ui/worktreeDiff";
 
 export function activate(context: vscode.ExtensionContext): void {
   const locks = new LockStore(context.globalState);
@@ -11,6 +12,7 @@ export function activate(context: vscode.ExtensionContext): void {
   const provider = new RebaseViewProvider(context, locks);
 
   context.subscriptions.push(
+    vscode.workspace.registerTextDocumentContentProvider(gitContentScheme, new GitContentProvider()),
     vscode.window.registerWebviewViewProvider(
       RebaseViewProvider.viewType,
       provider
