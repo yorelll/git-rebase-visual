@@ -67,3 +67,30 @@ test("single-file stage uses git add -A with paths containing spaces and deletio
   changes = await getWorktreeChanges(cwd);
   assert.equal(changes.find((change) => change.path === "a file [one].txt")?.staged, true);
 });
+
+test("single-file stage updates an RM record through only its working-side path", async (t) => {
+  const cwd = createRepo();
+  t.after(() => removeRepo(cwd));
+  commitFile(cwd, "old.txt", "base\n", "base");
+  commitFile(cwd, "unrelated.txt", "base\n", "unrelated base");
+  git(cwd, ["mv", "old.txt", "new.txt"]);
+  fs.writeFileSync(path.join(cwd, "new.txt"), "renamed and modified\n", "utf8");
+  fs.writeFileSync(path.join(cwd, "unrelated.txt"), "still working only\n", "utf8");
+
+  let changes = await getWorktreeChanges(cwd);
+  const renamed = changes.find((change) => change.path === "new.txt")!;
+  assert.deepEqual(
+    { staged: renamed.staged, unstaged: renamed.unstaged, index: renamed.indexKind, original: renamed.originalPath },
+    { staged: true, unstaged: true, index: "rename", original: "old.txt" }
+  );
+  await stageWorktreeChange(cwd, renamed);
+
+  changes = await getWorktreeChanges(cwd);
+  const after = changes.find((change) => change.path === "new.txt")!;
+  assert.deepEqual({ staged: after.staged, unstaged: after.unstaged }, { staged: true, unstaged: false });
+  // Git may subsequently classify the fully staged change as add/delete rather
+  // than rename; the contract is that the working side is gone and its content
+  // is in the index without touching unrelated entries.
+  assert.equal(git(cwd, ["show", ":new.txt"]), "renamed and modified");
+  assert.equal(changes.find((change) => change.path === "unrelated.txt")?.unstaged, true, "does not stage unrelated changes");
+});

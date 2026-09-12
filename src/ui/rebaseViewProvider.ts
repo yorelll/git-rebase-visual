@@ -68,7 +68,9 @@ import { SecretsAccessModule, fromSecretStorage } from "./secretsAccess";
 import { currentCommitSelection, rebaseProgressState } from "./rebaseState";
 import { branchContext } from "./rebasePresentation";
 import { getWorktreeChanges, stageWorktreeChange } from "../git/worktreeChanges";
-import { openWorktreeDiff } from "./worktreeDiff";
+import { openCommitFileDiff, openWorktreeDiff } from "./worktreeDiff";
+import { GitContentRequestStore } from "./gitDiffRequestState";
+import { applyCommitBinaryStatus, commitDiffPlan, parseCommitChangedFiles } from "./commitDiffState";
 import { ensureEditStopTarget, writeEditStopCommit } from "./editStopCommit";
 import { validateReorderRequest } from "./rebaseReorderState";
 import { isDraftOnlyAiGenerationAllowedDuringRebase, isDraftOnlyComposeAllowedDuringRebase } from "./composePolicy";
@@ -128,10 +130,12 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
   private readonly statusBar: vscode.StatusBarItem;
   private readonly compose: ComposePanel;
   private generationCancel?: AbortController;
+  private readonly commitDiffCache = new Map<string, ReturnType<typeof commitDiffPlan>>();
 
   constructor(
     private readonly ctx: vscode.ExtensionContext,
-    private readonly locks: LockStore
+    private readonly locks: LockStore,
+    private readonly diffRequests: GitContentRequestStore
   ) {
     this.output = vscode.window.createOutputChannel("Git Rebase Visual");
     this.undo = new UndoJournal(ctx.workspaceState, ctx.globalState);
@@ -142,6 +146,7 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     inlineToastSink = (message, duration) => this.postInlineToast(message, duration);
     ctx.subscriptions.push(this.output, this.statusBar, this.compose, new vscode.Disposable(() => {
       if (inlineToastSink) inlineToastSink = undefined;
+      this.commitDiffCache.clear();
     }));
     ctx.subscriptions.push(
       vscode.workspace.onDidChangeConfiguration((event) => {
@@ -253,6 +258,10 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     }
     if (!isCurrent()) {
       return;
+    }
+    if (this.root && this.root !== root) {
+      this.diffRequests.invalidateRepository(this.root);
+      this.commitDiffCache.clear();
     }
     this.root = root;
 
@@ -589,7 +598,7 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
           toast("info", "已复制完整 message。");
           break;
         case "openDiff":
-          await this.openDiffDocument(cwd!, m.hash);
+          await this.openCommitDiff(cwd!, m.hash);
           break;
         case "openWorktreeDiff":
           await this.openChangedFileDiff(cwd!, m.path);
@@ -2000,7 +2009,7 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     if (typeof pathValue !== "string") throw new Error("缺少要比较的文件路径。 ");
     const change = (await getWorktreeChanges(cwd)).find((item) => item.path === pathValue);
     if (!change) throw new Error("文件状态已变化；请刷新后重试。 ");
-    const result = await openWorktreeDiff(cwd, change);
+    const result = await openWorktreeDiff(this.diffRequests, cwd, change);
     if (result.fallback) toast("warn", result.fallback);
   }
 
@@ -2014,25 +2023,59 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     await this.refresh();
   }
 
-  private async openDiffDocument(cwd: string, hash: string): Promise<void> {
-    // A controlled read-only virtual document avoids invoking private Git
-    // extension commands and keeps binary/rename/root/merge output faithful.
-    // Do not let a binary patch fill the extension-host heap: Git's complete
-    // output is useful only while it fits within this deliberate display limit.
-    const limit = 12 * 1024 * 1024;
-    const result = await runGit(
-      ["show", "--no-ext-diff", "--binary", "--find-renames", "--format=fuller", hash],
-      { cwd, maxBuffer: limit }
-    );
-    if (result.code !== 0) {
-      const message = result.stderr || result.stdout || "无法读取 commit diff。";
-      if (message.includes("output limit")) {
-        throw new Error("Commit diff 超过 12 MiB 显示上限；请在终端使用 git show 查看完整内容。 ");
+  /**
+   * Opens an actual parent-to-commit two-sided Diff. The webview can request
+   * only a currently rendered full hash; Git resolves parents/files afresh and
+   * the shared opaque request store authorizes both virtual content sides.
+   */
+  private async openCommitDiff(cwd: string, hash: string): Promise<void> {
+    let plan = this.commitDiffCache.get(`${cwd}:${hash}`);
+    if (!plan) {
+      const [parentsResult, namesResult, numstatResult] = await Promise.all([
+        runGit(["show", "-s", "--format=%P", hash], { cwd }),
+        runGit(["diff-tree", "--no-commit-id", "--name-status", "-z", "-M", "--root", hash], { cwd }),
+        runGit(["diff-tree", "--no-commit-id", "--numstat", "-z", "-M", "--root", hash], { cwd }),
+      ]);
+      if (parentsResult.code !== 0 || namesResult.code !== 0 || numstatResult.code !== 0) {
+        throw new Error(
+          parentsResult.stderr || namesResult.stderr || numstatResult.stderr ||
+          parentsResult.stdout || namesResult.stdout || numstatResult.stdout ||
+          "无法读取 commit 文件变更。"
+        );
       }
-      throw new Error(message);
+      plan = commitDiffPlan(
+        hash,
+        parentsResult.stdout.trim().split(/\s+/).filter(Boolean),
+        applyCommitBinaryStatus(parseCommitChangedFiles(namesResult.stdout), numstatResult.stdout)
+      );
+      // Commit objects are immutable. Bound the lightweight selection cache;
+      // virtual URI content remains independently TTL/LRU controlled.
+      if (this.commitDiffCache.size >= 128) {
+        const first = this.commitDiffCache.keys().next().value as string | undefined;
+        if (first) this.commitDiffCache.delete(first);
+      }
+      this.commitDiffCache.set(`${cwd}:${hash}`, plan);
     }
-    const document = await vscode.workspace.openTextDocument({ content: result.stdout, language: "diff" });
-    await vscode.window.showTextDocument(document, { preview: true });
+    if (plan.fallbackReason) {
+      toast("warn", plan.fallbackReason);
+      return;
+    }
+    let file = plan.files[0];
+    if (plan.files.length > 1) {
+      const choice = await vscode.window.showQuickPick(
+        plan.files.map((entry) => ({
+          label: entry.path,
+          description: entry.kind === "rename" && entry.originalPath ? `${entry.kind}: ${entry.originalPath} → ${entry.path}` : entry.kind,
+          detail: entry.binary ? "binary — will show a safe fallback" : "parent ↔ commit",
+          entry,
+        })),
+        { placeHolder: "选择要在 parent ↔ commit Diff 中打开的文件", matchOnDescription: true }
+      );
+      if (!choice) return;
+      file = choice.entry;
+    }
+    const result = await openCommitFileDiff(this.diffRequests, cwd, plan.parent, plan.commit, file!);
+    if (result.fallback) toast("warn", result.fallback);
   }
 
   private async sendDetail(cwd: string, hash: string): Promise<void> {

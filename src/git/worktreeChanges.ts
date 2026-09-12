@@ -177,17 +177,17 @@ export async function getWorktreeChanges(cwd: string): Promise<WorktreeChange[]>
 }
 
 /**
- * Stages precisely one current working/untracked status entry. Both sides of a
- * rename are passed as independent spawn arguments so `git add -A` records its
- * deletion as well as its destination; paths are never interpolated into a
- * shell command.
+ * Stages precisely one current working/untracked status entry. The control is
+ * attached to the working-tree side, so its current pathname is the only
+ * pathspec. In particular, an `RM` record has an index-side old rename path
+ * that no longer exists in the worktree; passing it would make `git add -A`
+ * fail before it can stage the modification at the new path.
  */
 export async function stageWorktreeChange(cwd: string, change: WorktreeChange): Promise<void> {
   if (!change.unstaged || change.conflicted) {
     throw new Error("该文件不是可单独暂存的工作区改动。");
   }
-  const paths = [...new Set([change.path, change.originalPath].filter((value): value is string => !!value))];
-  const result = await runGit(["add", "-A", "--", ...paths], { cwd });
+  const result = await runGit(["add", "-A", "--", change.path], { cwd });
   if (result.code !== 0) {
     throw new Error(result.stderr || result.stdout || `无法暂存 ${change.path}。`);
   }

@@ -3,16 +3,20 @@ import { RebaseViewProvider } from "./ui/rebaseViewProvider";
 import { LockStore } from "./lock/lockStore";
 import { SecretsAccessModule, fromSecretStorage } from "./ui/secretsAccess";
 import { GitContentProvider, gitContentScheme } from "./ui/worktreeDiff";
+import { createGitContentRequestStore } from "./ui/gitDiffRequestState";
 
 export function activate(context: vscode.ExtensionContext): void {
   const locks = new LockStore(context.globalState);
   // Expose the extension-host SecretStorage to the provider's capability hints
   // (the API-key migration reads through this accessor).
   SecretsAccessModule.set(fromSecretStorage(context.secrets));
-  const provider = new RebaseViewProvider(context, locks);
+  const diffRequests = createGitContentRequestStore();
+  const provider = new RebaseViewProvider(context, locks, diffRequests);
+  const contentProvider = new GitContentProvider(diffRequests);
 
   context.subscriptions.push(
-    vscode.workspace.registerTextDocumentContentProvider(gitContentScheme, new GitContentProvider()),
+    contentProvider,
+    vscode.workspace.registerTextDocumentContentProvider(gitContentScheme, contentProvider),
     vscode.window.registerWebviewViewProvider(
       RebaseViewProvider.viewType,
       provider
