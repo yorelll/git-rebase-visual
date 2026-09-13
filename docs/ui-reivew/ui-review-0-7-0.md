@@ -72,7 +72,7 @@
 | 命令 | 结果 |
 | --- | --- |
 | `npm run typecheck` / focused generated-Diff, DOM, protocol tests / `node --check media/main.js` | 最终状态通过。 |
-| `npm test` | 119/119 通过，约 377 秒；shared `withServer()` safe-port retry 已消除 Windows/Undici forbidden-port LLM deadline flaky。 |
+| `npm test` | 初始整改时为 119/119 通过，约 377 秒；随后 0.7.1 复核发现 safe-port set 漏掉 5060/5061。R71-1 整改后为 120/120 通过，约 382 秒；shared `withServer()` 的 safe-port retry 现以 Fetch/URL Standard 完整 bad-port table 核对并回归验证。 |
 | `npm run compile` / `git diff --check` | 最终状态通过。 |
 
 ## 发布前人工走查
@@ -88,4 +88,4 @@
 - `npm run typecheck`、focused generated-Diff/DOM/protocol tests、`node --check media/main.js`：最终状态通过。
 - `npm test`：119/119 通过（约 377 秒）。
 - `npm run compile`、`git diff --check`：最终状态通过。
-- `npx tsx --test test/llmClient.test.ts` 连续 8 次：每次 7/7 通过；shared server helper 会重试避开 Fetch forbidden ports。
+- `npx tsx --test test/llmClient.test.ts` 连续 12 次：每次 8/8 通过；shared server helper 会重试避开 Fetch/URL Standard 完整 forbidden-port 集合，并以真实 listen → close → retry 回归覆盖 5060。
