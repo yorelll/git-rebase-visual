@@ -1,3 +1,5 @@
+import * as fs from "fs/promises";
+import * as pathModule from "path";
 import { runGit } from "./gitRunner";
 
 /** A UI-safe classification of a status side from `git status --porcelain=v2 -z`. */
@@ -191,4 +193,47 @@ export async function stageWorktreeChange(cwd: string, change: WorktreeChange): 
   if (result.code !== 0) {
     throw new Error(result.stderr || result.stdout || `无法暂存 ${change.path}。`);
   }
+}
+
+/**
+ * Restores only one visible status side. Working restoration resets index →
+ * worktree; staged restoration resets HEAD → index without touching the
+ * worktree. Untracked files are never silently deleted: that operation needs a
+ * deliberate filesystem confirmation in the host.
+ */
+export async function restoreWorktreeChange(
+  cwd: string,
+  change: WorktreeChange,
+  side: "working" | "staged"
+): Promise<void> {
+  if (change.conflicted) {
+    throw new Error("冲突文件不能通过此处恢复；请在编辑器解决冲突。 ");
+  }
+  if (side === "working") {
+    if (!change.unstaged) throw new Error("该文件没有可恢复的工作区改动。 ");
+    if (change.worktreeKind === "untracked") {
+      throw new Error("未跟踪文件不会自动删除；请在资源管理器中确认后手动删除。 ");
+    }
+    const result = await runGit(["restore", "--worktree", "--", change.path], { cwd });
+    if (result.code !== 0) throw new Error(result.stderr || result.stdout || `无法恢复工作区文件 ${change.path}。`);
+    return;
+  }
+
+  if (!change.staged) throw new Error("该文件没有可恢复的暂存改动。 ");
+  const paths = change.originalPath ? [change.path, change.originalPath] : [change.path];
+  const result = await runGit(["restore", "--staged", "--", ...paths], { cwd });
+  if (result.code !== 0) throw new Error(result.stderr || result.stdout || `无法撤销暂存 ${change.path}。`);
+}
+
+/** Deletes one displayed untracked file after the host obtained explicit confirmation. */
+export async function deleteUntrackedWorktreeChange(cwd: string, change: WorktreeChange): Promise<void> {
+  if (!change.unstaged || change.worktreeKind !== "untracked" || change.staged) {
+    throw new Error("只有当前未跟踪文件可在确认后删除。 ");
+  }
+  const absolute = pathModule.resolve(cwd, change.path);
+  const relative = pathModule.relative(cwd, absolute);
+  if (relative === ".." || relative.startsWith(`..${pathModule.sep}`) || pathModule.isAbsolute(relative)) {
+    throw new Error("Git 状态返回了仓库外路径；未删除文件。 ");
+  }
+  await fs.rm(absolute, { force: true });
 }

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import * as fs from "fs";
 import * as path from "path";
-import { getWorktreeChanges, stageWorktreeChange } from "../src/git/worktreeChanges";
+import { deleteUntrackedWorktreeChange, getWorktreeChanges, restoreWorktreeChange, stageWorktreeChange } from "../src/git/worktreeChanges";
 import { worktreeDiffSpec } from "../src/ui/worktreeDiffState";
 import { commitFile, createRepo, git, removeRepo } from "./helpers/gitTestRepo";
 
@@ -66,6 +66,30 @@ test("single-file stage uses git add -A with paths containing spaces and deletio
   await stageWorktreeChange(cwd, changes.find((change) => change.path === "a file [one].txt")!);
   changes = await getWorktreeChanges(cwd);
   assert.equal(changes.find((change) => change.path === "a file [one].txt")?.staged, true);
+});
+
+test("restore separates staged and working sides and protects untracked deletion", async (t) => {
+  const cwd = createRepo();
+  t.after(() => removeRepo(cwd));
+  commitFile(cwd, "tracked.txt", "base\n", "base");
+  fs.writeFileSync(path.join(cwd, "tracked.txt"), "index\n", "utf8");
+  git(cwd, ["add", "tracked.txt"]);
+  fs.writeFileSync(path.join(cwd, "tracked.txt"), "working\n", "utf8");
+  fs.writeFileSync(path.join(cwd, "untracked.txt"), "new\n", "utf8");
+
+  let changes = await getWorktreeChanges(cwd);
+  const tracked = changes.find((change) => change.path === "tracked.txt")!;
+  await restoreWorktreeChange(cwd, tracked, "working");
+  assert.equal(fs.readFileSync(path.join(cwd, "tracked.txt"), "utf8").replace(/\r\n/g, "\n"), "index\n");
+  changes = await getWorktreeChanges(cwd);
+  await restoreWorktreeChange(cwd, changes.find((change) => change.path === "tracked.txt")!, "staged");
+  assert.equal(git(cwd, ["show", ":tracked.txt"]), "base");
+
+  changes = await getWorktreeChanges(cwd);
+  const untracked = changes.find((change) => change.path === "untracked.txt")!;
+  await assert.rejects(() => restoreWorktreeChange(cwd, untracked, "working"), /未跟踪文件不会自动删除/);
+  await deleteUntrackedWorktreeChange(cwd, untracked);
+  assert.equal(fs.existsSync(path.join(cwd, "untracked.txt")), false);
 });
 
 test("single-file stage updates an RM record through only its working-side path", async (t) => {

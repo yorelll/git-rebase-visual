@@ -1,5 +1,19 @@
 (function () {
-  const vscode = acquireVsCodeApi();
+  const rawVsCode = acquireVsCodeApi();
+  // Every webview-to-host message carries an action source. The host records it
+  // for diagnostics but only explicit Git-writing actions can raise a paused
+  // rebase warning.
+  const sourceForAction = (type) => {
+    if (["reorder"].includes(type)) return "webview:reorder";
+    if (["requestDetail", "openDiff", "openWorktreeDiff", "copyHash", "copyMessage", "copyText"].includes(type)) return "webview:read";
+    if (["ready", "refresh"].includes(type)) return "webview:lifecycle";
+    return "webview:ui";
+  };
+  const vscode = {
+    postMessage(message) { return rawVsCode.postMessage({ ...message, source: message.source || sourceForAction(message.type) }); },
+    getState: () => rawVsCode.getState(),
+    setState: (value) => rawVsCode.setState(value),
+  };
   const listEl = document.getElementById("list");
   const bannerEl = document.getElementById("banner");
   const contextEl = document.getElementById("context");
@@ -30,6 +44,7 @@
   let tipHash = null;
   let tipAnchor = null;
   let tipOverTip = false;
+  let isComposingInput = false;
 
   function announce(message) {
     const live = document.getElementById("live");
@@ -126,7 +141,14 @@
     bannerEl.classList.remove("hidden");
   }
 
-  function changeKind(kind) { return ({ modify: "Modify", add: "Add", delete: "Delete", rename: "Rename", untracked: "Untracked", unmerged: "Conflict" })[kind] || "Modify"; }
+  function changeState(kind) {
+    return ({ modify: { mark: "M", label: "已修改" }, add: { mark: "A", label: "已添加" }, delete: { mark: "D", label: "已删除" }, rename: { mark: "R", label: "已重命名" }, untracked: { mark: "U", label: "未跟踪" }, unmerged: { mark: "U", label: "存在冲突" } })[kind] || { mark: "M", label: "已修改" };
+  }
+  function fileNameAndPath(filePath) {
+    const normalized = String(filePath || "").replace(/\\\\/g, "/");
+    const at = normalized.lastIndexOf("/");
+    return at < 0 ? { name: normalized, parent: "" } : { name: normalized.slice(at + 1), parent: normalized.slice(0, at + 1) };
+  }
   function appendChangeFiles(parent, changes) {
     const staged = changes.filter((change) => change.staged);
     const unstaged = changes.filter((change) => change.unstaged);
@@ -135,23 +157,35 @@
       const label = document.createElement("div"); label.className = "file-group-label"; label.textContent = `${title} (${items.length})`; parent.appendChild(label);
       items.forEach((change) => {
         const row = document.createElement("div"); row.className = "change-file";
-        const open = button(change.path, () => vscode.postMessage({ type: "openWorktreeDiff", path: change.path }));
-        open.classList.add("file-open"); open.title = `打开 ${side === "staged" ? "HEAD ↔ index" : "index ↔ working tree"} Diff: ${change.path}`;
-        const stateLabel = document.createElement("span"); stateLabel.className = "file-state";
         const kind = side === "staged" ? change.indexKind : change.worktreeKind;
-        stateLabel.textContent = changeKind(kind);
-        row.append(open, stateLabel);
+        const visual = changeState(kind);
+        const status = document.createElement("span"); status.className = `file-state file-state-${kind || "modify"}`; status.textContent = visual.mark; status.title = visual.label; status.setAttribute("aria-label", visual.label);
+        const target = document.createElement("button"); target.type = "button"; target.className = "file-open"; target.title = `打开 ${side === "staged" ? "HEAD ↔ index" : "index ↔ working tree"} Diff: ${change.path}`;
+        const pieces = fileNameAndPath(change.path); const name = document.createElement("span"); name.className = "file-name"; name.textContent = pieces.name; const parentPath = document.createElement("span"); parentPath.className = "file-path"; parentPath.textContent = pieces.parent; target.append(name, parentPath); target.onclick = () => vscode.postMessage({ type: "openWorktreeDiff", path: change.path });
+        const actions = document.createElement("span"); actions.className = "file-actions";
+        const open = button("↗", () => vscode.postMessage({ type: "openWorktreeDiff", path: change.path }), { title: "打开左右 Diff" }); open.classList.add("file-action"); open.setAttribute("aria-label", "打开左右 Diff"); actions.append(open);
         if (side === "unstaged" && !change.conflicted) {
-          const stage = button("暂存", () => vscode.postMessage({ type: "stageFile", path: change.path }));
-          stage.classList.add("file-stage"); stage.title = "git add -A -- 此文件"; row.appendChild(stage);
+          const stage = button("+", () => vscode.postMessage({ type: "stageFile", path: change.path }), { title: "暂存此文件" }); stage.classList.add("file-action"); stage.setAttribute("aria-label", "暂存此文件"); actions.prepend(stage);
         } else if (side === "staged") {
-          const ready = document.createElement("span"); ready.className = "file-staged"; ready.textContent = "已暂存"; row.appendChild(ready);
+          const ready = document.createElement("span"); ready.className = "file-staged"; ready.textContent = "已暂存"; ready.title = "此状态已在暂存区，不会再次暂存"; actions.prepend(ready);
         }
-        parent.appendChild(row);
+        if (!change.conflicted && !(side === "unstaged" && kind === "untracked")) {
+          const restore = button("↶", () => requestRestore(change, side), { title: side === "staged" ? "撤销此文件的暂存" : "恢复此文件的工作区改动" }); restore.classList.add("file-action"); restore.setAttribute("aria-label", restore.title); actions.append(restore);
+        } else if (side === "unstaged" && kind === "untracked") {
+          const remove = button("⌫", () => requestRestore(change, side), { title: "删除未跟踪文件（需确认）" }); remove.classList.add("file-action"); remove.setAttribute("aria-label", remove.title); actions.append(remove);
+        }
+        row.append(status, target, actions); parent.appendChild(row);
       });
     };
     appendGroup("Staged Changes", staged, "staged");
     appendGroup("Changes", unstaged, "unstaged");
+  }
+  function requestRestore(change, side) {
+    const untracked = side === "unstaged" && change.worktreeKind === "untracked";
+    const action = untracked ? "永久删除未跟踪文件" : side === "staged" ? "撤销此文件的暂存" : "恢复此文件的工作区改动";
+    const consequence = untracked ? "这会从磁盘删除该未跟踪文件，且不能由 Git 恢复。" : side === "staged" ? "工作区内容不会改变；仅把 index 恢复为 HEAD。" : "这会丢弃该文件尚未暂存的工作区改动。";
+    if (!confirm(`${action}：${change.path}？\n${consequence}`)) return;
+    vscode.postMessage({ type: "restoreFile", path: change.path, side, deleteUntracked: untracked });
   }
   function renderChanges() {
     changesEl.innerHTML = "";
@@ -187,19 +221,21 @@
     return button(text, () => vscode.postMessage({ type: "openCompose", mode: ctx.mode, ai: ctx.ai, thenEdit: false }), { primary: ctx.primary });
   }
 
+  function parseSearch(raw) {
+    const query = raw.trim(); if (!query) return [];
+    const markers = [...query.matchAll(/(?:^|\s)(author|msg|hash):\s*/gi)];
+    if (!markers.length) return query.split(/\s+/).filter(Boolean).map((value) => ({ field: "text", value: value.toLowerCase() }));
+    const terms = []; const appendText = (value) => value.trim().split(/\s+/).filter(Boolean).forEach((token) => terms.push({ field: "text", value: token.toLowerCase() }));
+    appendText(query.slice(0, markers[0].index));
+    markers.forEach((marker, index) => { const field = marker[1].toLowerCase(); const start = marker.index + marker[0].length; const end = index + 1 < markers.length ? markers[index + 1].index : query.length; let value = query.slice(start, end).trim().toLowerCase(); if (!value) { appendText(`${field}:`); return; } if (field === "hash" && /^0x[0-9a-f]+$/i.test(value)) value = value.slice(2); terms.push({ field, value }); });
+    return terms;
+  }
   function queryMatch(c, raw) {
-    const query = raw.trim().toLowerCase();
-    if (!query) return true;
-    const terms = query.split(/\s+/);
-    return terms.every((term) => {
-      const field = term.match(/^(author|hash|msg):(.+)$/i);
-      if (!field) return [c.shortHash, c.hash, c.subject, c.author, c.authorEmail, c.date].join(" ").toLowerCase().includes(term);
-      const name = field[1].toLowerCase(); let value = field[2].toLowerCase();
-      // `hash:0x8e…` is a prefix spelling convenience, not a JavaScript number.
-      if (name === "hash" && /^0x[0-9a-f]+$/i.test(value)) value = value.slice(2);
-      if (name === "hash") return c.hash.toLowerCase().startsWith(value) || c.shortHash.toLowerCase().startsWith(value);
-      const target = name === "author" ? `${c.author} ${c.authorEmail}` : c.subject;
-      return target.toLowerCase().includes(value);
+    return parseSearch(raw).every((term) => {
+      if (term.field === "hash") return c.hash.toLowerCase().startsWith(term.value) || c.shortHash.toLowerCase().startsWith(term.value);
+      if (term.field === "author") return `${c.author} ${c.authorEmail}`.toLowerCase().includes(term.value);
+      if (term.field === "msg") return c.subject.toLowerCase().includes(term.value);
+      return [c.shortHash, c.hash, c.subject, c.author, c.authorEmail, c.date].join(" ").toLowerCase().includes(term.value);
     });
   }
   function filteredCommits() { return state.commits.filter((c) => queryMatch(c, filterText)); }
@@ -210,6 +246,13 @@
     // Pending locked commits remain safe to summarize: the summary states that
     // they will replay, and all reordering remains disabled during a rebase.
     return (state.activeHash && (c.hash.startsWith(state.activeHash) || state.activeHash.startsWith(c.hash))) || commitIsStopped(c) || selectedHashes.has(c.hash);
+  }
+  function authorLabel(c) {
+    const initial = c.authorInitial || "?";
+    const visible = state.commits.filter((item) => (item.authorInitial || "?") === initial && item.authorColorKey === c.authorColorKey);
+    if (visible.length <= 1) return initial;
+    const compact = (c.author || c.authorEmail || "?").replace(/[^\p{L}\p{N}]/gu, "");
+    return compact.slice(0, 2) || initial;
   }
   function lockedRunKey(commits) { return commits.map((c) => c.hash).join(":"); }
   function runSummary(commits) {
@@ -254,12 +297,9 @@
     controls.appendChild(search);
     const count = document.createElement("span"); count.className = "selection-count"; count.textContent = `${visible.length} / ${state.commits.length}`; controls.appendChild(count);
     if (filterText) controls.appendChild(button("清除", () => { filterText = ""; persistUi(); renderList(); listEl.querySelector(".commit-search")?.focus(); }));
-    if (selectedHashes.size) {
-      controls.append(
-        button("批量锁定", () => vscode.postMessage({ type: "bulkLock", hashes: [...selectedHashes] })),
-        button("批量 Squash", () => vscode.postMessage({ type: "bulkSquash", hashes: [...selectedHashes] })),
-        button("批量删除", () => vscode.postMessage({ type: "bulkDrop", hashes: [...selectedHashes] }), { danger: true })
-      );
+    if (selectedHashes.size >= 2) {
+      controls.appendChild(button(`批量锁定 ${selectedHashes.size} 个 commit`, () => vscode.postMessage({ type: "bulkLock", hashes: [...selectedHashes] })));
+      controls.appendChild(button(`批量删除 ${selectedHashes.size} 个 commit`, () => vscode.postMessage({ type: "bulkDrop", hashes: [...selectedHashes] }), { danger: true }));
     }
     listEl.appendChild(controls);
     const top = document.createElement("div"); top.className = "timeline-end"; top.textContent = "↑ Base / 较早"; listEl.appendChild(top);
@@ -301,7 +341,7 @@
     row.dataset.hash = c.hash; row.tabIndex = 0; row.setAttribute("role", "option"); row.setAttribute("aria-selected", String(selected));
     row.setAttribute("aria-label", `第 ${index} 项，共 ${state.commits.length} 项，${c.subject}，${short(c.hash)}，${c.author}${c.locked ? "，已锁定" : ""}${pending ? "，待重放" : ""}${stopped ? "，变基停靠于此" : ""}。选择后可按 Alt+上/下 移动一位。`);
     const grip = document.createElement("span"); grip.className = "grip"; grip.textContent = "⋮⋮"; grip.title = isFilterActive() ? "过滤中无法重排，请先清空搜索。" : c.locked ? "已锁定的 commit 不能拖动。" : "拖拽重排；顶部较早，底部较新"; grip.setAttribute("aria-hidden", "true"); grip.draggable = !state.rebaseInProgress && !isFilterActive() && !c.locked;
-    const dot = document.createElement("span"); dot.className = "dot"; dot.textContent = c.authorInitial || "?"; dot.style.setProperty("--author-hue", c.authorColorKey || "0"); dot.title = `${c.author} <${c.authorEmail || "unknown"}>${c.isCurrentAuthor === false ? "（非当前作者）" : c.isCurrentAuthor === "unknown" ? "（当前作者未知）" : "（当前作者）"}`;
+    const dot = document.createElement("span"); dot.className = `dot author-${c.authorColorKey || "0"}`; dot.textContent = authorLabel(c); dot.title = `${c.author} <${c.authorEmail || "unknown"}>${c.isCurrentAuthor === false ? "（非当前作者）" : c.isCurrentAuthor === "unknown" ? "（当前作者未知）" : "（当前作者）"}`;
     const content = document.createElement("div"); content.className = "commit-content";
     const subject = document.createElement("span"); subject.className = "subject"; subject.textContent = c.subject;
     const meta = document.createElement("span"); meta.className = "commit-meta"; meta.textContent = `${short(c.hash)}${pending ? "*（待重放）" : ""} · ${c.author} · ${c.date}`; content.append(subject, meta);
@@ -352,12 +392,22 @@
   }
   function selectRow(event, c) {
     if (event.target.closest(".grip")) return;
-    if (event.shiftKey && selectionAnchor) {
-      const from = state.commits.findIndex((x) => x.hash === selectionAnchor); const to = state.commits.findIndex((x) => x.hash === c.hash);
-      if (from >= 0 && to >= 0) for (const x of state.commits.slice(Math.min(from, to), Math.max(from, to) + 1)) selectedHashes.add(x.hash);
-    } else if (event.ctrlKey || event.metaKey) { selectedHashes.has(c.hash) ? selectedHashes.delete(c.hash) : selectedHashes.add(c.hash); selectionAnchor = c.hash; }
-    else { selectedHashes = new Set([c.hash]); selectionAnchor = c.hash; }
+    // A normal click establishes only the active/focused commit. It deliberately
+    // leaves multi-selection empty, so ordinary right-click operations always
+    // target the row under the pointer rather than a stale selection.
+    if (event.ctrlKey || event.metaKey) {
+      selectedHashes.has(c.hash) ? selectedHashes.delete(c.hash) : selectedHashes.add(c.hash);
+      selectionAnchor = c.hash;
+    } else {
+      selectedHashes.clear();
+      selectionAnchor = c.hash;
+    }
+    state.activeHash = c.hash;
     renderList();
+  }
+  function clearSelection(event) {
+    if (event.target.closest(".commit") || event.target.closest(".list-controls")) return;
+    if (selectedHashes.size) { selectedHashes.clear(); selectionAnchor = null; renderList(); }
   }
   function rowKeydown(event, c) {
     if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) { event.preventDefault(); const r = event.currentTarget.getBoundingClientRect(); openMenu(r.left + 8, r.bottom, c, event.currentTarget); return; }
@@ -369,7 +419,7 @@
       }
       // A click/keyboard focus selects the source; then construct a complete,
       // one-step canonical intent. The host still asks for confirmation.
-      selectedHashes = new Set([c.hash]); selectionAnchor = c.hash;
+      selectedHashes.clear(); selectionAnchor = c.hash; state.activeHash = c.hash;
       const order = [...state.canonicalOrder]; const sourceAt = order.indexOf(c.hash); const direction = event.key === "ArrowUp" ? -1 : 1; const anchor = order[sourceAt + direction];
       if (!anchor) { announce(`已在${direction < 0 ? "最早" : "最新"}位置，不能继续移动。`); renderList(); return; }
       const proposed = [...order]; proposed.splice(sourceAt, 1); const destination = proposed.indexOf(anchor); proposed.splice(destination + (direction > 0 ? 1 : 0), 0, c.hash);
@@ -393,6 +443,7 @@
     vscode.postMessage({ type: "reorder", sourceHash, anchorHash, placement: after ? "after" : "before", revision: state.canonicalRevision, order });
   }
 
+  function selectedMultiple() { return selectedHashes.size >= 2; }
   function menuItem(item) {
     const el = document.createElement("button"); el.type = "button"; el.className = "item" + (item.disabled ? " disabled" : "") + (item.danger ? " danger" : ""); el.setAttribute("role", "menuitem"); el.tabIndex = -1;
     el.innerHTML = `<span class="menu-icon" aria-hidden="true">${item.icon || ""}</span><span>${item.label}</span>${item.shortcut ? `<kbd>${item.shortcut}</kbd>` : ""}`;
@@ -405,18 +456,34 @@
   function focusMenu(index) { const buttons = menuButtons(); if (!buttons.length) return; const next = (index + buttons.length) % buttons.length; buttons.forEach((b, i) => b.tabIndex = i === next ? 0 : -1); buttons[next].focus(); }
   function openMenu(x, y, c, origin) {
     hideTooltip(); menuRestoreFocus = origin || document.activeElement; menuEl.innerHTML = "";
-    const header = document.createElement("div"); header.className = "menu-header"; header.textContent = `${short(c.hash)} · ${c.subject}`; menuEl.append(header, sep(), group("查看"));
-    menuEl.append(menuItem({ icon: "⧉", label: "复制 hash", action: () => send("copyHash", c) }), menuItem({ icon: "⧉", label: "复制 message", action: () => send("copyMessage", c) }), menuItem({ icon: "◫", label: "打开变更…", action: () => send("openDiff", c) }), sep(), group("编辑与变基"));
-    menuEl.append(menuItem({ icon: "✎", label: "编辑 message…", shortcut: "Enter", action: () => sendCompose(c, false) }), menuItem({ icon: "✦", label: "AI 生成 message…", disabled: !state.llmConfigured, disabledReason: "请先配置 LLM。", action: () => sendCompose(c, true) }), menuItem({ icon: "⧉", label: "追加暂存区", disabled: c.locked || !state.hasStaged || state.rebaseInProgress, disabledReason: c.locked ? "目标已锁定。" : !state.hasStaged ? "暂存区为空。" : "变基进行中。", action: () => send("appendStaged", c) }));
-    const position = state.commits.indexOf(c); const predecessor = state.commits[position - 1]; const blocked = position <= 0 || c.locked || predecessor?.locked || state.rebaseInProgress;
-    const reason = position <= 0 ? "第一个 commit 不能合并到前驱。" : c.locked || predecessor?.locked ? "当前 commit 或前驱已锁定。" : state.rebaseInProgress ? "变基进行中。" : "";
-    menuEl.append(menuItem({ icon: "⌑", label: "合并到上一个 (squash)", disabled: blocked, disabledReason: reason, action: () => send("squash", c) }), menuItem({ icon: "⌑", label: "合并到上一个，丢弃 message (fixup)", disabled: blocked, disabledReason: reason, action: () => send("fixup", c) }), menuItem({ icon: "⏸", label: "停靠在此 (edit)", action: () => send("rebaseTo", c) }), sep(), group("保护"), menuItem(c.locked ? { icon: "🔓", label: "解除锁定", action: () => send("unlock", c) } : { icon: "🔒", label: "锁定 commit", action: () => send("lock", c) }), sep(), group("危险操作"), menuItem({ icon: "⌫", label: "删除 commit (drop)", shortcut: "Delete", danger: true, disabled: c.locked, disabledReason: c.locked ? "目标已锁定。" : "", action: () => send("drop", c) }));
+    const multi = selectedMultiple(); const count = selectedHashes.size;
+    const header = document.createElement("div"); header.className = "menu-header"; header.textContent = multi ? `已选择 ${count} 个 commit` : `${short(c.hash)} · ${c.subject}`; menuEl.append(header, sep());
+    if (multi) {
+      menuEl.append(group("变基与编辑"));
+      const disabledReason = `已选择 ${count} 个 commit；此操作只支持单一 commit。`;
+      menuEl.append(
+        menuItem({ icon: "◫", label: "打开变更…", disabled: true, disabledReason }),
+        menuItem({ icon: "✎", label: "编辑 message…", disabled: true, disabledReason }),
+        menuItem({ icon: "✦", label: "AI 生成 message…", disabled: true, disabledReason }),
+        menuItem({ icon: "⏸", label: "停靠在此 (edit)", disabled: true, disabledReason }),
+        menuItem({ icon: "⌑", label: "合并到上一个 (squash)", disabled: true, disabledReason: "已选择多个 commit；不支持批量 squash，以避免跨越隐藏提交或合并语义不明确。" }),
+        menuItem({ icon: "⌑", label: "合并到上一个，丢弃 message (fixup)", disabled: true, disabledReason })
+      );
+      menuEl.append(sep(), group("查看"), menuItem({ icon: "▤", label: "生成 Diff…", action: () => vscode.postMessage({ type: "bulkGenerateDiff", hashes: [...selectedHashes] }) }), sep(), group("保护"), menuItem({ icon: "🔒", label: "批量锁定 commit", action: () => vscode.postMessage({ type: "bulkLock", hashes: [...selectedHashes] }) }), sep(), group("危险操作"), menuItem({ icon: "⌫", label: "批量删除 commit", danger: true, action: () => vscode.postMessage({ type: "bulkDrop", hashes: [...selectedHashes] }) }));
+    } else {
+      menuEl.append(group("查看"));
+      menuEl.append(menuItem({ icon: "⧉", label: "复制 hash", action: () => send("copyHash", c) }), menuItem({ icon: "⧉", label: "复制 message", action: () => send("copyMessage", c) }), menuItem({ icon: "◫", label: "打开变更…", action: () => send("openDiff", c) }), menuItem({ icon: "▤", label: "生成 Diff…", action: () => send("generateDiff", c) }), sep(), group("变基与编辑"));
+      menuEl.append(menuItem({ icon: "✎", label: "编辑 message…", shortcut: "Enter", action: () => sendCompose(c, false) }), menuItem({ icon: "✦", label: "AI 生成 message…", disabled: !state.llmConfigured, disabledReason: "请先配置 LLM。", action: () => sendCompose(c, true) }), menuItem({ icon: "⧉", label: "追加暂存区", disabled: c.locked || !state.hasStaged || state.rebaseInProgress, disabledReason: c.locked ? "目标已锁定。" : !state.hasStaged ? "暂存区为空。" : "变基进行中。", action: () => send("appendStaged", c) }));
+      const position = state.commits.indexOf(c); const predecessor = state.commits[position - 1]; const blocked = position <= 0 || c.locked || predecessor?.locked || state.rebaseInProgress;
+      const reason = position <= 0 ? "第一个 commit 不能合并到前驱。" : c.locked || predecessor?.locked ? "当前 commit 或前驱已锁定。" : state.rebaseInProgress ? "变基进行中。" : "";
+      menuEl.append(menuItem({ icon: "⌑", label: "合并到上一个 (squash)", disabled: blocked, disabledReason: reason, action: () => send("squash", c) }), menuItem({ icon: "⌑", label: "合并到上一个，丢弃 message (fixup)", disabled: blocked, disabledReason: reason, action: () => send("fixup", c) }), menuItem({ icon: "⏸", label: "停靠在此 (edit)", action: () => send("rebaseTo", c) }), sep(), group("保护"), menuItem(c.locked ? { icon: "🔓", label: "解除锁定", action: () => send("unlock", c) } : { icon: "🔒", label: "锁定 commit", action: () => send("lock", c) }), sep(), group("危险操作"), menuItem({ icon: "⌫", label: "删除 commit (drop)", shortcut: "Delete", danger: true, disabled: c.locked, disabledReason: c.locked ? "目标已锁定。" : "", action: () => send("drop", c) }));
+    }
     menuEl.classList.remove("hidden"); const mw = menuEl.offsetWidth; const mh = menuEl.offsetHeight; menuEl.style.left = Math.max(4, Math.min(x, window.innerWidth - mw - 4)) + "px"; menuEl.style.top = Math.max(4, Math.min(y, window.innerHeight - mh - 4)) + "px"; menuEl.onkeydown = (event) => { const buttons = menuButtons(); const index = buttons.indexOf(document.activeElement); if (event.key === "ArrowDown") { event.preventDefault(); focusMenu(index + 1); } else if (event.key === "ArrowUp") { event.preventDefault(); focusMenu(index - 1); } else if (event.key === "Home") { event.preventDefault(); focusMenu(0); } else if (event.key === "End") { event.preventDefault(); focusMenu(buttons.length - 1); } else if (event.key === "Escape") { event.preventDefault(); closeMenu(); } }; focusMenu(0);
   }
   function sendCompose(c, ai) { vscode.postMessage({ type: "openCompose", mode: "commit", hash: c.hash, ai, thenEdit: false }); }
   function send(type, c) { vscode.postMessage({ type, hash: c.hash }); }
   function closeMenu() { if (menuEl.classList.contains("hidden")) return; menuClosing = true; menuEl.classList.add("hidden"); menuEl.innerHTML = ""; const restore = menuRestoreFocus; menuRestoreFocus = null; restore?.focus?.(); menuClosing = false; }
-  document.addEventListener("click", (event) => { if (!menuEl.contains(event.target)) closeMenu(); }); document.addEventListener("contextmenu", (event) => { if (!event.target.closest(".commit")) closeMenu(); });
+  document.addEventListener("click", (event) => { if (!menuEl.contains(event.target)) closeMenu(); clearSelection(event); }); document.addEventListener("contextmenu", (event) => { if (!event.target.closest(".commit")) { closeMenu(); clearSelection(event); } });
   // Scroll can only close the DOM menu. It deliberately neither calls
   // postMessage nor persistUi; __grvUiTrace exposes that invariant to tests.
   document.addEventListener("scroll", () => { menuScrollCloseCount++; closeMenu(); }, true); window.addEventListener("resize", closeMenu);
@@ -437,6 +504,16 @@
 
   function persistUi() { vscode.setState({ filterText, changesMoreOpen, expandedLockedRuns: [...expandedLockedRuns] }); }
   function restoreUi() { const saved = vscode.getState(); if (!saved) return; filterText = typeof saved.filterText === "string" ? saved.filterText : ""; changesMoreOpen = !!saved.changesMoreOpen; (saved.expandedLockedRuns || []).forEach((key) => expandedLockedRuns.add(key)); }
+  // Commands must never steal IME input or normal typing in editable controls.
+  document.addEventListener("compositionstart", () => { isComposingInput = true; }, true);
+  document.addEventListener("compositionend", () => { isComposingInput = false; }, true);
+  document.addEventListener("keydown", (event) => {
+    const target = event.target;
+    const editable = target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target?.isContentEditable;
+    if (isComposingInput || event.isComposing || editable) {
+      if (event.key === " " || event.key === "ArrowUp" || event.key === "ArrowDown" || event.key === "Enter" || (event.altKey && (event.key === "ArrowUp" || event.key === "ArrowDown"))) event.stopPropagation();
+    }
+  }, true);
   window.addEventListener("message", (event) => {
     const m = event.data;
     if (m.type === "state") {
@@ -446,6 +523,7 @@
       state = m; render();
     } else if (m.type === "detail") showDetail(m);
     else if (m.type === "inlineToast") showInlineToast(m.message, m.duration);
+    else if (m.type === "closeMenu") closeMenu();
   });
   // Expose only a narrow trace hook for non-browser regression harnesses. It is
   // deliberately read-only and proves scroll closes menu without postMessage/state mutation.

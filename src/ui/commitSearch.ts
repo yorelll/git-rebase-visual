@@ -18,14 +18,45 @@ export type CommitSearchTerm =
  * hexadecimal notation but only compares the normalized real hash prefix.
  */
 export function parseCommitSearch(raw: string): CommitSearchTerm[] {
-  return raw.trim().split(/\s+/).filter(Boolean).map((token): CommitSearchTerm => {
-    const match = token.match(/^(author|msg|hash):(.+)$/i);
-    if (!match) return { field: "text", value: token.toLocaleLowerCase() };
-    const field = match[1].toLowerCase() as "author" | "msg" | "hash";
-    let value = match[2].toLocaleLowerCase();
+  const query = raw.trim();
+  if (!query) return [];
+
+  // A scoped value continues until the next known field. This permits natural
+  // queries such as `msg: feat parser author: Alice`, including the optional
+  // whitespace after `:` required by IMEs and normal typing. Unknown prefixes
+  // intentionally remain ordinary full-text tokens.
+  const markers = [...query.matchAll(/(?:^|\s)(author|msg|hash):\s*/gi)];
+  if (markers.length === 0) {
+    return query.split(/\s+/).filter(Boolean).map((value) => ({
+      field: "text" as const,
+      value: value.toLocaleLowerCase(),
+    }));
+  }
+
+  const terms: CommitSearchTerm[] = [];
+  const appendText = (value: string) => {
+    for (const token of value.trim().split(/\s+/)) {
+      if (token) terms.push({ field: "text", value: token.toLocaleLowerCase() });
+    }
+  };
+  appendText(query.slice(0, markers[0].index));
+
+  for (let index = 0; index < markers.length; index += 1) {
+    const marker = markers[index];
+    const field = marker[1].toLowerCase() as "author" | "msg" | "hash";
+    const valueStart = (marker.index ?? 0) + marker[0].length;
+    const valueEnd = index + 1 < markers.length ? markers[index + 1].index! : query.length;
+    let value = query.slice(valueStart, valueEnd).trim().toLocaleLowerCase();
+    if (!value) {
+      // A bare known prefix has no useful scoped meaning; preserve it as text
+      // instead of accidentally making every commit match an empty scope.
+      appendText(`${field}:`);
+      continue;
+    }
     if (field === "hash" && /^0x[0-9a-f]+$/i.test(value)) value = value.slice(2);
-    return { field, value };
-  });
+    terms.push({ field, value });
+  }
+  return terms;
 }
 
 export function matchesCommitSearch(commit: CommitSearchTarget, raw: string): boolean {

@@ -64,10 +64,15 @@ import {
   getCollapseLockedRuns,
   isLlmConfigured,
 } from "../config";
-import { SecretsAccessModule, fromSecretStorage } from "./secretsAccess";
 import { currentCommitSelection, rebaseProgressState } from "./rebaseState";
 import { branchContext } from "./rebasePresentation";
-import { getWorktreeChanges, stageWorktreeChange } from "../git/worktreeChanges";
+import {
+  deleteUntrackedWorktreeChange,
+  getWorktreeChanges,
+  restoreWorktreeChange,
+  stageWorktreeChange,
+} from "../git/worktreeChanges";
+import { allowedPausedRebaseMutation, webviewMessageIntent } from "./webviewProtocolState";
 import { openCommitFileDiff, openWorktreeDiff } from "./worktreeDiff";
 import { GitContentRequestStore } from "./gitDiffRequestState";
 import { applyCommitBinaryStatus, commitDiffPlan, parseCommitChangedFiles } from "./commitDiffState";
@@ -79,7 +84,6 @@ import { UndoJournal, UndoRecord, undoPreflight } from "../git/undo";
 
 const PENDING_STASH_KEY = "gitRebaseVisual.pendingStash";
 const PENDING_APPEND_KEY = "gitRebaseVisual.pendingAppend";
-const LLM_APIKEY_SECRET = "gitRebaseVisual.llmApiKey";
 let inlineToastSink: ((message: string, duration?: number) => void) | undefined;
 
 interface PendingAppend {
@@ -157,6 +161,11 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
       vscode.workspace.onDidDeleteFiles(() => this.scheduleRefresh()),
       vscode.workspace.onDidRenameFiles(() => this.scheduleRefresh()),
       vscode.workspace.onDidSaveTextDocument(() => this.scheduleRefresh()),
+      // An editor click lives outside the webview document. Public window/editor
+      // events are the only reliable bridge for dismissing an open webview menu.
+      vscode.window.onDidChangeActiveTextEditor(() => this.post({ type: "closeMenu", source: "host:activeEditor" })),
+      vscode.window.onDidChangeTextEditorSelection(() => this.post({ type: "closeMenu", source: "host:editorSelection" })),
+      vscode.window.onDidChangeWindowState(() => this.post({ type: "closeMenu", source: "host:windowState" })),
       new vscode.Disposable(() => {
         if (this.refreshTimer) {
           clearTimeout(this.refreshTimer);
@@ -475,30 +484,12 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async onMessage(m: FromWebview): Promise<void> {
-    const mutating = [
-      "reorder",
-      "drop",
-      "bulkDrop",
-      "bulkLock",
-      "rebaseTo",
-      "lock",
-      "unlock",
-      "openCompose",
-      "generate",
-      "apply",
-      "appendStaged",
-      "continueRebase",
-      "abortRebase",
-      "skipRebase",
-      "undo",
-      "showUndoHistory",
-      "squash",
-      "fixup",
-      "commitEditAmend",
-      "commitEditNew",
-      "bulkSquash",
-    ];
-    if (mutating.includes(m.type)) {
+    const source = typeof m.source === "string" ? m.source : "webview:unknown";
+    const intent = webviewMessageIntent(m.type);
+    // Source/action diagnostics make accidental webview traffic traceable while
+    // preserving a quiet host for scroll, pointer, focus, IME and toast events.
+    this.log("webview", `${source} action=${m.type} intent=${intent}`);
+    if (intent === "mutation") {
       if (this.busy) {
         toast("warn", "上一个操作尚未完成，请稍候。");
         return;
@@ -524,8 +515,10 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
       "copyHash",
       "copyMessage",
       "openDiff",
+      "generateDiff",
       "openWorktreeDiff",
       "stageFile",
+      "restoreFile",
       "requestDetail",
       "drop",
       "rebaseTo",
@@ -558,7 +551,7 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     // An edit stop may amend/create only after ensureEditStop verifies it below;
     // a conflict never gets those paths.
     if (cwd && (await isRebaseInProgress(cwd))) {
-      const allowed = new Set(["continueRebase", "abortRebase", "skipRebase", "commitEditAmend", "commitEditNew", "stageFile"]);
+      const allowed = new Set(["continueRebase", "abortRebase", "skipRebase", "commitEditAmend", "commitEditNew", "stageFile", "restoreFile"]);
       const draftOnlyCompose =
         m.type === "openCompose" &&
         isDraftOnlyComposeAllowedDuringRebase(m.mode, m.messageOnly === true);
@@ -576,7 +569,11 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
         m.type === "openCompose" && m.mode === "staged" && m.editKind === "new" && m.ai !== true;
       const editStopDraftCompose =
         m.type === "openCompose" && m.messageOnly === true && isDraftOnlyComposeAllowedDuringRebase(m.mode, true);
-      if (!allowed.has(m.type) && m.type !== "copyText" && m.type !== "openWorktreeDiff" && !draftOnlyCompose && !draftOnlyGeneration && !editStopCompose && !editStopNewCompose && !editStopDraftCompose) {
+      const pausedUnsafeMutation =
+        webviewMessageIntent(m.type) === "mutation" &&
+        !allowedPausedRebaseMutation(m.type) &&
+        !draftOnlyCompose && !draftOnlyGeneration && !editStopCompose && !editStopNewCompose && !editStopDraftCompose;
+      if (pausedUnsafeMutation) {
         const message = "变基进行中：此操作不能在当前暂停状态执行。";
         if (m.type === "apply") this.compose.post({ type: "applyFailed", message });
         vscode.window.showWarningMessage(message);
@@ -600,11 +597,23 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
         case "openDiff":
           await this.openCommitDiff(cwd!, m.hash);
           break;
+        case "generateDiff":
+          await this.generateCommitDiffDocument(cwd!, [m.hash]);
+          break;
+        case "bulkGenerateDiff": {
+          const hashes = this.selectedHashes(m.hashes);
+          if (!hashes) throw new Error("选择已过期；请刷新后重试。 ");
+          await this.generateCommitDiffDocument(cwd!, hashes);
+          break;
+        }
         case "openWorktreeDiff":
           await this.openChangedFileDiff(cwd!, m.path);
           break;
         case "stageFile":
           await this.stageChangedFile(cwd!, m.path);
+          break;
+        case "restoreFile":
+          await this.restoreChangedFile(cwd!, m.path, m.side, m.deleteUntracked === true);
           break;
         case "copyText":
           await vscode.env.clipboard.writeText(m.text ?? "");
@@ -646,11 +655,6 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
             return;
           }
           await this.lockCommits(cwd!, hashes);
-          await this.refresh();
-          break;
-        }
-        case "bulkSquash": {
-          await this.squashSelection(cwd!, m.hashes);
           await this.refresh();
           break;
         }
@@ -883,42 +887,6 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
       items: this.itemsWith((hash) => (selectedSet.has(hash) ? "drop" : undefined)),
       operation: commits.length === 1 ? "删除 commit (drop)" : `批量删除 ${commits.length} 个 commit`,
       affectedCount: commits.length,
-    });
-  }
-
-  /** Safely squash an exact contiguous selection into its first commit. */
-  private async squashSelection(cwd: string, value: unknown): Promise<void> {
-    const selected = this.selectedHashes(value);
-    if (!selected || selected.length < 2) {
-      toast("warn", "请选择至少两个当前 commit 以批量 squash。 ");
-      return;
-    }
-    const ordered = [...this.commits].reverse();
-    const indexes = selected.map((hash) => ordered.findIndex((commit) => commit.hash === hash)).sort((a, b) => a - b);
-    if (indexes.some((index) => index < 0) || indexes.some((index, i) => i > 0 && index !== indexes[i - 1] + 1)) {
-      toast("warn", "批量 squash 只接受连续的完整选择；不会猜测跨越隐藏 commit 的顺序。 ");
-      return;
-    }
-    if (indexes[0] === 0 || indexes.some((index) => this.lockedHashes.has(ordered[index].hash))) {
-      toast("warn", "首个 commit 或任何已锁定 commit 不能参与批量 squash。 ");
-      return;
-    }
-    const selectedSet = new Set(selected);
-    const names = indexes.map((index) => ordered[index].shortHash).join("、");
-    const confirmation = await vscode.window.showWarningMessage(
-      `将连续的 ${selected.length} 个 commit（${names}）合并为一个 commit，并改写后续历史。继续吗？`,
-      { modal: true },
-      "批量 Squash"
-    );
-    if (confirmation !== "批量 Squash") return;
-    const rechecked = this.selectedHashes(selected);
-    if (!rechecked || rechecked.length !== selected.length) {
-      throw new Error("确认期间选择已变化；未执行批量 squash。 ");
-    }
-    await this.runRebase(cwd, {
-      items: this.itemsWith((hash) => selectedSet.has(hash) && hash !== ordered[indexes[0]].hash ? "squash" : undefined),
-      operation: `批量 squash ${selected.length} 个 commit`,
-      affectedCount: ordered.length - indexes[0],
     });
   }
 
@@ -2023,6 +1991,40 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     await this.refresh();
   }
 
+  /** Restores only the displayed side after webview-side explicit confirmation. */
+  private async restoreChangedFile(
+    cwd: string,
+    pathValue: unknown,
+    sideValue: unknown,
+    deleteUntracked: boolean
+  ): Promise<void> {
+    if (typeof pathValue !== "string" || (sideValue !== "working" && sideValue !== "staged")) {
+      throw new Error("缺少要恢复的文件状态。 ");
+    }
+    const change = (await getWorktreeChanges(cwd)).find((item) => item.path === pathValue);
+    if (!change) throw new Error("文件状态已变化；请刷新后重试。 ");
+    if (deleteUntracked) {
+      const confirm = await vscode.window.showWarningMessage(
+        `删除未跟踪文件 ${change.path}？此操作会从磁盘永久删除，Git 不能恢复。`,
+        { modal: true },
+        "删除文件"
+      );
+      if (confirm !== "删除文件") return;
+      await deleteUntrackedWorktreeChange(cwd, change);
+      toast("info", `已删除未跟踪文件 ${change.path}。`);
+    } else {
+      const side = sideValue as "working" | "staged";
+      const action = side === "working" ? "丢弃该文件未暂存的工作区改动" : "撤销该文件的暂存（工作区内容保留）";
+      const confirm = await vscode.window.showWarningMessage(
+        `${action}：${change.path}？`, { modal: true }, "确认恢复"
+      );
+      if (confirm !== "确认恢复") return;
+      await restoreWorktreeChange(cwd, change, side);
+      toast("info", side === "working" ? `已恢复工作区文件 ${change.path}。` : `已撤销暂存 ${change.path}；工作区内容未改变。`);
+    }
+    await this.refresh();
+  }
+
   /**
    * Opens an actual parent-to-commit two-sided Diff. The webview can request
    * only a currently rendered full hash; Git resolves parents/files afresh and
@@ -2076,6 +2078,47 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     }
     const result = await openCommitFileDiff(this.diffRequests, cwd, plan.parent, plan.commit, file!);
     if (result.fallback) toast("warn", result.fallback);
+  }
+
+  /**
+   * Generates a plain, read-only document from an exact current snapshot. This
+   * intentionally differs from `vscode.diff`: selected commits are concatenated
+   * oldest-first and do not imply a continuous revision range.
+   */
+  private async generateCommitDiffDocument(cwd: string, hashes: readonly string[]): Promise<void> {
+    const selected = this.selectedHashes(hashes);
+    if (!selected) throw new Error("Diff 选择已失效；请刷新后重试。 ");
+    const order = [...this.commits].reverse();
+    const selectedSet = new Set(selected);
+    const commits = order.filter((commit) => selectedSet.has(commit.hash));
+    if (commits.length !== selected.length) throw new Error("Diff 选择不完整；未生成文档。 ");
+
+    const maxChars = 2_000_000;
+    let output = commits.length > 1
+      ? `# Git Rebase Visual: ${commits.length} 个已选择 commit 的 Diff\n\n按当前时间轴从早到晚拼接；选择不是连续范围时，不包含中间未选择的 commit。\n\n`
+      : `# Git Rebase Visual: ${commits[0].shortHash} 的 Diff\n\n`;
+    let truncated = false;
+    for (const commit of commits) {
+      const result = await runGit(["show", "--binary", "--find-renames", "--format=fuller", "--no-ext-diff", commit.hash], {
+        cwd,
+        maxBuffer: maxChars * 2,
+      });
+      if (result.code !== 0) throw new Error(result.stderr || result.stdout || `无法生成 ${commit.shortHash} 的 Diff。`);
+      const chunk = result.stdout;
+      if (output.length + chunk.length > maxChars) {
+        const remaining = Math.max(0, maxChars - output.length);
+        output += chunk.slice(0, remaining);
+        truncated = true;
+        break;
+      }
+      output += chunk;
+      if (!output.endsWith("\n")) output += "\n";
+    }
+    if (truncated) output += `\n\n[输出已在 ${maxChars.toLocaleString()} 字符处截断；二进制内容仅以 Git binary patch 形式表示。]\n`;
+    else output += "\n[说明：二进制文件由 Git 以 binary patch 或摘要表示。]\n";
+    const document = await vscode.workspace.openTextDocument({ language: "diff", content: output });
+    await vscode.window.showTextDocument(document, { preview: true });
+    toast("info", truncated ? "已生成 Diff 文档（输出已截断）。" : "已生成只读 Diff 文档。 ");
   }
 
   private async sendDetail(cwd: string, hash: string): Promise<void> {
@@ -2252,16 +2295,8 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
       }
     }
 
-    // Show a hint when the user is pushing to a review ref while the API key is
-    // only stored in settings (not yet migrated to SecretStorage) — the key may
-    // be absent from the pushed ref's configured authentication.
-    const secretApiKey = await SecretsAccessModule.get().get(LLM_APIKEY_SECRET);
-    const reviewHint =
-      /:refs\/for\//.test(refspec) && isLlmConfigured() && !secretApiKey
-        ? "\n（提示：LLM API key 仍保存在 settings 中；若评审推送依赖该凭据，建议迁移到 SecretStorage。）"
-        : "";
     const confirm = await vscode.window.showWarningMessage(
-      `${label}？（${refspec}）${reviewHint}`,
+      `${label}？（${refspec}）`,
       { modal: true },
       "Push"
     );

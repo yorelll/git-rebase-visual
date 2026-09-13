@@ -144,38 +144,61 @@ button, .grip, .dot, .lock-icon, .stopped-badge {
 .change-file {
   display: flex;
   align-items: center;
-  gap: 5px;
+  gap: 6px;
   min-width: 0;
-  padding: 3px 0 3px 5px;
+  padding: 3px 3px 3px 5px;
   border-left: 2px solid var(--vscode-panel-border);
 }
 
+.change-file:hover { background: var(--vscode-list-hoverBackground); }
+
 .change-file .file-open {
   flex: 1 1 auto;
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
   min-width: 0;
   overflow: hidden;
+  padding: 1px 0;
+  border: 0;
   text-align: left;
+  color: var(--vscode-foreground);
+  background: transparent;
+  cursor: pointer;
+}
+
+.change-file .file-name {
+  overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: var(--vscode-textLink-foreground);
+}
+
+.change-file .file-path {
+  flex: 0 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--vscode-descriptionForeground);
+  font-size: 10px;
 }
 
 .change-file .file-state {
-  flex: 0 0 auto;
-  font: 10px var(--vscode-editor-font-family, monospace);
-  color: var(--vscode-descriptionForeground);
+  flex: 0 0 13px;
+  width: 13px;
+  font: 700 11px var(--vscode-editor-font-family, monospace);
+  text-align: center;
 }
+.change-file .file-state-modify { color: var(--vscode-editorWarning-foreground, var(--vscode-charts-yellow)); }
+.change-file .file-state-add, .change-file .file-state-untracked { color: var(--vscode-gitDecoration-addedResourceForeground, var(--vscode-testing-iconPassed)); }
+.change-file .file-state-delete { color: var(--vscode-gitDecoration-deletedResourceForeground, var(--vscode-errorForeground)); }
+.change-file .file-state-rename { color: var(--vscode-gitDecoration-renamedResourceForeground, var(--vscode-charts-blue)); }
+.change-file .file-state-unmerged { color: var(--vscode-editorError-foreground, var(--vscode-errorForeground)); }
 
-.change-file .file-stage {
-  flex: 0 0 auto;
-  padding: 2px 6px;
-}
-
-.change-file .file-staged {
-  flex: 0 0 auto;
-  font-size: 10.5px;
-  color: var(--vscode-testing-iconPassed, var(--vscode-descriptionForeground));
-}
+.file-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 2px; opacity: 0; }
+.change-file:hover .file-actions, .change-file:focus-within .file-actions { opacity: 1; }
+.file-action { min-width: 21px; padding: 1px 4px; font: 12px var(--vscode-editor-font-family, monospace); }
+.change-file .file-staged { flex: 0 0 auto; font-size: 10.5px; color: var(--vscode-testing-iconPassed, var(--vscode-descriptionForeground)); }
+@media (hover: none) { .file-actions { opacity: 1; } }
 
 .direction,
 .timeline-end {
@@ -438,17 +461,25 @@ button, .grip, .dot, .lock-icon, .stopped-badge {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  font-size: 9px;
+  font-size: 8px;
   font-weight: 700;
   line-height: 1;
   color: var(--vscode-editor-background);
-  background: hsl(var(--author-hue, 0) 58% 45%);
+  background: var(--author-color, var(--vscode-charts-blue));
   border: 1px solid var(--vscode-contrastBorder, var(--vscode-focusBorder));
 }
-
-@media (prefers-color-scheme: dark) {
-  .commit .dot { background: hsl(var(--author-hue, 0) 58% 62%); color: var(--vscode-editor-background); }
-}
+.commit .dot.author-0 { --author-color: var(--vscode-charts-blue); }
+.commit .dot.author-1 { --author-color: var(--vscode-charts-green); }
+.commit .dot.author-2 { --author-color: var(--vscode-charts-purple); }
+.commit .dot.author-3 { --author-color: var(--vscode-charts-orange); }
+.commit .dot.author-4 { --author-color: var(--vscode-charts-red); }
+.commit .dot.author-5 { --author-color: var(--vscode-charts-yellow); }
+.commit .dot.author-6 { --author-color: var(--vscode-gitDecoration-addedResourceForeground, var(--vscode-charts-green)); }
+.commit .dot.author-7 { --author-color: var(--vscode-gitDecoration-renamedResourceForeground, var(--vscode-charts-blue)); }
+.commit .dot.author-8 { --author-color: var(--vscode-debugTokenExpression-string, var(--vscode-charts-purple)); }
+.commit .dot.author-9 { --author-color: var(--vscode-debugTokenExpression-number, var(--vscode-charts-orange)); }
+.commit .dot.author-10 { --author-color: var(--vscode-terminal-ansiBrightCyan, var(--vscode-charts-blue)); }
+.commit .dot.author-11 { --author-color: var(--vscode-terminal-ansiBrightMagenta, var(--vscode-charts-purple)); }
 
 @media (forced-colors: active) {
   .commit .dot { background: Canvas; color: CanvasText; border: 1px solid CanvasText; }

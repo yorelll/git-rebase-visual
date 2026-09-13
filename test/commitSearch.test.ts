@@ -15,6 +15,9 @@ test("commit search scopes author/msg/hash, normalizes hash 0x, and falls back f
   assert.deepEqual(parseCommitSearch("author:王 msg:中文 hash:0x8e12"), [
     { field: "author", value: "王" }, { field: "msg", value: "中文" }, { field: "hash", value: "8e12" },
   ]);
+  assert.deepEqual(parseCommitSearch("msg: feat 支持中文 author: 王"), [
+    { field: "msg", value: "feat 支持中文" }, { field: "author", value: "王" },
+  ]);
   assert.equal(matchesCommitSearch(commit, "author:王 msg:中文 hash:0x8e12"), true);
   assert.equal(matchesCommitSearch(commit, "hash:0x8e1234"), true);
   assert.equal(matchesCommitSearch(commit, "hash:0x1234"), false);

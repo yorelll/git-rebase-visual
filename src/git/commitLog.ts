@@ -17,14 +17,18 @@ export async function currentUserEmail(cwd: string): Promise<string | undefined>
   return email || undefined;
 }
 
-/** A stable, non-cryptographic author color seed; labels/initials remain available for non-color users. */
+/**
+ * A stable classic palette index rather than an arbitrary hue. The webview
+ * assigns a readable theme-token-compatible swatch and always pairs it with an
+ * initial/author label, so color never carries identity by itself.
+ */
 export function authorColorKey(email: string): string {
   let value = 2166136261;
   for (const char of email.toLowerCase()) {
     value ^= char.charCodeAt(0);
     value = Math.imul(value, 16777619);
   }
-  return String(Math.abs(value >>> 0) % 360);
+  return String((value >>> 0) % 12);
 }
 
 export type RangeConfig =
