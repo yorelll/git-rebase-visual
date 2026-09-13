@@ -5,7 +5,8 @@
   // rebase warning.
   const sourceForAction = (type) => {
     if (["reorder"].includes(type)) return "webview:reorder";
-    if (["requestDetail", "openDiff", "openWorktreeDiff", "copyHash", "copyMessage", "copyText"].includes(type)) return "webview:read";
+    if (["stageFile", "restoreFile"].includes(type)) return "webview:worktree-mutation";
+    if (["requestDetail", "openDiff", "generateDiff", "bulkGenerateDiff", "openWorktreeDiff", "copyHash", "copyMessage", "copyText"].includes(type)) return "webview:read";
     if (["ready", "refresh"].includes(type)) return "webview:lifecycle";
     return "webview:ui";
   };
@@ -30,7 +31,9 @@
   let filterText = "";
   let selectedHashes = new Set();
   let selectionAnchor = null;
-  let keyboardPickupHash = null;
+  // Keyboard pickup is a drag session too: keep its immutable canonical
+  // snapshot until Enter/Escape rather than reinterpreting it after refresh.
+  let keyboardPickup = null;
   const expandedLockedRuns = new Set();
   let changesMoreOpen = false;
   let inlineToastTimer = null;
@@ -247,12 +250,24 @@
     // they will replay, and all reordering remains disabled during a rebase.
     return (state.activeHash && (c.hash.startsWith(state.activeHash) || state.activeHash.startsWith(c.hash))) || commitIsStopped(c) || selectedHashes.has(c.hash);
   }
+  function authorIdentity(c) {
+    return `${c.author || ""}${c.authorEmail || ""}`.replace(/[^\p{L}\p{N}]/gu, "") || "?";
+  }
   function authorLabel(c) {
     const initial = c.authorInitial || "?";
-    const visible = state.commits.filter((item) => (item.authorInitial || "?") === initial && item.authorColorKey === c.authorColorKey);
-    if (visible.length <= 1) return initial;
-    const compact = (c.author || c.authorEmail || "?").replace(/[^\p{L}\p{N}]/gu, "");
-    return compact.slice(0, 2) || initial;
+    // In High Contrast, forced colors collapse palette distinctions. Give each
+    // distinct same-initial identity its shortest unique text prefix instead of
+    // relying on its palette key (or a fixed two-character prefix that can also
+    // collide, e.g. Alice/Alicia).
+    const visible = state.commits.filter((item) => (item.authorInitial || "?") === initial);
+    const identity = authorIdentity(c);
+    const identities = [...new Set(visible.map(authorIdentity))];
+    if (identities.length <= 1) return initial;
+    for (let length = 2; length <= identity.length; length++) {
+      const label = identity.slice(0, length);
+      if (identities.every((other) => other === identity || !other.startsWith(label))) return label;
+    }
+    return identity;
   }
   function lockedRunKey(commits) { return commits.map((c) => c.hash).join(":"); }
   function runSummary(commits) {
@@ -280,7 +295,7 @@
     let composing = false;
     let compositionFinalValue = null;
     const applySearch = () => {
-      filterText = search.value; keyboardPickupHash = null; persistUi(); renderList();
+      filterText = search.value; keyboardPickup = null; persistUi(); renderList();
       const current = listEl.querySelector(".commit-search"); current?.focus();
       current?.setSelectionRange(search.selectionStart || 0, search.selectionEnd || 0);
     };
@@ -331,17 +346,24 @@
     summary.setAttribute("aria-label", `${runSummary(commits)}；拖入上半部插入 run 前，拖入下半部插入 run 后`);
     summary.addEventListener("dragover", (event) => { if (!drag || drag.filter || state.rebaseInProgress) return; event.preventDefault(); const after = isAfter(event, summary); clearDropMarkers(); details.classList.toggle("drop-before", !after); details.classList.toggle("drop-after", after); setDragHint(`将 ${short(drag.sourceHash)} 移动到锁定区 ${after ? "之后" : "之前"}`); });
     summary.addEventListener("dragleave", () => details.classList.remove("drop-before", "drop-after"));
-    summary.addEventListener("drop", (event) => { if (!drag || drag.filter || state.rebaseInProgress) return; event.preventDefault(); const after = isAfter(event, summary); details.classList.remove("drop-before", "drop-after"); const source = drag.sourceHash; endDrag(false); reorder(source, after ? commits.at(-1).hash : commits[0].hash, after); });
+    summary.addEventListener("drop", (event) => {
+      if (!drag || drag.filter || state.rebaseInProgress) return;
+      event.preventDefault();
+      const after = isAfter(event, summary);
+      details.classList.remove("drop-before", "drop-after");
+      completeDrag({ anchorHash: after ? commits.at(-1).hash : commits[0].hash, after });
+    });
     details.appendChild(summary); commits.forEach((c) => details.appendChild(commitRow(c))); return details;
   }
 
   function commitRow(c) {
     const row = document.createElement("div"); const pending = commitIsPending(c); const stopped = commitIsStopped(c); const selected = selectedHashes.has(c.hash); const index = state.commits.indexOf(c) + 1;
-    row.className = `commit${c.locked ? " locked" : ""}${pending ? " pending" : ""}${stopped ? " stopped" : ""}${selected ? " selected" : ""}${keyboardPickupHash === c.hash ? " keyboard-pickup" : ""}`;
+    row.className = `commit${c.locked ? " locked" : ""}${pending ? " pending" : ""}${stopped ? " stopped" : ""}${selected ? " selected" : ""}${keyboardPickup?.sourceHash === c.hash ? " keyboard-pickup" : ""}`;
     row.dataset.hash = c.hash; row.tabIndex = 0; row.setAttribute("role", "option"); row.setAttribute("aria-selected", String(selected));
     row.setAttribute("aria-label", `第 ${index} 项，共 ${state.commits.length} 项，${c.subject}，${short(c.hash)}，${c.author}${c.locked ? "，已锁定" : ""}${pending ? "，待重放" : ""}${stopped ? "，变基停靠于此" : ""}。选择后可按 Alt+上/下 移动一位。`);
     const grip = document.createElement("span"); grip.className = "grip"; grip.textContent = "⋮⋮"; grip.title = isFilterActive() ? "过滤中无法重排，请先清空搜索。" : c.locked ? "已锁定的 commit 不能拖动。" : "拖拽重排；顶部较早，底部较新"; grip.setAttribute("aria-hidden", "true"); grip.draggable = !state.rebaseInProgress && !isFilterActive() && !c.locked;
-    const dot = document.createElement("span"); dot.className = `dot author-${c.authorColorKey || "0"}`; dot.textContent = authorLabel(c); dot.title = `${c.author} <${c.authorEmail || "unknown"}>${c.isCurrentAuthor === false ? "（非当前作者）" : c.isCurrentAuthor === "unknown" ? "（当前作者未知）" : "（当前作者）"}`;
+    const authorDotLabel = authorLabel(c);
+    const dot = document.createElement("span"); dot.className = `dot author-${c.authorColorKey || "0"}${authorDotLabel.length > 1 ? " author-label-two" : ""}`; dot.textContent = authorDotLabel; dot.title = `${c.author} <${c.authorEmail || "unknown"}>${c.isCurrentAuthor === false ? "（非当前作者）" : c.isCurrentAuthor === "unknown" ? "（当前作者未知）" : "（当前作者）"}`;
     const content = document.createElement("div"); content.className = "commit-content";
     const subject = document.createElement("span"); subject.className = "subject"; subject.textContent = c.subject;
     const meta = document.createElement("span"); meta.className = "commit-meta"; meta.textContent = `${short(c.hash)}${pending ? "*（待重放）" : ""} · ${c.author} · ${c.date}`; content.append(subject, meta);
@@ -372,9 +394,9 @@
     });
     grip.addEventListener("pointerup", (event) => {
       if (!drag || drag.pointerId !== event.pointerId) return;
-      const target = pointerTarget(event); const source = drag.sourceHash; endDrag(false);
-      if (target) { announce(`将 ${short(source)} 移动到 ${short(target.hash)} ${target.after ? "之后" : "之前"}；等待确认。`); reorder(source, target.hash, target.after); }
-      else clearDragHint();
+      const target = pointerTarget(event);
+      if (target) completeDrag({ anchorHash: target.hash, after: target.after });
+      else endDrag();
     });
     grip.addEventListener("pointercancel", (event) => { if (drag?.pointerId === event.pointerId) endDrag(); });
     grip.addEventListener("dragstart", (event) => {
@@ -383,8 +405,16 @@
     });
     grip.addEventListener("dragend", () => { row.classList.remove("dragging"); endDrag(); });
     row.addEventListener("dragover", (event) => { if (!drag || isFilterActive() || state.rebaseInProgress) return; event.preventDefault(); clearDropMarkers(); const after = isAfter(event, row); row.classList.add(after ? "drop-after" : "drop-before"); setDragHint(`将 ${short(drag.sourceHash)} 移动到 ${short(c.hash)} ${after ? "之后" : "之前"}`); });
-    row.addEventListener("drop", (event) => { if (!drag || isFilterActive() || state.rebaseInProgress || drag.sourceHash === c.hash) return; event.preventDefault(); const after = isAfter(event, row); const source = drag.sourceHash; endDrag(false); reorder(source, c.hash, after); });
-    row.addEventListener("contextmenu", (event) => { event.preventDefault(); openMenu(event.clientX, event.clientY, c, row); });
+    row.addEventListener("drop", (event) => {
+      if (!drag || isFilterActive() || state.rebaseInProgress || drag.sourceHash === c.hash) return;
+      event.preventDefault();
+      completeDrag({ anchorHash: c.hash, after: isAfter(event, row) });
+    });
+    row.addEventListener("contextmenu", (event) => {
+      event.preventDefault();
+      selectContextTarget(c);
+      openMenu(event.clientX, event.clientY, c, row);
+    });
     row.addEventListener("click", (event) => selectRow(event, c));
     row.addEventListener("keydown", (event) => rowKeydown(event, c));
     row.addEventListener("mouseenter", () => scheduleTooltip(c, row)); row.addEventListener("mouseleave", cancelTooltip);
@@ -405,45 +435,117 @@
     state.activeHash = c.hash;
     renderList();
   }
+  function selectContextTarget(c) {
+    // A context menu is either for the existing selection containing its target
+    // or for that one target. Do this before menu construction so destructive
+    // batch actions can never refer to rows unrelated to the pointer.
+    if (!selectedHashes.has(c.hash)) {
+      selectedHashes.clear();
+      selectionAnchor = c.hash;
+    }
+    state.activeHash = c.hash;
+    renderList();
+  }
   function clearSelection(event) {
     if (event.target.closest(".commit") || event.target.closest(".list-controls")) return;
     if (selectedHashes.size) { selectedHashes.clear(); selectionAnchor = null; renderList(); }
   }
   function rowKeydown(event, c) {
-    if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) { event.preventDefault(); const r = event.currentTarget.getBoundingClientRect(); openMenu(r.left + 8, r.bottom, c, event.currentTarget); return; }
+    if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) { event.preventDefault(); selectContextTarget(c); const r = event.currentTarget.getBoundingClientRect(); openMenu(r.left + 8, r.bottom, c, event.currentTarget); return; }
     if ((event.ctrlKey || event.metaKey) && event.key === " ") { event.preventDefault(); selectRow({ ctrlKey: true, target: event.currentTarget }, c); return; }
     if (event.altKey && (event.key === "ArrowUp" || event.key === "ArrowDown")) {
       event.preventDefault();
       if (state.rebaseInProgress || isFilterActive() || c.locked) {
         announce(state.rebaseInProgress ? "变基进行中，不能重排。" : isFilterActive() ? "过滤中无法重排，请先清空搜索。" : "已锁定的 commit 不能移动。"); return;
       }
-      // A click/keyboard focus selects the source; then construct a complete,
-      // one-step canonical intent. The host still asks for confirmation.
+      // Alt arrows construct a one-step intent from the key event's immutable
+      // snapshot. A refresh that follows cannot change what this key meant.
       selectedHashes.clear(); selectionAnchor = c.hash; state.activeHash = c.hash;
-      const order = [...state.canonicalOrder]; const sourceAt = order.indexOf(c.hash); const direction = event.key === "ArrowUp" ? -1 : 1; const anchor = order[sourceAt + direction];
+      const session = { sourceHash: c.hash, revision: state.canonicalRevision, canonicalOrder: [...state.canonicalOrder] };
+      const sourceAt = session.canonicalOrder.indexOf(c.hash); const direction = event.key === "ArrowUp" ? -1 : 1; const anchor = session.canonicalOrder[sourceAt + direction];
       if (!anchor) { announce(`已在${direction < 0 ? "最早" : "最新"}位置，不能继续移动。`); renderList(); return; }
-      const proposed = [...order]; proposed.splice(sourceAt, 1); const destination = proposed.indexOf(anchor); proposed.splice(destination + (direction > 0 ? 1 : 0), 0, c.hash);
       announce(`将 ${short(c.hash)} 移动一位；等待宿主确认。`);
-      vscode.postMessage({ type: "reorder", sourceHash: c.hash, anchorHash: anchor, placement: direction < 0 ? "before" : "after", revision: state.canonicalRevision, order: proposed }); renderList(); return;
+      postReorderFromSession(session, anchor, direction > 0); renderList(); return;
     }
     if (state.rebaseInProgress || isFilterActive() || c.locked) return;
-    if (event.key === " ") { event.preventDefault(); keyboardPickupHash = keyboardPickupHash ? null : c.hash; announce(keyboardPickupHash ? `已拾取 ${short(c.hash)}；使用箭头选择位置，Enter 放下。` : "已取消移动。"); renderList(); return; }
-    if (!keyboardPickupHash) return;
-    if (event.key === "Escape") { event.preventDefault(); keyboardPickupHash = null; renderList(); return; }
-    if (event.key === "Enter" && keyboardPickupHash !== c.hash) { event.preventDefault(); const source = keyboardPickupHash; keyboardPickupHash = null; reorder(source, c.hash, false); }
+    if (event.key === " ") {
+      event.preventDefault();
+      keyboardPickup = keyboardPickup
+        ? null
+        : { sourceHash: c.hash, revision: state.canonicalRevision, canonicalOrder: [...state.canonicalOrder] };
+      announce(keyboardPickup ? `已拾取 ${short(c.hash)}；使用箭头选择位置，Enter 放下。` : "已取消移动。");
+      renderList();
+      return;
+    }
+    if (!keyboardPickup) return;
+    if (event.key === "Escape") {
+      event.preventDefault();
+      keyboardPickup = null;
+      renderList();
+      return;
+    }
+    if (event.key === "Enter" && keyboardPickup.sourceHash !== c.hash) {
+      event.preventDefault();
+      const session = keyboardPickup;
+      keyboardPickup = null;
+      postReorderFromSession(session, c.hash, false);
+      renderList();
+    }
   }
   function isAfter(event, target) { const r = target.getBoundingClientRect(); return event.clientY > r.top + r.height / 2; }
   function clearDropMarkers() { document.querySelectorAll(".commit.drop-before,.commit.drop-after,.locked-run.drop-before,.locked-run.drop-after").forEach((el) => el.classList.remove("drop-before", "drop-after")); }
-  function endDrag(clear = true) { document.querySelectorAll(".commit.dragging").forEach((row) => row.classList.remove("dragging")); drag = null; clearDropMarkers(); if (clear) clearDragHint(); if (deferredState) { state = deferredState; deferredState = null; render(); } }
-  function reorder(sourceHash, anchorHash, after) {
-    if (!sourceHash || isFilterActive() || state.rebaseInProgress || !state.canonicalOrder?.length) return;
-    const order = [...state.canonicalOrder]; const sourceAt = order.indexOf(sourceHash); const anchorAt = order.indexOf(anchorHash);
-    if (sourceAt < 0 || anchorAt < 0 || sourceHash === anchorHash) return;
-    order.splice(sourceAt, 1); let destination = order.indexOf(anchorHash); order.splice(destination + (after ? 1 : 0), 0, sourceHash);
-    vscode.postMessage({ type: "reorder", sourceHash, anchorHash, placement: after ? "after" : "before", revision: state.canonicalRevision, order });
+  function applyDeferredState() {
+    if (!deferredState) return;
+    state = deferredState;
+    deferredState = null;
+    render();
+  }
+  function endDrag(clear = true, applyDeferred = true) {
+    document.querySelectorAll(".commit.dragging").forEach((row) => row.classList.remove("dragging"));
+    drag = null;
+    clearDropMarkers();
+    if (clear) clearDragHint();
+    if (applyDeferred) applyDeferredState();
+  }
+  function postReorderFromSession(session, anchorHash, after) {
+    if (!session || !session.sourceHash || !Array.isArray(session.canonicalOrder)) return false;
+    const order = [...session.canonicalOrder];
+    const sourceAt = order.indexOf(session.sourceHash);
+    const anchorAt = order.indexOf(anchorHash);
+    if (sourceAt < 0 || anchorAt < 0 || session.sourceHash === anchorHash) return false;
+    order.splice(sourceAt, 1);
+    const destination = order.indexOf(anchorHash);
+    order.splice(destination + (after ? 1 : 0), 0, session.sourceHash);
+    vscode.postMessage({
+      type: "reorder",
+      sourceHash: session.sourceHash,
+      anchorHash,
+      placement: after ? "after" : "before",
+      revision: session.revision,
+      order,
+    });
+    return true;
+  }
+  function completeDrag(target) {
+    const session = drag;
+    // Build and post the intent before applying any deferred refresh. The host
+    // validates this original revision/order and rejects an expired session.
+    const posted = target && postReorderFromSession(session, target.anchorHash, target.after);
+    const source = session?.sourceHash;
+    endDrag(true, false);
+    if (posted) announce(`将 ${short(source)} 移动到 ${short(target.anchorHash)} ${target.after ? "之后" : "之前"}；等待确认。`);
+    applyDeferredState();
   }
 
   function selectedMultiple() { return selectedHashes.size >= 2; }
+  function selectedHashesAreContiguous() {
+    if (selectedHashes.size < 2) return true;
+    const indexes = state.canonicalOrder
+      .map((hash, index) => selectedHashes.has(hash) ? index : -1)
+      .filter((index) => index >= 0);
+    return indexes.length === selectedHashes.size &&
+      indexes.at(-1) - indexes[0] + 1 === selectedHashes.size;
+  }
   function menuItem(item) {
     const el = document.createElement("button"); el.type = "button"; el.className = "item" + (item.disabled ? " disabled" : "") + (item.danger ? " danger" : ""); el.setAttribute("role", "menuitem"); el.tabIndex = -1;
     el.innerHTML = `<span class="menu-icon" aria-hidden="true">${item.icon || ""}</span><span>${item.label}</span>${item.shortcut ? `<kbd>${item.shortcut}</kbd>` : ""}`;
@@ -469,10 +571,11 @@
         menuItem({ icon: "⌑", label: "合并到上一个 (squash)", disabled: true, disabledReason: "已选择多个 commit；不支持批量 squash，以避免跨越隐藏提交或合并语义不明确。" }),
         menuItem({ icon: "⌑", label: "合并到上一个，丢弃 message (fixup)", disabled: true, disabledReason })
       );
-      menuEl.append(sep(), group("查看"), menuItem({ icon: "▤", label: "生成 Diff…", action: () => vscode.postMessage({ type: "bulkGenerateDiff", hashes: [...selectedHashes] }) }), sep(), group("保护"), menuItem({ icon: "🔒", label: "批量锁定 commit", action: () => vscode.postMessage({ type: "bulkLock", hashes: [...selectedHashes] }) }), sep(), group("危险操作"), menuItem({ icon: "⌫", label: "批量删除 commit", danger: true, action: () => vscode.postMessage({ type: "bulkDrop", hashes: [...selectedHashes] }) }));
+      const contiguous = selectedHashesAreContiguous();
+      menuEl.append(sep(), group("查看"), menuItem({ icon: "▤", label: "生成 Diff…", disabled: !contiguous, disabledReason: "仅支持连续 commit；请取消未连续选择或使用单项 Diff。", action: () => vscode.postMessage({ type: "bulkGenerateDiff", hashes: [...selectedHashes], revision: state.canonicalRevision }) }), sep(), group("保护"), menuItem({ icon: "🔒", label: "批量锁定 commit", action: () => vscode.postMessage({ type: "bulkLock", hashes: [...selectedHashes] }) }), sep(), group("危险操作"), menuItem({ icon: "⌫", label: "批量删除 commit", danger: true, action: () => vscode.postMessage({ type: "bulkDrop", hashes: [...selectedHashes] }) }));
     } else {
       menuEl.append(group("查看"));
-      menuEl.append(menuItem({ icon: "⧉", label: "复制 hash", action: () => send("copyHash", c) }), menuItem({ icon: "⧉", label: "复制 message", action: () => send("copyMessage", c) }), menuItem({ icon: "◫", label: "打开变更…", action: () => send("openDiff", c) }), menuItem({ icon: "▤", label: "生成 Diff…", action: () => send("generateDiff", c) }), sep(), group("变基与编辑"));
+      menuEl.append(menuItem({ icon: "⧉", label: "复制 hash", action: () => send("copyHash", c) }), menuItem({ icon: "⧉", label: "复制 message", action: () => send("copyMessage", c) }), menuItem({ icon: "◫", label: "打开变更…", action: () => send("openDiff", c) }), menuItem({ icon: "▤", label: "生成 Diff…", action: () => vscode.postMessage({ type: "generateDiff", hash: c.hash, revision: state.canonicalRevision }) }), sep(), group("变基与编辑"));
       menuEl.append(menuItem({ icon: "✎", label: "编辑 message…", shortcut: "Enter", action: () => sendCompose(c, false) }), menuItem({ icon: "✦", label: "AI 生成 message…", disabled: !state.llmConfigured, disabledReason: "请先配置 LLM。", action: () => sendCompose(c, true) }), menuItem({ icon: "⧉", label: "追加暂存区", disabled: c.locked || !state.hasStaged || state.rebaseInProgress, disabledReason: c.locked ? "目标已锁定。" : !state.hasStaged ? "暂存区为空。" : "变基进行中。", action: () => send("appendStaged", c) }));
       const position = state.commits.indexOf(c); const predecessor = state.commits[position - 1]; const blocked = position <= 0 || c.locked || predecessor?.locked || state.rebaseInProgress;
       const reason = position <= 0 ? "第一个 commit 不能合并到前驱。" : c.locked || predecessor?.locked ? "当前 commit 或前驱已锁定。" : state.rebaseInProgress ? "变基进行中。" : "";
@@ -527,6 +630,14 @@
   });
   // Expose only a narrow trace hook for non-browser regression harnesses. It is
   // deliberately read-only and proves scroll closes menu without postMessage/state mutation.
-  window.__grvUiTrace = () => ({ menuScrollCloseCount, menuClosing, dragging: !!drag, deferredRefresh: !!deferredState, filterText });
+  window.__grvUiTrace = () => ({
+    menuScrollCloseCount,
+    menuClosing,
+    dragging: !!drag,
+    deferredRefresh: !!deferredState,
+    filterText,
+    selectedHashes: [...selectedHashes],
+    activeHash: state.activeHash,
+  });
   restoreUi(); renderDirection(); vscode.postMessage({ type: "ready" });
 })();

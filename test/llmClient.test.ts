@@ -5,20 +5,64 @@ import { chat, LlmConfig, streamChat } from "../src/llm/client";
 
 const messages = [{ role: "user" as const, content: "test" }];
 
+// Fetch deliberately blocks these ports to avoid cross-protocol attacks. Windows
+// may allocate them from its dynamic range when a test listens on port 0.
+const fetchForbiddenPorts = new Set([
+  1, 7, 9, 11, 13, 15, 17, 19, 20, 21, 22, 23, 25, 37, 42, 43, 53,
+  69, 77, 79, 87, 95, 101, 102, 103, 104, 109, 110, 111, 113, 115, 117,
+  119, 123, 135, 137, 139, 143, 161, 179, 389, 427, 465, 512, 513, 514,
+  515, 526, 530, 531, 532, 540, 548, 554, 556, 563, 587, 601, 636, 989,
+  990, 993, 995, 1719, 1720, 1723, 2049, 3659, 4045, 4190, 4333, 6566,
+  6665, 6666, 6667, 6668, 6669, 6679, 6697, 10080,
+]);
+
+export function isFetchSafeTestPort(port: number): boolean {
+  return Number.isInteger(port) && port > 0 && !fetchForbiddenPorts.has(port);
+}
+
+async function closeServer(server: http.Server): Promise<void> {
+  await new Promise<void>((resolve, reject) =>
+    server.close((error) => error ? reject(error) : resolve())
+  );
+}
+
+async function listenOnFetchSafePort(server: http.Server): Promise<number> {
+  // OS assignment remains useful for parallel test runs; inspect and retry if it
+  // selected one of Fetch's forbidden ports before any client request is made.
+  for (let attempt = 0; attempt < 64; attempt++) {
+    await new Promise<void>((resolve, reject) => {
+      const onError = (error: Error) => { server.off("listening", onListening); reject(error); };
+      const onListening = () => { server.off("error", onError); resolve(); };
+      server.once("error", onError);
+      server.once("listening", onListening);
+      server.listen(0, "127.0.0.1");
+    });
+    const address = server.address();
+    assert.ok(address && typeof address !== "string");
+    if (isFetchSafeTestPort(address.port)) return address.port;
+    await closeServer(server);
+  }
+  throw new Error("Unable to allocate a Fetch-safe test port.");
+}
+
 async function withServer(
   handler: http.RequestListener,
   run: (cfg: LlmConfig) => Promise<void>
 ): Promise<void> {
   const server = http.createServer(handler);
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const address = server.address();
-  assert.ok(address && typeof address !== "string");
+  const port = await listenOnFetchSafePort(server);
   try {
-    await run({ baseUrl: `http://127.0.0.1:${address.port}`, apiKey: "secret", model: "test" });
+    await run({ baseUrl: `http://127.0.0.1:${port}`, apiKey: "secret", model: "test" });
   } finally {
-    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    if (server.listening) await closeServer(server);
   }
 }
+
+test("LLM test server excludes Fetch forbidden ports", () => {
+  assert.equal(isFetchSafeTestPort(6667), false);
+  assert.equal(isFetchSafeTestPort(10080), false);
+  assert.equal(isFetchSafeTestPort(18080), true);
+});
 
 test("streamChat yields SSE deltas and ignores malformed events", async () => {
   await withServer((_, res) => {

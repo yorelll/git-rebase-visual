@@ -72,9 +72,17 @@ import {
   restoreWorktreeChange,
   stageWorktreeChange,
 } from "../git/worktreeChanges";
-import { allowedPausedRebaseMutation, webviewMessageIntent } from "./webviewProtocolState";
+import { requiresCurrentCommitHash, webviewMessageIntent } from "./webviewProtocolState";
+import { mutationGateDecision } from "./mutationGate";
 import { openCommitFileDiff, openWorktreeDiff } from "./worktreeDiff";
 import { GitContentRequestStore } from "./gitDiffRequestState";
+import { GeneratedDiffSnapshotStore } from "./generatedDiffDocument";
+import { generatedDiffUri } from "./generatedDiffProvider";
+import {
+  buildGeneratedDiffSnapshot,
+  generatedDiffCommits,
+  generatedDiffRequestIsCurrent,
+} from "./generatedDiffState";
 import { applyCommitBinaryStatus, commitDiffPlan, parseCommitChangedFiles } from "./commitDiffState";
 import { ensureEditStopTarget, writeEditStopCommit } from "./editStopCommit";
 import { validateReorderRequest } from "./rebaseReorderState";
@@ -114,6 +122,8 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
   private busy = false;
   private refreshQueued = false;
   private refreshGeneration = 0;
+  /** Revision of the last fully published commit snapshot. */
+  private canonicalRevision = 0;
   /** Stable IDs distinguish Compose targets without coupling them to refreshes. */
   private readonly composeTargetRevisions = new Map<string, number>();
   private nextComposeTargetRevision = 1;
@@ -139,7 +149,8 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
   constructor(
     private readonly ctx: vscode.ExtensionContext,
     private readonly locks: LockStore,
-    private readonly diffRequests: GitContentRequestStore
+    private readonly diffRequests: GitContentRequestStore,
+    private readonly generatedDiffSnapshots: GeneratedDiffSnapshotStore
   ) {
     this.output = vscode.window.createOutputChannel("Git Rebase Visual");
     this.undo = new UndoJournal(ctx.workspaceState, ctx.globalState);
@@ -151,6 +162,7 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     ctx.subscriptions.push(this.output, this.statusBar, this.compose, new vscode.Disposable(() => {
       if (inlineToastSink) inlineToastSink = undefined;
       this.commitDiffCache.clear();
+      this.generatedDiffSnapshots.clear();
     }));
     ctx.subscriptions.push(
       vscode.workspace.onDidChangeConfiguration((event) => {
@@ -270,6 +282,7 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     }
     if (this.root && this.root !== root) {
       this.diffRequests.invalidateRepository(this.root);
+      this.generatedDiffSnapshots.invalidateRepository(this.root);
       this.commitDiffCache.clear();
     }
     this.root = root;
@@ -405,6 +418,7 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
       return;
     }
     this.commits = commits;
+    this.canonicalRevision = generation;
     this.lockedHashes = new Set(
       commits.filter((commit) => lockedFlags.get(commit.hash)).map((commit) => commit.hash)
     );
@@ -436,7 +450,7 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
         worktreeKind: change.worktreeKind,
         conflicted: change.conflicted,
       })),
-      canonicalRevision: generation,
+      canonicalRevision: this.canonicalRevision,
       canonicalOrder: ordered.map((commit) => commit.hash),
       commits: ordered.map((c) => ({
         hash: c.hash,
@@ -489,11 +503,12 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     // Source/action diagnostics make accidental webview traffic traceable while
     // preserving a quiet host for scroll, pointer, focus, IME and toast events.
     this.log("webview", `${source} action=${m.type} intent=${intent}`);
+    const gate = mutationGateDecision(m.type, { busy: this.busy, pausedRebase: false });
+    if (gate.kind === "busy") {
+      toast("warn", "上一个操作尚未完成，请稍候。");
+      return;
+    }
     if (intent === "mutation") {
-      if (this.busy) {
-        toast("warn", "上一个操作尚未完成，请稍候。");
-        return;
-      }
       this.busy = true;
       try {
         await this.handleMessage(m);
@@ -511,29 +526,9 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
 
   private async handleMessage(m: FromWebview): Promise<void> {
     const cwd = this.cwd();
-    const hashActions = new Set([
-      "copyHash",
-      "copyMessage",
-      "openDiff",
-      "generateDiff",
-      "openWorktreeDiff",
-      "stageFile",
-      "restoreFile",
-      "requestDetail",
-      "drop",
-      "rebaseTo",
-      "lock",
-      "unlock",
-      "appendStaged",
-    ]);
-    // At an edit stop, the exact stopped SHA is valid target context even when
-    // the branch-range projection is temporarily unavailable/detached.
-    const editStopCompose =
-      m.type === "openCompose" && m.mode === "commit" && m.thenEdit === true && typeof m.hash === "string";
-    const requiresCurrentCommit =
-      hashActions.has(m.type) ||
-      ((m.type === "openCompose" || m.type === "apply") && m.mode === "commit" && !editStopCompose);
-    if (requiresCurrentCommit && !this.isCurrentCommitHash(m.hash)) {
+    // Worktree actions identify a path instead of a commit and revalidate that
+    // path against a fresh porcelain status read in their own handlers.
+    if (requiresCurrentCommitHash(m) && !this.isCurrentCommitHash(m.hash)) {
       const message = "commit 列表已更新，请刷新后重试。";
       if (m.type === "apply") {
         this.compose.post({ type: "applyFailed", message });
@@ -551,7 +546,8 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     // An edit stop may amend/create only after ensureEditStop verifies it below;
     // a conflict never gets those paths.
     if (cwd && (await isRebaseInProgress(cwd))) {
-      const allowed = new Set(["continueRebase", "abortRebase", "skipRebase", "commitEditAmend", "commitEditNew", "stageFile", "restoreFile"]);
+      // `stageFile` and `restoreFile` are explicit pause-policy entries. Their
+      // mutation classification above ensures they are still serialized by busy.
       const draftOnlyCompose =
         m.type === "openCompose" &&
         isDraftOnlyComposeAllowedDuringRebase(m.mode, m.messageOnly === true);
@@ -569,10 +565,15 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
         m.type === "openCompose" && m.mode === "staged" && m.editKind === "new" && m.ai !== true;
       const editStopDraftCompose =
         m.type === "openCompose" && m.messageOnly === true && isDraftOnlyComposeAllowedDuringRebase(m.mode, true);
-      const pausedUnsafeMutation =
-        webviewMessageIntent(m.type) === "mutation" &&
-        !allowedPausedRebaseMutation(m.type) &&
-        !draftOnlyCompose && !draftOnlyGeneration && !editStopCompose && !editStopNewCompose && !editStopDraftCompose;
+      const pausedException =
+        draftOnlyCompose || draftOnlyGeneration || editStopCompose || editStopNewCompose || editStopDraftCompose;
+      // Reuse the actual gate policy: stage/restore are explicit allow-list
+      // writes, while draft/edit-stop exceptions remain intentionally narrow.
+      const pausedUnsafeMutation = mutationGateDecision(
+        m.type,
+        { busy: false, pausedRebase: true },
+        { pausedException }
+      ).kind === "blockedPaused";
       if (pausedUnsafeMutation) {
         const message = "变基进行中：此操作不能在当前暂停状态执行。";
         if (m.type === "apply") this.compose.post({ type: "applyFailed", message });
@@ -598,12 +599,12 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
           await this.openCommitDiff(cwd!, m.hash);
           break;
         case "generateDiff":
-          await this.generateCommitDiffDocument(cwd!, [m.hash]);
+          await this.generateCommitDiffDocument(cwd!, [m.hash], m.revision);
           break;
         case "bulkGenerateDiff": {
           const hashes = this.selectedHashes(m.hashes);
           if (!hashes) throw new Error("选择已过期；请刷新后重试。 ");
-          await this.generateCommitDiffDocument(cwd!, hashes);
+          await this.generateCommitDiffDocument(cwd!, hashes, m.revision);
           break;
         }
         case "openWorktreeDiff":
@@ -2085,40 +2086,39 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
    * intentionally differs from `vscode.diff`: selected commits are concatenated
    * oldest-first and do not imply a continuous revision range.
    */
-  private async generateCommitDiffDocument(cwd: string, hashes: readonly string[]): Promise<void> {
-    const selected = this.selectedHashes(hashes);
-    if (!selected) throw new Error("Diff 选择已失效；请刷新后重试。 ");
-    const order = [...this.commits].reverse();
-    const selectedSet = new Set(selected);
-    const commits = order.filter((commit) => selectedSet.has(commit.hash));
-    if (commits.length !== selected.length) throw new Error("Diff 选择不完整；未生成文档。 ");
-
-    const maxChars = 2_000_000;
-    let output = commits.length > 1
-      ? `# Git Rebase Visual: ${commits.length} 个已选择 commit 的 Diff\n\n按当前时间轴从早到晚拼接；选择不是连续范围时，不包含中间未选择的 commit。\n\n`
-      : `# Git Rebase Visual: ${commits[0].shortHash} 的 Diff\n\n`;
-    let truncated = false;
-    for (const commit of commits) {
+  private async generateCommitDiffDocument(
+    cwd: string,
+    hashes: readonly string[],
+    revision: unknown
+  ): Promise<void> {
+    if (revision !== this.canonicalRevision) {
+      throw new Error("Diff 选择已失效；commit 列表已刷新。 ");
+    }
+    const commits = generatedDiffCommits(this.commits, hashes);
+    if (!commits) throw new Error("Diff 选择已失效；请刷新后重试。 ");
+    const snapshot = await buildGeneratedDiffSnapshot(commits, async (commit) => {
       const result = await runGit(["show", "--binary", "--find-renames", "--format=fuller", "--no-ext-diff", commit.hash], {
         cwd,
-        maxBuffer: maxChars * 2,
+        maxBuffer: 4_000_000,
       });
       if (result.code !== 0) throw new Error(result.stderr || result.stdout || `无法生成 ${commit.shortHash} 的 Diff。`);
-      const chunk = result.stdout;
-      if (output.length + chunk.length > maxChars) {
-        const remaining = Math.max(0, maxChars - output.length);
-        output += chunk.slice(0, remaining);
-        truncated = true;
-        break;
-      }
-      output += chunk;
-      if (!output.endsWith("\n")) output += "\n";
+      return result.stdout;
+    });
+    if (!generatedDiffRequestIsCurrent(
+      commits,
+      this.commits,
+      hashes,
+      revision,
+      this.canonicalRevision
+    )) {
+      throw new Error("Diff 生成期间 commit 列表已变化；未打开过期文档。 ");
     }
-    if (truncated) output += `\n\n[输出已在 ${maxChars.toLocaleString()} 字符处截断；二进制内容仅以 Git binary patch 形式表示。]\n`;
-    else output += "\n[说明：二进制文件由 Git 以 binary patch 或摘要表示。]\n";
-    const document = await vscode.workspace.openTextDocument({ language: "diff", content: output });
+    // A private virtual-document URI is read-only. It holds this exact string
+    // snapshot rather than re-running Git when the document is later opened.
+    const uri = generatedDiffUri(this.generatedDiffSnapshots, cwd, snapshot.content);
+    const document = await vscode.workspace.openTextDocument(uri);
     await vscode.window.showTextDocument(document, { preview: true });
-    toast("info", truncated ? "已生成 Diff 文档（输出已截断）。" : "已生成只读 Diff 文档。 ");
+    toast("info", snapshot.truncated ? "已生成只读 Diff 文档（输出已截断）。" : "已生成只读 Diff 文档。");
   }
 
   private async sendDetail(cwd: string, hash: string): Promise<void> {

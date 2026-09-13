@@ -2,7 +2,7 @@
 
 ## 基线、范围与验证
 
-- 基线：v0.6.3（`f4045ea`）。本次不修改 package version、release 文档、`docs/review/` 或任何 `suggestion*.md`。
+- 基线：v0.6.3（`f4045ea`）。本次不修改 package version、release 文档或任何 `suggestion*.md`；正式评审后的版本化 `docs/review/` 报告、回复和台账按项目流程新增。
 - 输入：review3/review4 的六张截图、既有三轮建议与 0.5.0、0.6.0、0.6.3 裁决记录。
 - 所有 Git 写入继续在 extension host 重新读取状态、验证完整 hash/当前快照并要求确认；webview 只表达用户意图。
 
@@ -15,7 +15,7 @@
 - [x] 多选时复制、编辑、AI、停靠、squash/fixup、左右 Diff 都禁用，并明确说明“已选择 N 个 commit”。
 - [ ] 不支持批量 squash/fixup。
   - 原因：跨越未选或过滤隐藏 commit 时，合并前驱和最终 message 的语义不可预测；只接受连续区间仍会让批量操作与单 commit 的锁/前驱保护模型混淆。拒绝该操作避免以猜测顺序改写历史，不是以实现难度为由。
-- [x] 单 commit 右键始终依据右击目标产生 copy/message/lock 等动作；正常点击留下的是 active context，不能挟持右键目标。
+- [x] 单 commit 右键始终依据右击目标产生 copy/message/lock 等动作；正常点击留下的是 active context，不能挟持右键目标。修正 review R70-2：右击未选行会先原子清空旧多选、把该行作为 active/single target；右击已选行保留当前批量选择。`test/webviewDom.test.ts` 覆盖 A+B→右击 C、已选行右击、空白清选和批量菜单禁用项。
 
 ## 2. 搜索和中文 IME
 
@@ -31,12 +31,12 @@
 - [x] hover/focus 显示三个紧凑操作：working/untracked 的 stage `+`、安全 restore `↶`、open/diff `↗`；文件名点击与 open 都走现有公开 `vscode.diff` 左右 Diff。
 - [x] staged 一侧显示“已暂存”且没有 stage 操作；同一文件两侧分别列在 Staged Changes 和 Changes。
 - [x] restore 拆分为 working（index → working，丢弃未暂存变更）与 staged（HEAD → index，保留工作区）并有 webview 与 host 双确认；untracked 不会自动删除，只有明确的删除确认才调用安全的仓库内路径删除。
-- [x] edit stop 中保留相同文件区、stage、diff、restore 能力。host paused guard 把 stage/restore 作为这个已声明安全区域的允许动作。
+- [x] edit stop 中保留相同文件区、stage、diff、restore 能力。修正 review R70-3：`stageFile`/`restoreFile` 均按真实 Git/index/worktree/disk 写入分类为 `mutation`，先进入 host `busy` 串行化，再由实际调用的 paused allow-list 明确允许 edit-stop 文件操作；不再依赖分类漏网。`test/mutationGate.test.ts` 和 `test/webviewProtocolState.test.ts` 覆盖允许、串行化、unsafe write 拒绝和 read/UI 流量无告警。
 - [x] 测试：`test/worktreeChanges.integration.test.ts` 真实 Git 覆盖 modify/add/delete/rename/untracked、路径空格/方括号、single-file stage、RM、working 与 staged restore 分离及 untracked 删除保护。
 
 ## 4. 重排和 Alt
 
-- [x] grip 维持至少 28px，真实 DOM pointer fallback 包含 pointer capture、elementFromPoint hit testing、插入反馈和 deferred refresh；native DnD 与 pointer intent 都构造 canonical complete order，并由 host revision/hash/lock 验证。
+- [x] grip 维持至少 28px，真实 DOM pointer fallback 包含 pointer capture、elementFromPoint hit testing、插入反馈和 deferred refresh；native DnD 与 pointer intent 都构造 canonical complete order，并由 host revision/hash/lock 验证。修正 review R70-1：pointer/native drop 在应用 deferred state 前，从 drag session 的 immutable revision/canonical order 构造并发送 intent；因此 host 可在任何确认或 Git 写入前拒绝过期 session。`test/webviewDom.test.ts` 真实执行 webview handler，覆盖 start→deferred changed order/revision→pointerup 与 native drop payload。
 - [x] Alt+Up/Down 在单一 active commit 上构造一步 canonical reorder，并在 host 进行历史重写确认。
 - [x] rebase、过滤、locked、输入/IME 都阻止该快捷键；多选不会作为 Alt 重排来源。
 
@@ -50,31 +50,30 @@
 ## 6. 作者视觉
 
 - [x] author email hash 映射为 12 个离散 classic/theme palette token，而不是任意 HSL；dot 内始终有 author initial，title 包含完整作者/email/当前作者状态。
-- [x] 同一可见列表 initial 且 palette 碰撞时升级为两个字符；身份从不只由颜色表达。
-- [ ] 没有声称已完成 High Contrast Dark/Light 的人工逐屏视觉验收。
+- [x] 同一可见列表中 author initial 相同的不同身份使用最短唯一文本前缀（不少于两个字符），不再仅在 palette key 相同才升级；因此 High Contrast/forced-colors 折叠 palette 后，点内仍保留可区分文本而不依赖颜色。
+- [ ] 尚未完成 High Contrast Dark/Light 的人工逐屏视觉验收。
   - 原因：自动 Node/compile 环境无法启动真实 VS Code 主题；代码使用 VS Code tokens/forced-colors fallback，发布前仍应人工验收。这是事实边界，不是拒绝无障碍工作。
 
 ## 7. 生成 Diff
 
-- [x] 右键新增“生成 Diff…”。单选用该 commit；多选按当前 oldest-first 时间轴拼接精确 selected commits，并在只读 `diff` 文档中打开，用户可复制或另存。
-- [x] 文档明确非连续选择不是 revision range，不含中间未选择 commit；不替代“打开变更”的 parent ↔ commit `vscode.diff`。
-- [x] host 以完整当前 hash selection 重验。调用 `git show --binary --find-renames --no-ext-diff`，标明 binary patch/摘要，并在 2,000,000 字符截断时写入明确说明。
+- [x] 右键新增“生成 Diff…”。单选用该 commit；多选仅在当前 canonical timeline 中构成无空洞连续区间时可用，按 oldest-first 拼接精确 selected commits，并在只读 `diff` 文档中打开，用户可复制或另存。修正 review R70-4：内容改由扩展私有 `git-rebase-visual-generated-diff:` `TextDocumentContentProvider` 的 opaque snapshot URI 提供，不再创建 editable `untitled:` 文档。
+- [x] 非连续多选的“生成 Diff…”菜单项会 disabled 并说明仅支持连续 commit；host 也独立拒绝 gapped/stale/unknown/duplicate payload，不能绕过 UI 生成离散 patch 串接。它不替代“打开变更”的 parent ↔ commit `vscode.diff`。
+- [x] host 以完整当前 hash selection 和连续区间重验。调用 `git show --binary --find-renames --no-ext-diff`，标明 binary patch/摘要，并在 2,000,000 字符截断时写入明确说明。snapshot store 有 repository scope、TTL、LRU、生命周期 cleanup，并冻结生成内容；生成前后重验 canonical revision，refresh 时不发布过期 snapshot；`test/generatedDiffDocument.test.ts`、`test/generatedDiffState.test.ts` 和 `test/webviewDom.test.ts` 覆盖 provider 输入安全属性、host contiguous rejection 和菜单 disabled 行为。
 
 ## 8. rebase paused 时的频繁系统提示
 
 - [x] 所有 main webview postMessage 带 source/action；host Output 记录 source、action、intent，便于开发诊断追踪。
 - [x] paused guard 只对 explicit unsafe mutation 出 warning。refresh、scroll、pointer、focus、selection、composition、toast 和 read-only Diff 不会触发 mutation warning。
 - [x] polling refresh 仍只发送 state；pointer drag deferred refresh 仍不发 host mutation；menu scroll 仅关闭 DOM 菜单。
-- [x] 测试：`test/webviewProtocolState.test.ts` 覆盖 paused state 下 refresh/pointer/selection/composition/toast/read traffic 无 mutation/warning、host closeMenu 和 unsafe reorder 唯一成为 warning candidate。
+- [x] 测试：`test/webviewProtocolState.test.ts` 覆盖 paused state 下 refresh/pointer/selection/composition/toast/read traffic 无 mutation/warning、host closeMenu、stage/restore allow-list 和 unsafe reorder warning candidate；`test/mutationGate.test.ts` 覆盖 host busy gate。
 
 ## 自动验证
 
 | 命令 | 结果 |
 | --- | --- |
-| `npm run typecheck` | 通过 |
-| `npm test` | 首次全套执行 104/106 通过；新增功能相关 9/9 通过。另有既有 `llmClient` deadline 测试在此 Windows/Undici 环境以 `fetch failed: bad port` 失败，早于请求超时，和本次改动无关。 |
-| `npm run compile` | 通过 |
-| `git diff --check` | 通过，无空白错误 |
+| `npm run typecheck` / focused generated-Diff, DOM, protocol tests / `node --check media/main.js` | 最终状态通过。 |
+| `npm test` | 119/119 通过，约 377 秒；shared `withServer()` safe-port retry 已消除 Windows/Undici forbidden-port LLM deadline flaky。 |
+| `npm run compile` / `git diff --check` | 最终状态通过。 |
 
 ## 发布前人工走查
 
@@ -83,3 +82,10 @@
 3. staged/working/delete/rename/untracked 的 Diff 与 restore 确认文案。
 4. 编辑器区点击关闭右键菜单，High Contrast Dark/Light 下作者 palette、状态字母和 focus ring。
 5. 二进制和超大 multi-commit Diff 的 Git 输出说明与截断可见性。
+
+### 修正提交自动验证（待独立复核）
+
+- `npm run typecheck`、focused generated-Diff/DOM/protocol tests、`node --check media/main.js`：最终状态通过。
+- `npm test`：119/119 通过（约 377 秒）。
+- `npm run compile`、`git diff --check`：最终状态通过。
+- `npx tsx --test test/llmClient.test.ts` 连续 8 次：每次 7/7 通过；shared server helper 会重试避开 Fetch forbidden ports。

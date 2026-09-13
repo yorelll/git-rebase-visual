@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { WebviewProtocolState } from "../src/ui/webviewProtocolState";
+import {
+  WebviewProtocolState,
+  allowedPausedRebaseMutation,
+  requiresCurrentCommitHash,
+  webviewMessageIntent,
+} from "../src/ui/webviewProtocolState";
 
 test("scroll closes a menu without posting a host mutation or persisting state", () => {
   const view = new WebviewProtocolState();
@@ -30,6 +35,32 @@ test("paused-rebase UI/read traffic is traced but never becomes a warning mutati
   assert.equal(trace.hostCloseCount, 1);
   assert.equal(trace.menuOpen, false);
   assert.equal(trace.sources.length, 6);
+});
+
+test("worktree Diff, stage, and restore route by path rather than a commit hash", () => {
+  for (const type of ["openWorktreeDiff", "stageFile", "restoreFile"]) {
+    assert.equal(
+      requiresCurrentCommitHash({ type, path: "nested/file.txt" }),
+      false,
+      `${type} must reach its fresh porcelain-path validation without m.hash`
+    );
+  }
+  assert.equal(requiresCurrentCommitHash({ type: "openDiff", hash: "a".repeat(40) }), true);
+  assert.equal(requiresCurrentCommitHash({ type: "generateDiff", hash: "a".repeat(40) }), true);
+});
+
+test("stage and restore are serialized mutations explicitly allowed at an edit stop", () => {
+  assert.equal(webviewMessageIntent("stageFile"), "mutation");
+  assert.equal(webviewMessageIntent("restoreFile"), "mutation");
+  assert.equal(allowedPausedRebaseMutation("stageFile"), true);
+  assert.equal(allowedPausedRebaseMutation("restoreFile"), true);
+
+  const view = new WebviewProtocolState();
+  view.observe("stageFile", "worktree", true);
+  view.observe("restoreFile", "worktree", true);
+  const trace = view.snapshot();
+  assert.equal(trace.mutationCount, 2);
+  assert.equal(trace.warningCount, 0);
 });
 
 test("paused-rebase unsafe writes alone count as warning candidates", () => {

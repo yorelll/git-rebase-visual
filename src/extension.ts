@@ -3,16 +3,22 @@ import { RebaseViewProvider } from "./ui/rebaseViewProvider";
 import { LockStore } from "./lock/lockStore";
 import { GitContentProvider, gitContentScheme } from "./ui/worktreeDiff";
 import { createGitContentRequestStore } from "./ui/gitDiffRequestState";
+import { createGeneratedDiffSnapshotStore } from "./ui/generatedDiffDocument";
+import { GeneratedDiffProvider, generatedDiffScheme } from "./ui/generatedDiffProvider";
 
 export function activate(context: vscode.ExtensionContext): void {
   const locks = new LockStore(context.globalState);
   const diffRequests = createGitContentRequestStore();
-  const provider = new RebaseViewProvider(context, locks, diffRequests);
+  const generatedDiffSnapshots = createGeneratedDiffSnapshotStore();
+  const provider = new RebaseViewProvider(context, locks, diffRequests, generatedDiffSnapshots);
   const contentProvider = new GitContentProvider(diffRequests);
+  const generatedDiffProvider = new GeneratedDiffProvider(generatedDiffSnapshots);
 
   context.subscriptions.push(
     contentProvider,
+    generatedDiffProvider,
     vscode.workspace.registerTextDocumentContentProvider(gitContentScheme, contentProvider),
+    vscode.workspace.registerTextDocumentContentProvider(generatedDiffScheme, generatedDiffProvider),
     vscode.window.registerWebviewViewProvider(
       RebaseViewProvider.viewType,
       provider

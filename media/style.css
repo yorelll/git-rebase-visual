@@ -468,6 +468,14 @@ button, .grip, .dot, .lock-icon, .stopped-badge {
   background: var(--author-color, var(--vscode-charts-blue));
   border: 1px solid var(--vscode-contrastBorder, var(--vscode-focusBorder));
 }
+
+/* Same-initial author labels use two characters. Let their text fit without
+ * making the single-initial timeline marker noticeably wider. */
+.commit .dot.author-label-two {
+  width: max-content;
+  min-width: 17px;
+  padding: 0 2px;
+}
 .commit .dot.author-0 { --author-color: var(--vscode-charts-blue); }
 .commit .dot.author-1 { --author-color: var(--vscode-charts-green); }
 .commit .dot.author-2 { --author-color: var(--vscode-charts-purple); }

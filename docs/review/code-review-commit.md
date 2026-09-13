@@ -31,6 +31,7 @@
 | `fba41f8d1ce1fbe351bd6c35ac0f234064d96e17` | `fix: harden 0.6.2 rebase interactions` | [`code-review-0-6-2.md`](code-review-0-6-2.md) | [`review-response-0-6-2.md`](review-response-0-6-2.md) | 已评审；locked continuity/Undo 修正 | 2026-09-10 | 保留正常 locked replay 的 patch-id 语义。 |
 | `03c05065fbaf5c50b274acdf46295608a6831e38` | `fix: harden 0.6.2 rebase interactions` | [`code-review-0-6-2.md`](code-review-0-6-2.md) | [`review-response-0-6-2.md`](review-response-0-6-2.md) | 已评审；共同祖先审计修正 | 2026-09-10 | 避免 locked patch continuity 审计假阳性。 |
 | `828bd4cfa7e62e4dc90f5c3b899c3d0ebde72992` | `feat: implement 0.6.3 rebase interactions` | [`code-review-0-6-3.md`](code-review-0-6-3.md) | [`review-response-0-6-3.md`](review-response-0-6-3.md) — 0-6-3 回复 | 已回复；R63-1、R63-5 已提交整改，待独立复核 | 2026-09-12 | 评审发现两个 P1；整改实现不自动构成已审查 commit。 |
+| `40d5dd3ceda710ba253c9624cc827af99b462f49` | `feat: implement 0.7 rebase interactions` | [`code-review-0-7-0.md`](code-review-0-7-0.md) | [`review-response-0-7-0.md`](review-response-0-7-0.md) — 0-7-0 回复 | 已回复；R70-1 至 R70-8 已提交整改，待独立复核 | 2026-09-13 | 基线为 v0.6.3 `f4045ea9163014389ef0406cae4d56bd527d9ddf`；修正 commit 不自动视为已评审，须由独立后续报告覆盖。 |
 
 ## 待评审 Commit
 
