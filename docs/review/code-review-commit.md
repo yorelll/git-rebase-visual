@@ -33,6 +33,7 @@
 | `828bd4cfa7e62e4dc90f5c3b899c3d0ebde72992` | `feat: implement 0.6.3 rebase interactions` | [`code-review-0-6-3.md`](code-review-0-6-3.md) | [`review-response-0-6-3.md`](review-response-0-6-3.md) — 0-6-3 回复 | 已回复；R63-1、R63-5 已提交整改，待独立复核 | 2026-09-12 | 评审发现两个 P1；整改实现不自动构成已审查 commit。 |
 | `40d5dd3ceda710ba253c9624cc827af99b462f49` | `feat: implement 0.7 rebase interactions` | [`code-review-0-7-0.md`](code-review-0-7-0.md) | [`review-response-0-7-0.md`](review-response-0-7-0.md) — 0-7-0 回复 | 已回复；R70-1 至 R70-8 已提交整改，待独立复核 | 2026-09-13 | 基线为 v0.6.3 `f4045ea9163014389ef0406cae4d56bd527d9ddf`；修正 commit 不自动视为已评审，须由独立后续报告覆盖。 |
 | `ed9c11c9f7b886b90908d41071a284a4dac3f704` | `fix: address 0.7 interaction review findings` | [`code-review-0-7-1.md`](code-review-0-7-1.md) | [`review-response-0-7-1.md`](review-response-0-7-1.md) — 0-7-1 回复 | 已评审；R70-1 至 R70-5 通过，R71-1 P1 已提交整改，待独立复核 | 2026-09-13 | 本报告确认前序整改有效但发现 Fetch forbidden-port 集合遗漏 5060/5061；本次整改 commit 不自动视为已评审。 |
+| `147f76b6e9c8d240ebd9b78cdd617a59dd7533e8` | `fix: complete LLM safe port policy` | [`code-review-0-7-2.md`](code-review-0-7-2.md) | [`review-response-0-7-2.md`](review-response-0-7-2.md) — 0-7-2 回复 | 已评审；R72-1 P1 已提交整改，待独立复核 | 2026-09-13 | 本报告发现 Fetch Standard bad-port table 遗漏 6000、set 不是精确标准集合；本次整改 commit 不自动视为已评审。 |
 
 ## 待评审 Commit
 

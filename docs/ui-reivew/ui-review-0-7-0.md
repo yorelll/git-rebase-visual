@@ -72,7 +72,7 @@
 | 命令 | 结果 |
 | --- | --- |
 | `npm run typecheck` / focused generated-Diff, DOM, protocol tests / `node --check media/main.js` | 最终状态通过。 |
-| `npm test` | 初始整改时为 119/119 通过，约 377 秒；随后 0.7.1 复核发现 safe-port set 漏掉 5060/5061。R71-1 整改后为 120/120 通过，约 382 秒；shared `withServer()` 的 safe-port retry 现以 Fetch/URL Standard 完整 bad-port table 核对并回归验证。 |
+| `npm test` | 初始整改时为 119/119 通过，约 377 秒；0.7.1 复核发现 safe-port set 漏掉 5060/5061，R71-1 整改后为 120/120 通过，约 382 秒。0.7.2 再发现 Fetch Standard table 漏掉 6000 且 set 包含非标准 4333；R72-1 已改为与标准完整表精确相等（含 0/6000、不含 4333）并完成新的全量回归。 |
 | `npm run compile` / `git diff --check` | 最终状态通过。 |
 
 ## 发布前人工走查
@@ -86,6 +86,6 @@
 ### 修正提交自动验证（待独立复核）
 
 - `npm run typecheck`、focused generated-Diff/DOM/protocol tests、`node --check media/main.js`：最终状态通过。
-- `npm test`：119/119 通过（约 377 秒）。
+- 初始修正提交时 `npm test`：119/119 通过（约 377 秒）；每次后续整改都重新运行全量测试。
 - `npm run compile`、`git diff --check`：最终状态通过。
-- `npx tsx --test test/llmClient.test.ts` 连续 12 次：每次 8/8 通过；shared server helper 会重试避开 Fetch/URL Standard 完整 forbidden-port 集合，并以真实 listen → close → retry 回归覆盖 5060。
+- R72-1 后 `npx tsx --test test/llmClient.test.ts` 连续 12 次均通过；shared server helper 与 Fetch Standard 完整 bad-port table 精确一致（含 0、5060、5061、6000、6667、10080；不含 4333），并以真实 listen → close → retry 回归覆盖 6000。

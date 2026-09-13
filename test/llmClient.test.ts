@@ -7,17 +7,19 @@ const messages = [{ role: "user" as const, content: "test" }];
 
 // Fetch deliberately blocks these ports to avoid cross-protocol attacks. Windows
 // may allocate them from its dynamic range when a test listens on port 0.
+// The Fetch Standard bad-port table is the policy source of truth:
+// https://fetch.spec.whatwg.org/#port-blocking
 const fetchForbiddenPorts = new Set([
-  1, 7, 9, 11, 13, 15, 17, 19, 20, 21, 22, 23, 25, 37, 42, 43, 53,
+  0, 1, 7, 9, 11, 13, 15, 17, 19, 20, 21, 22, 23, 25, 37, 42, 43, 53,
   69, 77, 79, 87, 95, 101, 102, 103, 104, 109, 110, 111, 113, 115, 117,
   119, 123, 135, 137, 139, 143, 161, 179, 389, 427, 465, 512, 513, 514,
   515, 526, 530, 531, 532, 540, 548, 554, 556, 563, 587, 601, 636, 989,
-  990, 993, 995, 1719, 1720, 1723, 2049, 3659, 4045, 4190, 4333, 5060,
-  5061, 6566, 6665, 6666, 6667, 6668, 6669, 6679, 6697, 10080,
+  990, 993, 995, 1719, 1720, 1723, 2049, 3659, 4045, 4190, 5060, 5061,
+  6000, 6566, 6665, 6666, 6667, 6668, 6669, 6679, 6697, 10080,
 ]);
 
 export function isFetchSafeTestPort(port: number): boolean {
-  return Number.isInteger(port) && port > 0 && port <= 65535 && !fetchForbiddenPorts.has(port);
+  return Number.isInteger(port) && port >= 0 && port <= 65535 && !fetchForbiddenPorts.has(port);
 }
 
 async function closeServer(server: http.Server): Promise<void> {
@@ -70,19 +72,21 @@ async function withServer(
 test("LLM test server excludes the complete Fetch forbidden-port policy", () => {
   // This is the full current Fetch/URL Standard bad-port table. Keep it in
   // sync with https://fetch.spec.whatwg.org/#port-blocking. Comparing the
-  // exact set protects against both omissions such as 5060/5061 and accidental
-  // policy drift in the helper used by every local LLM test server.
+  // exact set protects against omissions and non-standard additions in the
+  // helper used by every local LLM test server.
   const expectedForbiddenPorts = [
-    1, 7, 9, 11, 13, 15, 17, 19, 20, 21, 22, 23, 25, 37, 42, 43, 53,
+    0, 1, 7, 9, 11, 13, 15, 17, 19, 20, 21, 22, 23, 25, 37, 42, 43, 53,
     69, 77, 79, 87, 95, 101, 102, 103, 104, 109, 110, 111, 113, 115, 117,
     119, 123, 135, 137, 139, 143, 161, 179, 389, 427, 465, 512, 513, 514,
     515, 526, 530, 531, 532, 540, 548, 554, 556, 563, 587, 601, 636, 989,
-    990, 993, 995, 1719, 1720, 1723, 2049, 3659, 4045, 4190, 4333, 5060,
-    5061, 6566, 6665, 6666, 6667, 6668, 6669, 6679, 6697, 10080,
+    990, 993, 995, 1719, 1720, 1723, 2049, 3659, 4045, 4190, 5060, 5061,
+    6000, 6566, 6665, 6666, 6667, 6668, 6669, 6679, 6697, 10080,
   ];
   assert.deepEqual([...fetchForbiddenPorts], expectedForbiddenPorts);
   for (const port of expectedForbiddenPorts) assert.equal(isFetchSafeTestPort(port), false, String(port));
-  assert.equal(isFetchSafeTestPort(0), false);
+  for (const port of [5060, 5061, 6000, 6667, 10080, 0]) {
+    assert.equal(isFetchSafeTestPort(port), false, String(port));
+  }
   assert.equal(isFetchSafeTestPort(65536), false);
   assert.equal(isFetchSafeTestPort(18080), true);
 });
@@ -90,12 +94,18 @@ test("LLM test server excludes the complete Fetch forbidden-port policy", () => 
 test("LLM test server closes and retries a forbidden allocation", async () => {
   const server = http.createServer();
   let attempts = 0;
+  let firstListenerClosed = false;
   try {
     const port = await listenOnFetchSafePort(server, async () => {
       const allocated = await listenOnLoopback(server);
-      // Model an OS allocation of 5060 while still using a real server so the
-      // test proves close/relisten cleanup rather than only a predicate call.
-      return attempts++ === 0 ? 5060 : allocated;
+      if (attempts++ === 0) {
+        // Model an OS allocation of 6000 while still using a real server. The
+        // next listen must occur only after the helper closes this listener.
+        server.once("close", () => { firstListenerClosed = true; });
+        return 6000;
+      }
+      assert.equal(firstListenerClosed, true);
+      return allocated;
     });
     assert.equal(attempts, 2);
     assert.equal(server.listening, true);
