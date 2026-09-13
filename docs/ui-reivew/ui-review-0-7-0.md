@@ -2,7 +2,7 @@
 
 ## 基线、范围与验证
 
-- 基线：v0.6.3（`f4045ea`）。本次不修改 package version、release 文档或任何 `suggestion*.md`；正式评审后的版本化 `docs/review/` 报告、回复和台账按项目流程新增。
+- 基线：v0.6.3（`f4045ea`）。最终候选的四个功能实现提交为 `499dfc1`、`2711b66`、`ee85a85`、`715234a`；它们分别与独立审查使用的 `40d5dd3`、`ed9c11c`、`147f76b`、`371aafb` 内容一致，仅因从已发布 `origin/main` 线性重建而更换 SHA。发布准备还补充版本文档、注释准确性和 staged-restore 回归断言。本记录归档为未发布版本 0.7.0 的最终 UI 实现结论；不会将内部审查轮次当作 0.7.1 / 0.7.2 发布版本。
 - 输入：review3/review4 的六张截图、既有三轮建议与 0.5.0、0.6.0、0.6.3 裁决记录。
 - 所有 Git 写入继续在 extension host 重新读取状态、验证完整 hash/当前快照并要求确认；webview 只表达用户意图。
 
@@ -71,9 +71,9 @@
 
 | 命令 | 结果 |
 | --- | --- |
-| `npm run typecheck` / focused generated-Diff, DOM, protocol tests / `node --check media/main.js` | 最终状态通过。 |
-| `npm test` | 初始整改时为 119/119 通过，约 377 秒；0.7.1 复核发现 safe-port set 漏掉 5060/5061，R71-1 整改后为 120/120 通过，约 382 秒。0.7.2 再发现 Fetch Standard table 漏掉 6000 且 set 包含非标准 4333；R72-1 已改为与标准完整表精确相等（含 0/6000、不含 4333）并完成新的全量回归。 |
-| `npm run compile` / `git diff --check` | 最终状态通过。 |
+| `npm run typecheck` / focused generated-Diff, DOM, protocol tests / `node --check media/main.js` | 历史最终候选审查通过。 |
+| `npm test` | 历史最终候选为 **120/120 通过**。整改过程中依次发现并修正 safe-port policy 漏掉 5060/5061、6000 及包含非标准 4333 的问题；最终集合与 Fetch Standard 完整表精确相等（含 0/5060/5061/6000，不含 4333），并完成新的全量回归。 |
+| `npm run compile` / `git diff --check` | 历史最终候选审查通过。 |
 
 ## 发布前人工走查
 
@@ -85,7 +85,7 @@
 
 ### 修正提交自动验证（待独立复核）
 
-- `npm run typecheck`、focused generated-Diff/DOM/protocol tests、`node --check media/main.js`：最终状态通过。
+- `npm run typecheck`、focused generated-Diff/DOM/protocol tests、`node --check media/main.js`：历史最终候选审查通过。
 - 初始修正提交时 `npm test`：119/119 通过（约 377 秒）；每次后续整改都重新运行全量测试。
-- `npm run compile`、`git diff --check`：最终状态通过。
+- `npm run compile`、`git diff --check`：历史最终候选审查通过。
 - R72-1 后 `npx tsx --test test/llmClient.test.ts` 连续 12 次均通过；shared server helper 与 Fetch Standard 完整 bad-port table 精确一致（含 0、5060、5061、6000、6667、10080；不含 4333），并以真实 listen → close → retry 回归覆盖 6000。

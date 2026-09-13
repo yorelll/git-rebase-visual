@@ -84,6 +84,9 @@ test("restore separates staged and working sides and protects untracked deletion
   changes = await getWorktreeChanges(cwd);
   await restoreWorktreeChange(cwd, changes.find((change) => change.path === "tracked.txt")!, "staged");
   assert.equal(git(cwd, ["show", ":tracked.txt"]), "base");
+  // Restoring the index must not silently overwrite the still-present working
+  // content. This is the staged-side contract used by the SCM restore action.
+  assert.equal(fs.readFileSync(path.join(cwd, "tracked.txt"), "utf8").replace(/\r\n/g, "\n"), "index\n");
 
   changes = await getWorktreeChanges(cwd);
   const untracked = changes.find((change) => change.path === "untracked.txt")!;

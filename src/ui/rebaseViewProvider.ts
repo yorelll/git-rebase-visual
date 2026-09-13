@@ -2082,9 +2082,9 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
   }
 
   /**
-   * Generates a plain, read-only document from an exact current snapshot. This
-   * intentionally differs from `vscode.diff`: selected commits are concatenated
-   * oldest-first and do not imply a continuous revision range.
+   * Generates a plain, read-only document from an exact current snapshot. Unlike
+   * `vscode.diff`, its selected commits are concatenated oldest-first, but a
+   * multi-commit request must still name one continuous timeline range.
    */
   private async generateCommitDiffDocument(
     cwd: string,

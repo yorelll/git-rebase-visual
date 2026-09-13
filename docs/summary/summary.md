@@ -1,6 +1,6 @@
 # Git Rebase Visual — 功能、架构与测试总结
 
-> 当前基线：v0.6.0 受控 Undo、真实 rebase session/progress、编辑器区 Compose 与高频 rebase 决策升级。
+> 当前基线：v0.7.0 文件级 SCM 恢复操作、连续只读 generated Diff、selection/drag/IME 协议安全和 Fetch-safe LLM 测试升级。
 
 ## 1. 项目定位
 
@@ -30,7 +30,10 @@ Webview (media/main.js)
 | stash | autoStash 以 stash commit SHA 持久化定位，避免 `stash@{0}` 漂移；append Abort 避免完整 snapshot 与 keep-index stash 重复恢复。 |
 | push | 普通分支 `--force-with-lease`；可选评审 refspec；可取消进度/Output；rebase edit 停靠时仍可推送，并明确 detached HEAD 的分支/upstream 语义。 |
 | 自动状态同步 | 文件事件与节流 index 轮询刷新 staged/unstaged 文件数；后台 status 使用 `GIT_OPTIONAL_LOCKS=0`，避免 optional `index.lock` 与终端写操作竞争。 |
-| 列表/上下文/可访问性 | 作者首字母和稳定语义色、pending 文本、branch/upstream/ahead-behind、搜索、多选、安全 locked-run 折叠、ARIA、roving menu、状态栏和 High Contrast fallback。 |
+| 列表/上下文/可访问性 | 作者文字前缀和稳定语义色、pending 文本、branch/upstream/ahead-behind、`author:`/`msg:`/`hash:0x` 搜索、IME composition、多选、右击目标重定向、安全 locked-run 折叠、ARIA、roving menu、状态栏和 High Contrast fallback。 |
+| 文件级 SCM 恢复与 Diff | porcelain v2 `-z` 结构化 staged/working/untracked 状态；单文件 working/staged restore、确认删除未跟踪文件；公开 `vscode.diff` 的 index↔working、HEAD↔index 和 parent↔commit 对比；opaque request store 防止 URI 暴露仓库/ref/path。 |
+| 连续 generated Diff | 单项或连续多选 commit 的 oldest-first frozen Diff snapshot；webview 禁用非连续选择，host 重验完整 hash、revision 与连续性；扩展私有只读 provider 使用 opaque token、TTL/LRU/repository invalidation。 |
+| 写入与交互协议 | stage/restore 作为 mutation 经 busy 串行化，paused edit-stop 由明确 allow-list 控制；pointer/native drag 使用 immutable canonical session，deferred refresh 不会重新解释旧手势；无副作用 UI 流量不触发暂停告警。 |
 
 ## 3. 「将暂存区文件添加到此 commit」事务
 
@@ -68,6 +71,7 @@ src/
 ├─ git/
 │  ├─ gitRunner.ts                 spawn Git + 超时/输出上限/取消
 │  ├─ commitLog.ts                 log/range/status/rebase 元数据
+│  ├─ worktreeChanges.ts           porcelain v2 -z 解析、单文件 stage/restore/删除保护
 │  ├─ rebaseEngine.ts              todo、execute/continue/abort rebase
 │  ├─ worktree.ts                  stash 按 SHA apply/pop/drop、提交
 │  ├─ message.ts                   message trailer 拆分与保留
@@ -76,7 +80,14 @@ src/
 ├─ lock/lockStore.ts               patch-id 持久化锁与批量 lockMany
 ├─ llm/client.ts                   OpenAI-compatible chat / streamChat、deadline、错误脱敏
 ├─ llm/messageGen.ts               diff 和提示词构造、流式生成入口
-├─ ui/rebaseViewProvider.ts        webview 协调、历史事务、session/progress、Undo、暂停/冲突、状态栏
+├─ ui/rebaseViewProvider.ts        webview 协调、历史事务、SCM/Diff、session/progress、Undo、暂停/冲突、状态栏
+├─ ui/worktreeDiff.ts              工作区/commit 文件 Diff 与 opaque content provider
+├─ ui/gitDiffRequestState.ts       Git Diff request 的 URI opaque-token/TTL/LRU store
+├─ ui/generatedDiffState.ts        连续 commit selection、stale guard 与 frozen Diff 构建
+├─ ui/generatedDiffDocument.ts     generated Diff opaque snapshot/TTL/LRU store
+├─ ui/generatedDiffProvider.ts     generated Diff 只读虚拟文档 provider
+├─ ui/webviewProtocolState.ts      webview read/UI/mutation 分类与 paused allow-list
+├─ ui/mutationGate.ts              busy / paused mutation 入口判定
 ├─ ui/rebaseState.ts               pause/progress/pending/unknown rebase 状态派生
 ├─ ui/undo.ts                      私有 before ref、操作 journal、Undo preflight/reset --keep
 ├─ ui/composePanel.ts              编辑器区 Compose WebviewPanel 与 draft/session 状态
@@ -84,7 +95,6 @@ src/
 
 media/main.js                      sidebar DOM、拖拽/键盘重排、菜单、筛选/多选/locked 折叠
 media/style.css                    主题语义、pending/status/高对比度 fallback
-.github/workflows/release.yml      tag 发布门禁与 GitHub Release
 .github/workflows/release.yml      tag 发布门禁与 GitHub Release
 ```
 
@@ -107,11 +117,11 @@ media/style.css                    主题语义、pending/status/高对比度 fa
 | 功能集成 | `test/appendStaged.integration.test.ts` | staged append、amend、后续重放、未暂存恢复、stash 清理 |
 | Git 安全 | `test/rebaseSafety.integration.test.ts` | locked Drop conflict/Abort、冲突 Continue、edit-stop Abort 恢复 |
 | 暂停状态 | `test/rebasePauseState.test.ts` | conflict / explicit edit / paused 状态派生 |
-| LLM HTTP mock | `test/llmClient.test.ts` | SSE delta、畸形事件、deadline、预取消、流读取途中取消/超时、错误正文脱敏 |
+| LLM HTTP mock | `test/llmClient.test.ts` | SSE delta、畸形事件、deadline、预取消、流读取途中取消/超时、错误正文脱敏，以及 Fetch Standard 全量 bad-port policy、真实 listener close/retry 生命周期 |
 | Git 集成（推送/守卫） | `test/pushGuard.integration.test.ts` | bare-remote：force-with-lease 并发拒绝、lockedInPush 拦截/解锁 |
 | Git 集成（append 守卫） | `test/appendGuard.integration.test.ts` | 已推 upstream 守卫、锁定 commit patch-id 跨重写稳定 |
 | 注入桩 | `test/secretsAccess.test.ts` | SecretStorage 访问器安全降级与委托 |
-当前测试套件含 64 项测试（0.6 UI/Git 安全裁决见 [`../ui-reivew/ui-review-0-6-0.md`](../ui-reivew/ui-review-0-6-0.md)，覆盖条目的完整裁决见 improvement.md）。
+当前测试套件含 120 项测试；0.7 的 UI/交互与安全裁决见 [`../ui-reivew/ui-review-0-7-0.md`](../ui-reivew/ui-review-0-7-0.md)，最终代码评审结论见 [`../review/code-review-0-7-0.md`](../review/code-review-0-7-0.md)。
 
 命令：
 
@@ -146,6 +156,6 @@ npm run package         # 编译并生成 VSIX
 - 真实 VS Code High Contrast Dark/Light、screen reader、Compose Panel/AI 状态和 keyboard-flow 人工验收；
 - 刷新延迟基准与大仓库性能测量；
 
-UI 建议的逐项事实纠正、已修复项与未修改原因见 [`../ui-reivew/ui-review-0-6-0.md`](../ui-reivew/ui-review-0-6-0.md)；代码评审处理记录见 [`../review/review-response-0-6-0.md`](../review/review-response-0-6-0.md)。
+UI 建议的逐项事实纠正、已修复项与发布前人工验收边界见 [`../ui-reivew/ui-review-0-7-0.md`](../ui-reivew/ui-review-0-7-0.md)；最终代码评审及项目回复见 [`../review/code-review-0-7-0.md`](../review/code-review-0-7-0.md) 与 [`../review/review-response-0-7-0.md`](../review/review-response-0-7-0.md)。
 
 外部版本化评审原文位于 `../review/code-review-<major>-<minor>-<patch>.md`；项目回复按相同版本号放在 `review-response-<major>-<minor>-<patch>.md`。开始评审前需读取 [`../review/code-review-commit.md`](../review/code-review-commit.md) 确认未覆盖 commit，完成后将精确 SHA 与对应报告写回该台账。

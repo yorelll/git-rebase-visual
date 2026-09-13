@@ -1,61 +1,86 @@
 ## 0-7-0 回复（对应 `code-review-0-7-0.md`）
 
-### 基线与结论
+### 基线、范围与最终决定
 
-- 评审基线：`f4045ea9163014389ef0406cae4d56bd527d9ddf`（v0.6.3）。
-- 被审初始实现：`40d5dd3ceda710ba253c9624cc827af99b462f49`。
-- 本回复与 R70-1 至 R70-6 的修正同一提交；提交后须由独立 reviewer 复核。该修正提交不因本回复自动成为已评审 commit，台账由下一份独立 code review 更新。
-- R70-1 至 R70-6 均已修正并完成针对性自动测试。R70-7 已补齐实现；High Contrast/屏幕阅读器和真实 VS Code 人工验收仍是发布前必做项。
+- 评审基线：已发布 v0.6.3 `f4045ea9163014389ef0406cae4d56bd527d9ddf`。
+- 最终候选范围：`499dfc1053f69a392bbf0da72b7fe2df2dab37fc`、`2711b66681ca20e530a94651a1dca702234de12f`、`ee85a85c208a44a491e6b228415362bd45c4025c`、`715234af9794d369fae724620e299a371741dd41`。
+- 四个候选**功能实现**提交分别与独立审查中使用的 `40d5dd3`、`ed9c11c`、`147f76b`、`371aafb` 逐字节一致；新的 SHA 仅来自以已发布 `origin/main` 为基线的线性重建。发布准备另包含版本/归档文档、generated-Diff 注释准确性修正和一条 staged-restore 回归断言，均由本次本地门禁与最终独立审查覆盖。
+- 内部补充审查轮次原先使用的 0-7-1 / 0-7-2 文件名不代表发布版本。本回复将所有发现、整改和最终独立复核统一归档到 **0-7-0**；不会发布或创建 0.7.1 / 0.7.2 tag。
+- 最终决定：所有 P1 发现均已修正并独立复核。自动化审查通过后可准备 0.7.0 发布；真实 VS Code 人工验收和本次实际发布门禁结果仍需在发布前完成并如实记录。
 
 ### R70-1 — deferred drag session
 
-- [x] **已修正。** `media/main.js` 的 pointer、native drop 和 keyboard pickup/Alt 路径均从触发时捕获的 immutable `{ revision, canonicalOrder, sourceHash }` 构造完整 `reorder` payload。`completeDrag()` 在发送该旧 session intent 后才应用 `deferredState`；不会再用刷新后的 order/revision 重新解释旧手势。
-- Host 原有 `validateReorderRequest()` 继续在 confirmation/Git 写入前比较完整 revision/order，因此 deferred refresh 使旧 revision 过期时会拒绝。
-- 测试证据：`test/webviewDom.test.ts` 实际加载并执行 `media/main.js`，覆盖 pointer start → 不同 revision/order 的 deferred state → pointerup，以及 native `dragstart` → deferred state → `drop`；两条断言均验证 payload 保留旧 revision 和 canonical order。`test/rebaseReorderState.test.ts` 继续覆盖 host stale/partial/locked rejection。
+- [x] **已修正并独立复核。**
+- 实现：pointer/native drop 在应用 deferred state 前，使用 drag start 捕获的 immutable `sourceHash`、`revision` 和完整 `canonicalOrder` 构造 reorder intent；Alt+Arrow 同样使用当前 canonical session。host 的 `validateReorderRequest()` 在确认和 Git 写入前继续复验。
+- 测试：`test/webviewDom.test.ts` 覆盖 pointer/native start → deferred changed state → completion，断言发送旧 session payload；`test/rebaseReorderState.test.ts` 覆盖 host stale/partial/locked rejection。
 
-### R70-2 — 右击选择一致性
+### R70-2 — 右键目标与 selection 一致性
 
-- [x] **已修正。** `selectContextTarget()` 在构造菜单前执行：右击未选行会清空旧 selection 并设置该行 active/single target；右击已选行则保留当前 multi-selection。键盘 ContextMenu/Shift+F10 也走相同选择协调。
-- 测试证据：`test/webviewDom.test.ts` 覆盖 Ctrl/Cmd 选择 A+B 后右击未选 C（single menu，旧 selection 清除）、右击已选 A（保留 A+B batch menu）、单项动作 disabled 状态，以及空白区域 contextmenu 清选。
+- [x] **已修正并独立复核。**
+- 实现：`selectContextTarget()` 统一鼠标和键盘 context menu。右击未选行清空旧多选并将该行作为 single target；右击已选行保留 batch。
+- 测试：DOM 回归覆盖 A+B 后右击 C、右击已选 A、空白清选和单项/批量 action payload。
 
-### R70-3 — stage/restore mutation 分类与 paused 策略
+### R70-3 — stage/restore mutation 分类和暂停策略
 
-- [x] **已修正。** `src/ui/webviewProtocolState.ts` 将 `stageFile`、`restoreFile` 明确归类为 `mutation`；webview source 也标为 `webview:worktree-mutation`。因此它们先经过 `RebaseViewProvider.onMessage()` 的 `busy` 串行化，而非作为 read/ui 并发穿透。
-- [x] **已修正。** `allowedPausedRebaseMutation()` 明确允许 edit stop 的 `stageFile`/`restoreFile`；`mutationGateDecision()` 被 host busy 和 paused 路径共同调用。该策略保留已声明的 edit-stop SCM 能力，同时非 allow-list history-write（例如 reorder）仍在 paused rebase 被阻止。
-- 测试证据：`test/webviewProtocolState.test.ts` 断言分类和 paused allow-list；`test/mutationGate.test.ts` 断言 stage/restore 在 paused 下可处理但 busy 时返回 serialized/busy，unsafe reorder 被阻止；refresh/scroll/pointer/selection/composition/toast/open Diff 保持非 warning 流量。
+- [x] **已修正并独立复核。**
+- 实现：`stageFile`、`restoreFile` 均为 `mutation`，先经过 host busy serialization；`allowedPausedRebaseMutation()` 明确允许 edit stop 中的文件操作，其他不安全历史写入仍阻止。read/UI/pointer/IME/refresh/Diff 流量维持无 warning。
+- 测试：`test/webviewProtocolState.test.ts` 与 `test/mutationGate.test.ts` 覆盖分类、allow-list、busy、unsafe reorder blocked 和非写入流量。
 
-### R70-4 — 只读非 untitled generated Diff
+### R70-4 — generated Diff 的只读形态
 
-- [x] **已修正。** 新增 `GeneratedDiffProvider`，并在 `src/extension.ts` 注册扩展私有 `git-rebase-visual-generated-diff:` `TextDocumentContentProvider`。`generateCommitDiffDocument()` 不再调用 `openTextDocument({ content })`；它打开 opaque virtual snapshot URI，因此不是 `untitled:`，由 provider 提供只读内容。
-- [x] **已修正。** `GeneratedDiffSnapshotStore` 使用不含 repository/ref/path/Git 参数的 opaque token，具备 repository invalidation、TTL、LRU 和 dispose cleanup。生成时 string 被冻结；后续 Git refresh 不会重算或改变已打开快照。
-- 测试证据：`test/generatedDiffState.test.ts` 断言 URI scheme 非 `untitled`、snapshot、stale/short/duplicate selection 与 stale revision rejection、binary/truncation 注记；`test/generatedDiffDocument.test.ts` 断言 snapshot 冻结、opaque store 的 repository scope/TTL/LRU/cleanup。
+- [x] **已修正并独立复核。**
+- 实现：新增 `GeneratedDiffProvider`、`GeneratedDiffSnapshotStore`，以 `git-rebase-visual-generated-diff:` opaque virtual document 替代 editable `untitled:`。snapshot 在生成时冻结，具有 repository invalidation、TTL、LRU 和 dispose cleanup，URI 不携带 repository/ref/path/Git 参数。
+- 测试：`test/generatedDiffDocument.test.ts`、`test/generatedDiffState.test.ts` 验证非 untitled、frozen snapshot、scope、TTL/LRU/cleanup、stale selection 和输出边界。
 
-### R70-5 — 连续区间生成 Diff
+### R70-5 — 连续多选 generated Diff
 
-- [x] **已修正。** 多选 `generatedDiffCommits()` 仅接受完整当前 hash 构成的无空洞连续区间，并始终返回 oldest-first canonical order；single selection 仍可用。无序 payload 会规范为 timeline 顺序，gapped/stale/unknown/duplicate payload 在任何 `git show` 或文档打开前被 host 拒绝。
-- [x] **已修正。** `media/main.js` 对非连续多选禁用“生成 Diff…”，并给出“仅支持连续 commit”的原因。连续 output 显示首末 commit 的明确范围标题，不再将离散 patch 串接伪装为 range Diff。
-- 测试证据：`test/generatedDiffState.test.ts` 覆盖 single、连续两项、无序连续 payload、gapped 1/3 拒绝、stale/unknown/duplicate 和 revision 变化；`test/webviewDom.test.ts` 实际执行菜单 handler，断言非连续 batch 的按钮 disabled 且不会发送 `bulkGenerateDiff`，连续 batch 保留精确 payload。
+- [x] **已修正并独立复核。**
+- 实现：多选仅接受 canonical timeline 的无空洞连续区间，并按 oldest-first 输出；非连续菜单 disabled 且给出原因。host 在 Git read/document opening 前拒绝 gapped、unknown、duplicate、stale 或 revision 不匹配的请求。
+- 测试：generated-Diff 和 DOM tests 覆盖 single、连续两项/多项、无序连续 payload、1/3 空洞、unknown/duplicate/stale、disabled action 和无 postMessage。
 
-### R70-6 — LLM forbidden-port flaky
+### R70-6 / R71-1 / R72-1 — Fetch forbidden-port LLM test flaky
 
-- [x] **已修正。** `test/llmClient.test.ts` 的共享 `withServer()` 改用 `listenOnFetchSafePort()`：仍可请求系统 ephemeral port，但每次在将 URL 交给 Undici 前检查 Fetch forbidden-port set；若命中则 close 并重试。六个共享 LLM client 测试均使用此 helper。
-- [x] **已加入回归。** `isFetchSafeTestPort()` 明确拒绝 `6667`、`10080` 等禁用端口，并在测试中断言；deadline case 因此不可能在 HTTP 请求前以 `fetch failed: bad port` 失败。
-- 测试证据：最终完整 `npm test` 为 119/119 通过；`npx tsx --test test/llmClient.test.ts` 连续 8 次均 7/7 通过。
+- [x] **已修正，并经过后续两轮独立复核。**
+- 实现：shared LLM test listener 使用 Fetch Standard 完整 83 项 bad-port table，包含 `0`、`5060`、`5061`、`6000`、`6667`、`10080`，移除非标准 `4333`。listener 每次系统分配端口后 inspect；命中禁用端口时 close 后 retry；`withServer()` 使用 `try/finally` 清理。
+- 测试：完整 table exact equality 和逐端口 predicate；真实 `http.Server` 断言首个模拟 6000 listener 关闭后才能 second listen；`test/llmClient.test.ts` 多轮 8/8 通过，覆盖 deadline、cancellation、SSE 与资源清理。
 
-### R70-7 / R70-8 后续项
+### R70-7 — 作者标识 High Contrast collision
 
-- [x] **R70-7 已修正实现。** `authorLabel()` 对任一同 initial 的可见作者按身份生成最短唯一文本前缀（不少于两个字符），不再依赖 palette key；forced-colors 将 palette 折叠为同色时，dot 内仍提供文本区分。`test/webviewDom.test.ts` 覆盖不同 palette key 的同 initial author labels。High Contrast Dark/Light 和屏幕阅读器的真实 VS Code 人工验收仍待发布前完成，不能由 Node 测试替代。
-- [x] **R70-8 对 P1 所需部分已落实。** 为 R70-1/R70-2/R70-5 加入实际 jsdom webview handler regression；为 R70-3 加入 host gate/protocol regression；为 R70-4 加入 generated-Diff URI/snapshot/selection regression。更广泛的 webview end-to-end harness 仍可作为 P2 演进项，但不是本次 P1 闭环的未覆盖理由。
+- [x] **实现已修正；人工主题/屏幕阅读器验收待执行。**
+- 实现：可见列表中同 initial 的不同 author identity 使用最短唯一文字前缀，不再依赖 palette key；forced-colors 下亦保留文本区分。
+- 自动测试：`test/webviewDom.test.ts` 覆盖不同 palette 的同 initial label。
+- [ ] **人工验收尚未执行。** 原因：Node/jsdom 无法启动真实 VS Code 的 High Contrast Dark/Light 或 screen reader；这不是拒绝修复，而是必须在发布前完成的运行时验证边界。
 
-### 最终验证
+### R70-8 — 真实 webview 事件路径覆盖
 
-| 命令 | 结果 |
+- [x] **P1 所需覆盖已补齐。** `media/main.js` 的关键 DOM handler 由 jsdom 执行；generated Diff 与 mutation gate 由 host/provider 回归覆盖。更广泛的 VS Code E2E harness 作为后续 P2 质量演进，不构成本版本 P1 未闭环。
+
+### 最终自动验证
+
+| 命令 / 方法 | 结果 |
 | --- | --- |
-| `npm run typecheck` | 通过 |
-| `npm test` | 119/119 通过，约 377 秒 |
-| `npm run compile` | 通过 |
-| `git diff --check` | 通过，无空白错误 |
-| `node --check media/main.js` | 通过 |
-| `npx tsx --test test/llmClient.test.ts` 连续 8 次 | 每次 7/7 通过 |
+| `git diff --quiet 40d5dd3..499dfc1` | 无差异。 |
+| `git diff --quiet ed9c11c..2711b66` | 无差异。 |
+| `git diff --quiet 147f76b..ee85a85` | 无差异。 |
+| `git diff --quiet 371aafb..715234a` | 无差异。 |
+| 历史独立审查：`npm run typecheck` | 通过。 |
+| 历史独立审查：`npm test` | **120/120 通过**。 |
+| 历史独立审查：`npm run compile` | 通过。 |
+| 历史独立审查：`node --check media/main.js` | 通过。 |
+| 历史独立审查：`git diff --check` | 通过，无空白错误。 |
+| 历史独立审查：`npx tsx --test test/llmClient.test.ts` 连续运行 | 每轮 **8/8 通过**。 |
+| 本次发布准备：`npm run typecheck`、`git diff --check` | 通过。 |
+| 本次发布准备：`npx tsx --test test/worktreeChanges.integration.test.ts` | **4/4 通过**；补强验证 staged restore 不会覆盖仍存在的 working-side 内容。 |
+| 本次发布准备：`npm ci` | 通过；按当前 lockfile 重新安装 326 个依赖。 |
+| 本次发布准备：`npm run test:release && npm run package` | 已通过：类型检查、**120/120** 覆盖率测试（约 406 秒）、编译和 VSIX 打包；本轮已包含 staged-restore 补强断言。 |
 
-尚待独立 reviewer 对修正提交、该回复和真实 VS Code 人工验收边界进行二次复核。
+### 发布前人工验收
+
+- [ ] 中文 IME scoped search 和键盘重排抑制。
+- [ ] 鼠标、触控板、触笔 pointer/native drag 与 confirmation。
+- [ ] staged/working/delete/rename/untracked 的 stage/restore/左右 Diff。
+- [ ] 编辑器区域关闭菜单且不产生 paused warning。
+- [ ] High Contrast Dark/Light 与 screen reader。
+- [ ] binary/超大连续 generated Diff 的截断说明和只读状态。
+
+上述项目尚未由自动测试替代；完成前不应将其标为已验证。

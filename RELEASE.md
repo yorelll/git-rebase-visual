@@ -105,6 +105,14 @@ code --install-extension git-rebase-visual-<version>.vsix
 
 ### 更新记录
 
+- **0.7.0** — 多选/工作区/生成 Diff 的宿主安全闭环与交互可靠性升级：
+  - **选择与批量操作语义**：普通点击仅切换 active context，Ctrl/Cmd+点击才建立多选；右击未选 commit 会先原子切换为该单项，右击已选项才保留批量集合，避免批量锁定、删除和 Diff 的目标与鼠标目标不一致。
+  - **连续且只读的生成 Diff**：单项或无空洞连续多选才能生成 Diff；非连续选择在 UI 中置灰并给出原因，host 也拒绝 unknown/duplicate/stale/gapped payload。生成结果改为扩展私有、opaque token 的只读 virtual document snapshot，不再打开可编辑 `untitled:` 文档；snapshot 有 repository invalidation、TTL、LRU 和 dispose cleanup。
+  - **文件级 SCM 操作保护与恢复**：`stageFile`/`restoreFile` 被正确归类为 mutation，先通过 host busy 串行化；edit stop 的文件操作由明确 paused allow-list 放行，纯 refresh/scroll/pointer/IME/selection/read Diff 不产生暂停告警。补齐单文件 staged/working restore 与经确认删除未跟踪文件；`XY=RM` 暂存只使用现存 working-side path，修复旧 rename path 导致的失败。
+  - **拖拽、搜索与无障碍**：pointer/native drag 在 deferred refresh 前用 captured revision/canonical order 发送 intent，host 可拒绝过期手势；支持 Alt+Arrow 一步重排。搜索支持 `author:`、`msg:`、`hash:0x...` 与中文 IME composition；同 initial 作者在 High Contrast/forced-colors 下也使用文字前缀区分，不依赖颜色。
+  - **LLM 测试稳定性**：共享 HTTP test server 按 Fetch Standard 的完整 bad-port table 进行 listen → inspect → close/retry，覆盖 `0`、`5060`、`5061`、`6000`、`6667`、`10080`，消除 Windows 动态端口导致的 `fetch failed: bad port` 随机失败。
+  - **评审与测试**：初始实现、两轮独立审查、整改与最终独立复核完成；新增 webview DOM、generated-Diff snapshot、mutation gate、完整 Fetch port policy 与真实 Git 工作区回归，自动测试套件扩展至 **120 项**。
+
 - **0.6.3** — 文件级工作区管理、左右 Diff、IME 搜索与拖拽可靠性升级：
   - **文件级变更区**：更多提交选项展示 porcelain v2 -z 结构化状态，清晰区分 staged/working/untracked 与 Modify/Add/Delete/Rename/Conflict；支持单文件暂存，处理空格路径、删除、rename 和 `XY=RM` staged rename+working modify。
   - **统一左右 Diff**：工作区文件、commit 右键/hover/Compose 的“打开变更”均通过受控 opaque content provider 打开 VS Code parent↔commit 或 index↔working 左右 Diff；支持 root/add/delete/rename/multi-file，binary/merge 提供明确 fallback；嵌套路径递归枚举避免将目录误当 diff 文件。

@@ -76,7 +76,15 @@
 - **自动刷新暂存状态**：通过 VS Code 源代码管理或终端 `git add` 暂存文件后，面板会自动更新菜单状态；无需手动点击 Refresh。后台只读状态查询使用 `GIT_OPTIONAL_LOCKS=0`，避免与终端 `git switch` / `git stash` 的 optional `index.lock` 刷新竞争。
 - **危险操作确认**：删除 commit 前会显示目标 commit 与历史重写确认；edit 停靠横幅会明确显示当前目标及 Continue / Abort 下一步。
 
-### 7. 受控 Undo、步骤进度与编辑器 Compose（0.6.0）
+### 7. 文件级 SCM、连续生成 Diff 与可靠交互（0.7.0）
+
+- **文件级工作区恢复**：在既有 **Staged Changes / Changes** 的 Git porcelain v2 结构化列表上，支持单文件暂存、working/staged restore 和经确认删除未跟踪文件。文件名或打开按钮继续使用原生 VS Code `vscode.diff` 展示 index ↔ working、HEAD ↔ index 或 commit parent ↔ commit 的左右 Diff；rename、delete、root、nested path、binary 与多文件选择均有受控处理。
+- **连续区间生成 Diff**：右键单个 commit，或 Ctrl/Cmd 多选时间轴中无空洞的连续 commit，可生成扩展私有的只读 Diff snapshot。非连续选择会置灰并说明“仅支持连续 commit”；host 会独立拒绝未知、重复、过期或有空洞的请求，不能通过伪造 webview message 绕过。
+- **选择与右键一致性**：普通单击只更新 active context；Ctrl/Cmd+单击才切换多选。右击未选 commit 会先清除旧集合并以该 commit 作为单项目标，右击已选 commit 才保留批量 lock/drop/Diff 集合。
+- **IME 与重排稳定性**：筛选支持 `author:`、`msg:`、`hash:` 和 `hash:0x...`，中文 IME composition 期间不会重建输入框或触发全局快捷键。pointer/native drag 会保留开始时的 revision 与完整 canonical order；拖拽中收到刷新时，旧手势不会按新列表重新解释。`Alt+↑/↓` 可作为单项一步重排兜底。
+- **暂停 rebase 的文件写入策略**：stage/restore 是受 busy 串行化的 mutation；仅 edit stop 的明确 allow-list 可在暂停期间执行。滚动、选择、IME、刷新和只读 Diff 均为无副作用流量，不会反复显示 paused-rebase 警告。
+
+### 8. 受控 Undo、步骤进度与编辑器 Compose（0.6.0）
 
 - **受控 Undo**：每次成功历史改写都会记录私有 checkpoint、操作、before/after tip；工具栏、成功结果和历史入口可撤销。Undo 会验证当前分支、HEAD、工作区、rebase 状态、checkpoint 与已推送风险，优先使用 `git reset --keep`，不会把 `ORIG_HEAD + reset --hard` 作为不安全快捷方式。
 - **rebase 状态模型**：横幅与状态栏显示步骤 `N/M`、edit/conflict/paused 原因、冲突文件与待重放数量；待重放 commit 明确提示 hash 将在 Continue 后变化。无法可靠解析的外部 rebase 会显示未知状态，而不伪造进度。
@@ -91,19 +99,19 @@
 - 本地执行 `npm run test:coverage`：在上述测试基础上输出 Node 测试覆盖率报告。
 - 推送版本标签触发 Release 时，GitHub Actions 会依次执行类型检查、覆盖率测试、VSIX 打包、VSIX 内容检查以及 RELEASE.md 版本记录检查；任一步失败都不会创建 Release。
 
-### 7. 为未提交的改动生成 message 并提交
+### 9. 为未提交的改动生成 message 并提交
 当工作区有未提交改动、且已配置 LLM 时，面板顶部出现 **未提交的改动** 区，提供：
 - **为暂存区生成并提交**：基于 `git diff --cached` 生成 message，确认后 `git commit`（仅提交暂存内容）。
 - **为工作区生成并提交**：基于 `git diff HEAD` 生成 message，确认后 `git add -A && git commit`。
 
-### 8. 变基进行中（暂停状态）
+### 10. 变基进行中（暂停状态）
 当选择「变基到此 commit」或发生冲突时，rebase 会**暂停**：
 - 面板顶部出现**变基进行中**横幅 + **Continue / Abort** 按钮；Abort 会先要求确认。
 - 暂停所在的 commit 行会**高亮**并显示 `⏸ 停在此` 徽章；横幅区分冲突、显式 edit 停靠和其它暂停状态。
 - 有冲突时横幅会显示冲突文件；Continue 会禁用，直到你在编辑器解决冲突并 `git add`。宿主在 Continue 前还会再次检查 Git 冲突状态。
 - 暂停期间无法发起新的历史改写操作，需先 Continue 或 Abort。
 
-### 9. 顶部工具栏（Push / Stash / Pop / Refresh）
+### 11. 顶部工具栏（Push / Stash / Pop / Refresh）
 面板顶部工具栏提供：
 - **Push**：**普通推送**（推送当前 HEAD）。
   - 推送前做锁定检查（范围 `<upstream>..HEAD`）：若含被锁定 commit 则拒绝。
@@ -117,14 +125,14 @@
 
 > Stash / Pop 按钮主要用于**手动 stash 模式**（见下）：你自行 stash 后再执行变基相关操作，完成后再 pop。
 
-### 10. 脏工作区自动 stash（可切换）
+### 12. 脏工作区自动 stash（可切换）
 `gitRebaseVisual.autoStash`（默认开启）控制变基时对未提交改动的处理：
 - **自动（默认）**：变基前自动 stash，变基**完全结束后**（或你点 Continue / Abort 后）自动恢复。若变基暂停（冲突 / edit 停靠），stash 会保留、**不会**中途 pop，待你 Continue/Abort 时再恢复——避免基于中间状态 pop 导致冲突。仅在确实做了 stash 时才提示/恢复，工作区干净时不会有多余通知。
 - **手动**（关闭 autoStash）：若工作区/暂存区有内容导致无法变基，直接弹警告，请你用顶部 **Stash** 按钮或自行 `git stash` 后再操作，完成后用 **Pop** 恢复。
 
 > 恢复采用 stash 的**提交 sha** 作为标识（不依赖会被变基改写的 commit hash）。若你在终端自行 continue 并 pop 了 stash，插件下次刷新时会检测到该 stash 已不存在并静默清理，不会重复 pop，避免状态不同步。
 
-### 11. commit 锁定（防误推他人提交）
+### 13. commit 锁定（防误推他人提交）
 典型场景：你 cherry-pick 了别人的 commit A 作为依赖，在其之上写了自己的 B、C。推送时不应把别人的 A 一起推出去。
 
 - 右键 A → **锁定 commit**（出现 🔒、左侧橙色条）。
@@ -152,6 +160,7 @@
 | `gitRebaseVisual.diffMaxChars` | `12000` | 发给模型的 diff 最大字符数，超出截断 |
 | `gitRebaseVisual.push.refspecTemplate` | `""` | 评审推送的 refspec 模板，例如 `HEAD:refs/for/master`。占位符：`${tip}`（解析为 HEAD）、`${branch}`（upstream 分支名）。设置后，推送时会让你选择推送方式；留空则为普通分支推送 |
 | `gitRebaseVisual.autoStash` | `true` | 变基前是否自动 stash 脏工作区并在结束后恢复。关闭则改为手动模式：脏工作区会阻止变基并提示你自行 stash |
+| `gitRebaseVisual.collapseLockedRuns` | `true` | 是否折叠连续三个及以上的 locked commit；关闭后始终完整显示时间轴 |
 
 ### AI 生成 commit message 使用步骤
 1. 填好 `llm.baseUrl` 与 `llm.apiKey`（未填时相关菜单/按钮为灰）。
