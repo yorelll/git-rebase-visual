@@ -37,8 +37,9 @@
 | `715234af9794d369fae724620e299a371741dd41` | `fix: align LLM ports with Fetch standard` | [`code-review-0-7-0.md`](code-review-0-7-0.md) | [`review-response-0-7-0.md`](review-response-0-7-0.md) — 0-7-0 回复 | 已评审；R72-1 整改有效，0.7.0 自动化批准 | 2026-09-13 | 与最终独立核验的 `371aafb` 内容一致；完整 Fetch bad-port policy 已复核。 |
 | `8a61f6549117b9729f2f269ddc173e76bc085512` | `feat: refine review5 rebase interactions` | [`code-review-0-7-1.md`](code-review-0-7-1.md) | [`review-response-0-7-1.md`](review-response-0-7-1.md) — 0-7-1 回复 | 已评审；R71-1 P1 已发现，后续整改已由 0-7-2 复核 | 2026-09-14 | 基线为已发布 v0.7.0 `e96f60f`；review5 的 inspector lifecycle 初始实现关闭后无法可靠重开。 |
 | `853f26ab8b3219a95d5467dd847e0729e847974c` | `fix: stabilize commit inspector lifecycle` | [`code-review-0-7-2.md`](code-review-0-7-2.md) | [`review-response-0-7-1.md`](review-response-0-7-1.md) — R71-1 整改回复 | 已评审；R71-1 P1 已修正，R72-1 P2 adapter lifecycle 自动化覆盖待补 | 2026-09-14 | `0-7-2` 为未发布 0.7.1 的内部补充审查轮次，不是 release version。 |
+| `3a247aae223786ea67f72c39e7865eb5e50ce870` | `test: cover commit inspector adapter lifecycle` | [`code-review-0-7-3.md`](code-review-0-7-3.md) | [`review-response-0-7-2.md`](review-response-0-7-2.md) — R72-1 整改回复 | 已评审；R72-1 P2 已修正，0.7.1 自动化审查闭环通过 | 2026-09-14 | `0-7-3` 为未发布 0.7.1 的内部最终补充审查轮次，不是 release version。 |
 
-> `code-review-0-7-1.md`、`code-review-0-7-2.md` 及对应回复保留为未发布 0.7.0 / 0.7.1 开发过程的原始独立审查证据，不是 release version 记录。本表只以最终发行版本的报告/回复记录可发布候选的实际 SHA 与结论。
+> `code-review-0-7-1.md`、`code-review-0-7-2.md`、`code-review-0-7-3.md` 及对应回复保留为未发布 0.7.0 / 0.7.1 开发过程的原始独立审查证据，不是 release version 记录。本表只以最终发行版本的报告/回复记录可发布候选的实际 SHA 与结论。
 
 ## 待评审 Commit
 
