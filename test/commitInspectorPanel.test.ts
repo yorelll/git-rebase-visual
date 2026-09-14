@@ -79,9 +79,11 @@ class FakeWebviewPanel {
 
 class FakeVsCodeFactory {
   readonly panels: FakeWebviewPanel[] = [];
+  readonly createCalls: Array<{ options: any; webviewOptions: any }> = [];
   readonly api = {
     window: {
-      createWebviewPanel: () => {
+      createWebviewPanel: (_viewType: string, _title: string, options: any, webviewOptions: any) => {
+        this.createCalls.push({ options, webviewOptions });
         const panel = new FakeWebviewPanel();
         this.panels.push(panel);
         return panel;
@@ -129,11 +131,15 @@ test("CommitInspectorPanel adapter survives host close, delayed old dispose, and
 
     inspector.open(payload("first"));
     const first = factory.panels[0]!;
+    assert.deepEqual(factory.createCalls[0]?.options, { viewColumn: 2, preserveFocus: true }, "opening inspector preserves the existing active editor and cannot self-trigger its close bridge");
+    assert.equal(first.disposed, false, "panel remains open immediately after creation");
     assert.equal(first.webview.posted.length, 1);
     assert.equal(first.webview.activeMessageListeners(), 1);
     assert.equal(first.activeDisposeListeners(), 1);
 
-    inspector.close(); // host editor-area close bridge → panel.dispose() → native callback
+    // A subsequent real external editor change invokes the host bridge and closes
+    // the panel. The explicit close models that public provider callback.
+    inspector.close();
     assert.equal(first.disposed, true);
     assert.equal(first.webview.activeMessageListeners(), 0);
     assert.equal(first.activeDisposeListeners(), 0);

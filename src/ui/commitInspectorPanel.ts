@@ -50,7 +50,11 @@ export class CommitInspectorPanel implements vscode.Disposable {
       panel = vscode.window.createWebviewPanel(
         "gitRebaseVisual.commitInspector",
         "Git Rebase · Commit",
-        vscode.ViewColumn.Beside,
+        // preserveFocus prevents this companion panel from becoming the active
+        // editor while it is opening. Otherwise the provider's public
+        // onDidChangeActiveTextEditor close bridge would immediately dispose the
+        // panel it just created.
+        { viewColumn: vscode.ViewColumn.Beside, preserveFocus: true },
         { enableScripts: true, retainContextWhenHidden: true, localResourceRoots: [this.extensionUri] }
       );
       const lease = this.lifecycle.open(panel);
