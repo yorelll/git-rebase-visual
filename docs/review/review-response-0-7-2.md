@@ -1,28 +1,41 @@
 ## 0-7-2 回复（对应 `code-review-0-7-2.md`）
 
-### 基线与结论
+### 内部整改说明与决定
 
-- 评审基线：v0.6.3 `f4045ea9163014389ef0406cae4d56bd527d9ddf`；本报告复核的前次整改提交为 `147f76b6e9c8d240ebd9b78cdd617a59dd7533e8`。
-- 本回复及 R72-1 整改将提交为新的修正 commit。该 commit 不因本回复自动成为已评审 commit，仍须由下一份独立版本化 code review 覆盖后才可解除发布阻止。
-- R72-1 已修正；未修改 `code-review-0-7-2.md` 或任何历史 review/response。
+- 本文件是未发布 **0.7.1** 开发过程中的内部 R72-1 整改回复；文件名 `0-7-2` 不代表 v0.7.2，不创建或授权任何 0.7.2 release。
+- 评审基线：已发布 v0.7.0 `e96f60f5af700c3733ee84f38f1b1391261795e0`；前序 lifecycle 修正为 `853f26ab8b3219a95d5467dd847e0729e847974c`。
+- 本回复仅处理 [`code-review-0-7-2.md`](code-review-0-7-2.md) 的 R72-1；未修改任何 B 评审报告或 review ledger。
+- 决定：R72-1 的 P2 覆盖缺口已补充。新增整改提交仍须由后续独立 reviewer 复核，才能作为 0.7.1 发布闭环的一部分。
 
-### R72-1 — Fetch Standard safe-port policy 遗漏 6000
+### R72-1 — CommitInspectorPanel 缺少真实 adapter lifecycle regression
 
-- [x] **已修正。** `test/llmClient.test.ts` 现以 Fetch Standard [bad-port table](https://fetch.spec.whatwg.org/#port-blocking) 为唯一 policy source：加入 `6000` 和标准成员 `0`，移除非标准的 `4333`。集合现在与当前标准表精确相等；`isFetchSafeTestPort()` 仍以 `0..65535` 范围检查拒绝不可能由 TCP listen 返回的 `65536`。
-- [x] **完整策略和边界回归已更新。** 测试以标准完整 83 项的数组与 helper set 做 exact equality，并逐项断言拒绝。还显式断言 `5060`、`5061`、`6000`、`6667`、`10080`、`0` 和 `65536` 均为 `false`，正常端口 `18080` 为 `true`。
-- [x] **真实 retry 生命周期测试保留并强化。** 测试用真实 `http.Server` 的首次 listener 模拟 `6000` 分配；第二次 `listen` 前必须观察到第一次 listener 的 `close`，再确认成功安全监听。这覆盖 listen → inspect → close → retry 的实际资源生命周期，而不是仅检查端口数组。
-- [x] **异常清理保持。** `withServer()` 将 listener 分配/retry 和测试回调置于 `try/finally` 中，异常时若 server 仍在监听则关闭；正常路径也关闭。
-- 测试证据：`npx tsx --test test/llmClient.test.ts` 连续 12 次均为 8/8 通过；`npm test` 为 120/120 通过，约 409 秒。最终命令与结果见下表。
+- [x] **已修正。**
+- 实现：新增 `test/commitInspectorPanel.test.ts`，在 Node 测试中拦截 `vscode` runtime import，提供最小 fake `WebviewPanel` / `Webview` adapter；真实实例化 `CommitInspectorPanel`，执行其实际 `open()`、`close()`、native `onDidDispose()` 和 `onDidReceiveMessage()` wiring。
+- 覆盖路径：
+  ```text
+  open(first)
+  → host close / panel.dispose / native dispose
+  → open(second)
+  → delayed first native dispose callback
+  → second remains current and receives exactly one further show payload
+  → close(second)
+  → open(third)
+  → extension dispose
+  ```
+- 断言：每次 reopen 都新建可用 panel；旧 dispose callback 不清空 successor；每个当前 panel 只有一个 active message listener 和一个 active dispose listener；listener 在 close/dispose 后清理；postMessage 只发送到当前 panel；inspector action message 只回调一次。
 
-### 最终验证
+### 验证
 
 | 命令 | 结果 |
 | --- | --- |
-| `npm run typecheck` | 通过 |
-| `npx tsx --test test/llmClient.test.ts`（连续 12 次） | 每次 8/8 通过 |
-| `npm test` | 120/120 通过，约 409 秒 |
-| `npm run compile` | 通过 |
-| `node --check media/main.js` | 通过 |
-| `git diff --check` | 通过，无空白错误 |
+| `npx tsx --test test/commitInspectorPanel.test.ts` | **1/1 通过**。 |
+| `npm run typecheck` | 通过。 |
+| `npm test` | **126/126 通过**（约 377 秒），包含真实 adapter lifecycle regression。 |
+| `npm run compile` | 通过。 |
+| `node --check media/main.js` / `git diff --check` | 通过。 |
 
-R72-1 的新修正提交及本回复仍待独立 reviewer 复核；未推送、未打 tag。
+### 人工验收边界
+
+- [ ] 真实 VS Code 连续验证 inspector：右击或 Shift+F10 打开 → 点击其他编辑器/selection 关闭 → 重开，至少三轮。
+- [ ] 多 editor group、panel 隐藏/显示、extension reload 下验证 inspector action 不丢失且无重复 listener。
+- [ ] 完成 review5 的 IME、pointer/触控、SCM header action/confirmation/staged AI、High Contrast 与 screen reader 验收。

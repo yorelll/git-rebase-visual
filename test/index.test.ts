@@ -12,6 +12,7 @@ import "./inlineToastState.test";
 import "./rebasePointerDragState.test";
 import "./canonicalSnapshot.test";
 import "./panelLifecycle.test";
+import "./commitInspectorPanel.test";
 import "./composeDraft.test";
 import "./composePanelState.test";
 import "./composePolicy.test";
