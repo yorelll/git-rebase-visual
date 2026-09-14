@@ -1,84 +1,110 @@
-# Git Rebase Visual — 补充代码评审报告（0.7.2）
+# Git Rebase Visual — 补充独立代码评审报告（0.7.2）
 
-> **评审基线**：`f4045ea9163014389ef0406cae4d56bd527d9ddf`（v0.6.3）。
+> **内部审查轮次说明**：本文档名中的 `0.7.2` 是未发布 **0.7.1** 开发过程中的第二轮独立审查编号，**不代表 v0.7.2，也不创建或授权任何 0.7.2 release**。0.7.1 的最终发布记录仍须由主 agent 汇总。
 >
-> **前序评审**：[`code-review-0-7-1.md`](code-review-0-7-1.md) 发现 R71-1；本次只独立复核其整改提交。
+> **评审基线**：已发布 v0.7.0 `e96f60f5af700c3733ee84f38f1b1391261795e0`。
 >
-> **本次独立复核覆盖提交**：`147f76b6e9c8d240ebd9b78cdd617a59dd7533e8` — `fix: complete LLM safe port policy`。
+> **前序报告 / 回复**：[`code-review-0-7-1.md`](code-review-0-7-1.md) 的 R71-1；[`review-response-0-7-1.md`](review-response-0-7-1.md)。
 >
-> **范围**：Fetch/URL Standard forbidden-port 集合、`listen(0)` 后 inspect/close/retry 的资源及异常清理、`withServer()` cleanup、端口边界与 IPv4 loopback、retry 回归是否实际触发服务器生命周期，以及原有 LLM deadline/cancellation/SSE 语义和 0.7.1 回复/台账准确性。
+> **本次独立复核提交**：`853f26ab8b3219a95d5467dd847e0729e847974c` — `fix: stabilize commit inspector lifecycle`。
 >
-> **结论**：**不批准 / 不可发布。** 发现 1 项 P1：所谓完整集合仍遗漏 Fetch 标准明确禁止的 `6000`（X11）。Windows 当前动态 TCP 范围包含该端口，故 `listen(0)` 仍可随机得到一个会被 Fetch 在 handler 之前拒绝的端口。`147f76b` 需要 Agent A 再次修复并接受独立复核。
+> **输入**：review5 的全部 9 张参考图、R71-1 复现路径、commit diff、panel ownership/dispose call path、focused DOM/真实 Git 测试和完整套件。
+>
+> **结论**：R71-1 的**功能性 P1 已修正**，未发现新的 P0/P1。`PanelLifecycle` lease 与 `CommitInspectorPanel` 的 per-panel listener map 正确消除了 close → reopen 过程中的 stale disposed panel 和旧 dispose callback 清理 successor 的风险。发现 1 项 P2 自动化覆盖缺口（R72-1）：现有 regression 验证纯 lifecycle helper，尚未 mock/驱动 `CommitInspectorPanel` 的真实 `WebviewPanel.onDidDispose` adapter 路径。它不否定本轮 P1 修正，但应在发布前补充或在真实 VS Code 连续操作中完成针对性验收。
 
 ---
 
-## 1. Finding
+## 1. 发布裁决
 
-### R72-1 — P1：safe-port policy 仍遗漏 Fetch bad port `6000`，LLM 测试仍可随机在 handler 前失败
+- [x] **R71-1 P1 已修正并独立复核。** 关闭 inspector 后的后续右键/键盘 Context Menu 可以获得新的 panel ownership；旧 callback 不会清空 successor。
+- [x] **未发现新的 P0/P1。**
+- [ ] **R72-1 P2 测试覆盖待补。** 需覆盖具体 `CommitInspectorPanel` adapter 的 native dispose → close/reopen，而不能仅覆盖其抽出的 pure lease helper；或在真实 VS Code 中完成等价、可记录的连续循环验收。
+- [ ] **发布前人工验收仍必需。** IME、pointer/触控 drag、SCM header action/confirmation/staged AI、High Contrast、screen reader、窄窗口和多 editor group 的 inspector close/reopen。
 
-- [ ] **未修复；发布阻止。**
+---
 
-**位置**：`test/llmClient.test.ts` 的 `fetchForbiddenPorts`、`isFetchSafeTestPort()`、policy exact-equality regression（约 10–20、70–87 行）。
+## 2. R71-1 复核
 
-**根因**：`147f76b` 补入了 `5060` 和 `5061`，但 Fetch Standard 当前 [bad-port table](https://fetch.spec.whatwg.org/#port-blocking) 还包含 **`6000`**。本次独立将源码 policy 与标准表逐项比较，结果为：标准表 83 项，源码 set 82 项；标准项缺少 `0`、`6000`，另有非标准的 `4333`。
+### R71-1 — P1：关闭 Commit Inspector 后无法可靠重开
 
-`0` 虽未放进 set，但 `isFetchSafeTestPort()` 的 `port > 0` 已正确拒绝它，因此不构成 allocation 漏网。相反，`6000` 既不在 set，也通过整数/范围检查：`isFetchSafeTestPort(6000)` 当前为 `true`。`4333` 的额外拒绝只会造成无害的重试，却使回复中“与完整标准表 exact equality”的声明不成立；不能替代缺失的 `6000`。
+- [x] **已修正。**
 
-本 reviewer 在 Node `v24.16.0` 直接确认：
+**原问题**：首次 panel 的 `onDidDispose` 被放入 class-level disposable collection；第一次 editor-area close 销毁其自身 callback，后续新 panel 没有 native cleanup，`this.panel` 可保留 disposed object，导致后续右键/详情无法重开。
 
-```text
-fetch("http://127.0.0.1:6000") → fetch failed; cause=bad port
+**修正实现**：
+
+- `src/ui/panelLifecycle.ts` 新增带 id 的 `PanelLease`。`release()` 幂等，并且仅当 lease 仍是 active 时清空 current；延迟到达的旧 native dispose 不会清除 successor。
+- `src/ui/commitInspectorPanel.ts` 不再共享所有 native listener。每个 `WebviewPanel` 由自身 lease ID 对应 `panelDisposables`；native `onDidDispose` 仅 release 当前 lease 并清理该 panel 的 listener collection。
+- `close()` 只 dispose 当前 panel；下一次 `open()` 在 lifecycle current 为空时创建新 `WebviewPanel`，并重新注册 listener/HTML。
+- `dispose()` 可与 native dispose 重复调用，listener cleanup 为 map-key scoped/idempotent。
+
+**复核结果**：通过。close → reopen → delayed old dispose → close → reopen 的 ownership 状态机满足 R71-1；没有发现旧 callback 清空新 panel 或重复 cleanup 的路径。
+
+---
+
+## 3. Finding
+
+### R72-1 — P2：R71-1 的 regression 仅覆盖抽象 lease，不直接验证 `CommitInspectorPanel` 的 VS Code adapter wiring
+
+- [ ] **待补充自动化覆盖；不阻止本轮 P1 功能修正。**
+
+**位置**：`test/panelLifecycle.test.ts:5-23`；关联实现 `src/ui/commitInspectorPanel.ts:47-88`。
+
+**问题**：新增 test 正确覆盖了 `PanelLifecycle` 的 open → release → successor → delayed old release → reopen。然而它没有构造 fake `vscode.WebviewPanel`，因而不直接执行 `CommitInspectorPanel.open()` 中：
+
+```ts
+panel.onDidDispose(() => {
+  lease.release();
+  this.disposePanelListeners(lease.id);
+});
 ```
 
-目标 Windows 的 TCP dynamic port range 为 `1024–15000`，其中包含 `6000`。因此 `server.listen(0, "127.0.0.1")` 仍可能分配到 6000；helper 会把它作为 safe URL 交给 `fetch`，所有 `withServer()` 测试会在 HTTP handler 前报 `fetch failed: bad port`。deadline、caller cancellation 和 SSE 的既有断言在该轮将不能验证各自的语义。
+以及真实 adapter 的 `close()` → panel.dispose() → native callback → second `open()` 链路。R71-1 正是该 adapter 生命周期错误，而非单独的 pure ownership 算法；仅 helper test 虽能证明核心逻辑，却不能防止 panel listener wiring 被未来改坏。
 
-**必须修复**：
+**要求**：
 
-1. 以 Fetch Standard bad-port table 为唯一规范来源：补入 `6000`，将 `0` 作为标准表成员（或保留独立边界拒绝但不能再声称 set 本身 exact equality），并移除/单独说明非标准 `4333`。推荐使 policy set 与表精确相等，再由范围检查保护 `> 65535`。
-2. 更新 exact-equality/table-driven regression，明确断言 `6000` 为 false；保留 `0`、`5060`、`5061`、`6667`、`10080`、`65536` 和正常端口的边界覆盖。retry regression 应继续使用真实 `http.Server`，在返回 forbidden allocation 后断言 close 后才能再次 listen；不能退化为只断言数组。
-3. 不得改写本报告或 [`review-response-0-7-1.md`](review-response-0-7-1.md)。应新建 `review-response-0-7-2.md`，如实记录 R72-1 的决定、实现和测试；重新运行完整验证后交由下一轮独立 review。
-
----
-
-## 2. 已核验但不足以解除阻止的问题
-
-- `5060`、`5061`、`6667`、`10080` 已在源码 policy 中，且当前 Node Fetch 均以 `bad port` 拒绝；本问题是遗漏 `6000`，不是对前四项的回退。
-- `isFetchSafeTestPort(0)` 和 `isFetchSafeTestPort(65536)` 均为 false；在真实 `127.0.0.1` loopback ephemeral port 上 Fetch 成功，IPv4 bind 行为正确。
-- 默认路径确实是 `listen(0, "127.0.0.1")` → inspect returned port → forbidden 时 `close()` → retry。`withServer()` 已将 listen/retry 和 run 包在 `try/finally`，并只在 `server.listening` 时 close；listen/retry 或 handler 异常后不会遗留已监听的 server。
-- retry 回归并非只检查数组：它使用真实 `http.Server`，首次 listener 返回模拟的 forbidden `5060`，随后验证 helper 已关闭并重新 listen（两次 attempts）后才返回 safe port。该测试的 server lifecycle 覆盖有效，但因为 policy/table regression 漏掉 `6000`，不能证明完整 forbidden-port 策略。
-- 原有 LLM 语义仍由 focused tests 实际覆盖并通过：SSE delta/invalid event、非泄露 HTTP error、deadline、caller cancellation、mid-stream cancellation 和 mid-stream deadline；不过一旦分配到遗漏的 6000，上述 HTTP-handler 语义测试会先因 bad port 失败。
+1. 建立最小 fake VS Code panel/webview harness，或把 adapter listener binding 再抽成可注入单元；覆盖至少三轮：open → host close → open → native delayed old dispose → current preserved → close → open。
+2. 断言每轮重新注册 message/dispose listener、`postMessage(show)` 到正确新 panel，旧 panel 的 dispose 不影响 successor，map listener 数不累积。
+3. 保留真实 VS Code 人工走查作为补充，而不是把 Node helper test 描述为真实 UI lifecycle 测试。
 
 ---
 
-## 3. 文档与台账核验
+## 4. review5 需求复核状态
 
-- [`review-response-0-7-1.md`](review-response-0-7-1.md) 对 `5060/5061`、0/65536 边界、cleanup 和其记录的 120/120 测试结果的描述可由本轮复现；但其“当前完整 bad-port table”“exact equality”及“R71-1 已修正”的结论不准确，因为缺少 `6000` 且 set 有额外 `4333`。按版本化流程不修改历史回复；R72-1 的后续答复应位于新文件 `review-response-0-7-2.md`。
-- [`code-review-commit.md`](code-review-commit.md) 中 `ed9c11c` 的历史记录与其当时的 R71-1 状态相符，但尚未覆盖本次目标 `147f76b`。本报告提交时会在同一 docs-only change 追加该完整 SHA、报告路径和未批准状态。
+本轮只对 R71-1 整改重新审查；以下结论沿用前一轮并检查本次整改未回退：
+
+| 需求 | 本轮状态 |
+| --- | --- |
+| 1. routine refresh 不应令正常 drag stale | [x] 无回退；canonical snapshot/revision 在 routine status refresh 下保持稳定，host revision/order/lock 复验仍在。 |
+| 2. 顶部重复 batch actions | [x] 无回退。 |
+| 3. editor-area click 关闭 context surface | [x] close bridge 仍使用公开 VS Code editor/window events；R71-1 修正后可重新打开。真实 editor area 行为仍需人工验收。 |
+| 4–8. SCM 路径/overlay/row Diff/restore-delete/header bulk/staged AI | [x] 无回退；真实 Git integration tests 通过。 |
+| 9. Refresh inline “已刷新” | [x] 无回退。 |
+| 10–11. compact locked summary / expanded rail | [x] 无回退。 |
+| 12. edit action first | [x] 无回退。 |
+| 13. cross-pane inspector | [x] ownership修正后可在 repeated close/reopen 生命周期中继续使用；R72-1 仅要求补 adapter regression。 |
+| 16. Alt+Arrow | [x] 评估结论不变：focused row 的 extension path 已处理；编辑器/list/terminal 的系统 keybinding 竞争不应被插件抢占。 |
 
 ---
 
-## 4. 独立验证证据
+## 5. 独立验证证据
 
-所有命令在目标 worktree `D:\work\tools\git plugin\.claude\worktrees\agent-a6fea5ad466242226`、提交 `147f76b6e9c8d240ebd9b78cdd617a59dd7533e8` 上执行；本 reviewer 未修改目标实现。
+已查看 review5 全部参考图：`选中多个右键.png`、`文件暂存管理界面.png`、`参考vscode文件暂存管理界面.png`、`vscode工作区1.png`、`vscode工作区2.png`、`长黄线参考1.png`、`message显示界面.png`、`跨界面显示.png`、`vscode快捷键.png`。
 
 | 命令 / 方法 | 结果 |
 | --- | --- |
-| Fetch Standard 当前 bad-port table 与源码 set 逐项比较 | 标准 83 项；源码 82 项；缺 `0, 6000`，多 `4333`。其中 0 已由 predicate 拒绝，6000 会漏过。 |
-| Node Fetch `127.0.0.1:5060/:5061/:6000/:6667/:10080` | 五者均为 `cause=bad port`；确认 R72-1。 |
-| `netsh int ipv4 show dynamicport tcp` | `1024–15000`（13977 ports），包含 6000。 |
-| IPv4 loopback probe | `server.listen(0, "127.0.0.1")` 实际 Fetch 返回预期内容。 |
+| `git diff 8a61f65..853f26a` + lifecycle source path inspection | 确认 R71-1 改为 lease + per-panel listener collection，未见 P0/P1 回归。 |
+| `npx tsx --test test/panelLifecycle.test.ts test/webviewDom.test.ts test/canonicalSnapshot.test.ts test/worktreeChanges.integration.test.ts` | **13/13 通过**。 |
 | `npm run typecheck` | 通过。 |
-| `npx tsx --test test/llmClient.test.ts` 连续 12 次 | 每次 **8/8 通过**；覆盖现有 retry、deadline/cancel/SSE 语义，但不能覆盖漏掉的 6000 policy。 |
-| `npm test` | **120/120 通过**，约 404 秒。 |
+| `npm test` | **125/125 通过**，约 383 秒。 |
 | `npm run compile` | 通过。 |
 | `node --check media/main.js` | 通过。 |
-| `git diff --check 147f76b^..147f76b` | 通过，无空白错误。 |
-| target worktree `git status --short` | 无输出，干净。 |
+| `git diff --check` | 通过。 |
 
 ---
 
-## 5. 后续要求
+## 6. 后续要求
 
-1. Agent A 应在新的 implementation commit 中完成 R72-1，且不得修改既有 `code-review-0-7-1.md`、本报告或历史回复。
-2. Agent A 应新建 [`review-response-0-7-2.md`](review-response-0-7-2.md)，逐项说明 R72-1 的整改、精确测试证据和最终验证结果。
-3. 整改 implementation commit 不会自动视为已评审；须由新的独立版本化 review 覆盖后才可解除 0.7 发布阻止。
+1. Agent A 应创建新的整改提交处理 R72-1，或主 agent 在真实 VS Code 按第 3 节的连续 close/reopen 场景完成并记录人工验收；不得修改本报告。
+2. 若出现新的 implementation commit，该 commit 不自动成为已评审提交，必须由不同 reviewer 进行后续独立复核。
+3. 在 R72-1 的自动化或明确人工验收闭环前，发布说明不得声称 Commit Inspector lifecycle 已实现完整端到端自动覆盖。

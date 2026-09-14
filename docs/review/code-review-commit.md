@@ -35,9 +35,10 @@
 | `2711b66681ca20e530a94651a1dca702234de12f` | `fix: address 0.7 interaction review findings` | [`code-review-0-7-0.md`](code-review-0-7-0.md) | [`review-response-0-7-0.md`](review-response-0-7-0.md) — 0-7-0 回复 | 已评审；R70-1 至 R70-5 整改有效 | 2026-09-13 | 与后续独立复核的 `ed9c11c` 内容一致；R71-1 在后续候选提交中修正。 |
 | `ee85a85c208a44a491e6b228415362bd45c4025c` | `fix: complete LLM safe port policy` | [`code-review-0-7-0.md`](code-review-0-7-0.md) | [`review-response-0-7-0.md`](review-response-0-7-0.md) — 0-7-0 回复 | 已评审；R71-1 整改有效，R72-1 在后续候选提交中修正 | 2026-09-13 | 与独立复核使用的 `147f76b` 内容一致。 |
 | `715234af9794d369fae724620e299a371741dd41` | `fix: align LLM ports with Fetch standard` | [`code-review-0-7-0.md`](code-review-0-7-0.md) | [`review-response-0-7-0.md`](review-response-0-7-0.md) — 0-7-0 回复 | 已评审；R72-1 整改有效，0.7.0 自动化批准 | 2026-09-13 | 与最终独立核验的 `371aafb` 内容一致；完整 Fetch bad-port policy 已复核。 |
-| `8a61f6549117b9729f2f269ddc173e76bc085512` | `feat: refine review5 rebase interactions` | [`code-review-0-7-1.md`](code-review-0-7-1.md) | 待 Agent A 创建 `review-response-0-7-1.md` | 已评审；R71-1 P1 已发现，待整改和独立复核 | 2026-09-14 | 基线为已发布 v0.7.0 `e96f60f`；review5 的 inspector lifecycle 在关闭后无法可靠重开，当前不可发布。 |
+| `8a61f6549117b9729f2f269ddc173e76bc085512` | `feat: refine review5 rebase interactions` | [`code-review-0-7-1.md`](code-review-0-7-1.md) | [`review-response-0-7-1.md`](review-response-0-7-1.md) — 0-7-1 回复 | 已评审；R71-1 P1 已发现，后续整改已由 0-7-2 复核 | 2026-09-14 | 基线为已发布 v0.7.0 `e96f60f`；review5 的 inspector lifecycle 初始实现关闭后无法可靠重开。 |
+| `853f26ab8b3219a95d5467dd847e0729e847974c` | `fix: stabilize commit inspector lifecycle` | [`code-review-0-7-2.md`](code-review-0-7-2.md) | [`review-response-0-7-1.md`](review-response-0-7-1.md) — R71-1 整改回复 | 已评审；R71-1 P1 已修正，R72-1 P2 adapter lifecycle 自动化覆盖待补 | 2026-09-14 | `0-7-2` 为未发布 0.7.1 的内部补充审查轮次，不是 release version。 |
 
-> `code-review-0-7-1.md`、`code-review-0-7-2.md` 及对应回复保留为未发布 0.7.0 开发过程的原始独立审查证据，不是 release version 记录。本表只以最终 `code-review-0-7-0.md` / `review-response-0-7-0.md` 记录可发布候选的实际重建 SHA 与结论。
+> `code-review-0-7-1.md`、`code-review-0-7-2.md` 及对应回复保留为未发布 0.7.0 / 0.7.1 开发过程的原始独立审查证据，不是 release version 记录。本表只以最终发行版本的报告/回复记录可发布候选的实际 SHA 与结论。
 
 ## 待评审 Commit
 
