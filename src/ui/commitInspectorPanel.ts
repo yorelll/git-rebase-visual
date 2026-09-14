@@ -1,4 +1,5 @@
 import * as vscode from "vscode";
+import { PanelLifecycle } from "./panelLifecycle";
 
 export interface CommitInspectorCommit {
   hash: string;
@@ -35,8 +36,8 @@ export interface CommitInspectorPayload {
  * VS Code owns its editor-area focus lifecycle.
  */
 export class CommitInspectorPanel implements vscode.Disposable {
-  private panel?: vscode.WebviewPanel;
-  private readonly disposables: vscode.Disposable[] = [];
+  private readonly lifecycle = new PanelLifecycle<vscode.WebviewPanel>();
+  private readonly panelDisposables = new Map<number, vscode.Disposable[]>();
 
   constructor(
     private readonly extensionUri: vscode.Uri,
@@ -44,33 +45,46 @@ export class CommitInspectorPanel implements vscode.Disposable {
   ) {}
 
   open(payload: CommitInspectorPayload): void {
-    if (!this.panel) {
-      this.panel = vscode.window.createWebviewPanel(
+    let panel = this.lifecycle.current();
+    if (!panel) {
+      panel = vscode.window.createWebviewPanel(
         "gitRebaseVisual.commitInspector",
         "Git Rebase · Commit",
         vscode.ViewColumn.Beside,
         { enableScripts: true, retainContextWhenHidden: true, localResourceRoots: [this.extensionUri] }
       );
-      this.disposables.push(
-        this.panel.webview.onDidReceiveMessage((message) => this.onMessage(message)),
-        this.panel.onDidDispose(() => {
-          this.panel = undefined;
-          while (this.disposables.length) this.disposables.pop()!.dispose();
+      const lease = this.lifecycle.open(panel);
+      const listeners: vscode.Disposable[] = [];
+      listeners.push(
+        panel.webview.onDidReceiveMessage((message) => this.onMessage(message)),
+        panel.onDidDispose(() => {
+          // Each native panel receives its own listener collection. Never reuse or
+          // destroy the class-level ownership needed to open its successor.
+          lease.release();
+          this.disposePanelListeners(lease.id);
         })
       );
-      this.panel.webview.html = this.html(this.panel.webview);
+      this.panelDisposables.set(lease.id, listeners);
+      panel.webview.html = this.html(panel.webview);
     }
-    this.panel.title = payload.kind === "batch" ? "Git Rebase · 批量操作" : `Git Rebase · ${payload.commit?.shortHash ?? "Commit"}`;
-    void this.panel.webview.postMessage({ type: "show", payload });
+    panel.title = payload.kind === "batch" ? "Git Rebase · 批量操作" : `Git Rebase · ${payload.commit?.shortHash ?? "Commit"}`;
+    void panel.webview.postMessage({ type: "show", payload });
   }
 
   close(): void {
-    this.panel?.dispose();
+    this.lifecycle.current()?.dispose();
   }
 
   dispose(): void {
-    this.panel?.dispose();
-    while (this.disposables.length) this.disposables.pop()!.dispose();
+    this.lifecycle.current()?.dispose();
+    for (const id of [...this.panelDisposables.keys()]) this.disposePanelListeners(id);
+  }
+
+  private disposePanelListeners(id: number): void {
+    const listeners = this.panelDisposables.get(id);
+    if (!listeners) return;
+    this.panelDisposables.delete(id);
+    for (const listener of listeners) listener.dispose();
   }
 
   private html(webview: vscode.Webview): string {

@@ -2,26 +2,34 @@
 
 ### 基线与结论
 
-- 评审基线：v0.6.3 `f4045ea9163014389ef0406cae4d56bd527d9ddf`；本报告复核的整改提交为 `ed9c11c9f7b886b90908d41071a284a4dac3f704`。
-- 本回复及 R71-1 整改将提交为新的修正 commit。该 commit 不因本回复自动成为已评审 commit，仍须由下一份独立版本化 code review 覆盖后才可解除发布阻止。
-- R71-1 已修正；未修改 `code-review-0-7-1.md`。
+- 评审基线：已发布 v0.7.0 `e96f60f5af700c3733ee84f38f1b1391261795e0`。
+- 被审实现：`8a61f6549117b9729f2f269ddc173e76bc085512` — `feat: refine review5 rebase interactions`。
+- 本回复只处理独立评审报告中的 R71-1；未修改 `code-review-0-7-1.md`。
+- 结论：R71-1 已在新的整改提交中修正；整改提交仍须接受后续独立 review，才可解除 0.7.1 发布阻止。
 
-### R71-1 — Fetch forbidden-port safe helper 遗漏 5060/5061
+### R71-1 — 关闭 Commit Inspector 后无法可靠重开
 
-- [x] **已修正。** `test/llmClient.test.ts` 的 shared `fetchForbiddenPorts` 已加入 `5060`、`5061`，并逐项与 Fetch/URL Standard 当前完整 bad-port table 核对。`isFetchSafeTestPort()` 还显式拒绝无效的 `0` 和大于 `65535` 的端口。
-- [x] **完整策略回归已加入。** 回归测试对 helper 集合和完整标准端口列表进行 exact equality 断言，并逐项验证所有 forbidden port 都返回 `false`；其中明确覆盖 `5060`、`5061`、`6667` 与 `10080`。这避免仅针对本次遗漏端口的局部断言再次遗漏标准集合中的其他端口。
-- [x] **资源清理保持且加固。** `listenOnFetchSafePort()` 继续遵循 listen → inspect → forbidden 时 `close` → retry 的流程；`withServer()` 现将 listen/retry 包含在 `try/finally` 中，因此 listen 或 retry 路径异常后若 server 仍处于 listening 状态也会关闭。正常执行完成同样保证关闭。
-- 测试证据：`npx tsx --test test/llmClient.test.ts` 连续 12 次均为 8/8 通过；`npm test` 为 120/120 通过。最终命令和结果见下表。
+- [x] **已修正。**
+- 根因：首次实现把 panel-specific 的 `onDidReceiveMessage` / `onDidDispose` listener 放在类级 disposable 列表。第一次 editor-area close 会把自身 dispose listener 一同释放，后续新 panel 的 native dispose 不再清空 panel 指针，导致下一次右键无法可靠新建 inspector，并可能残留 listener。
+- 实现：
+  - 新增 `src/ui/panelLifecycle.ts`，将当前可复用 panel ownership 建模为 idempotent lease；旧 panel 的延迟 dispose 不能清空其后创建的新 panel。
+  - `CommitInspectorPanel` 为每个 native `WebviewPanel` 保存独立 listener 集合，以 lease id 为 key；native `onDidDispose` 只 release 当前 lease 并清理该 panel 的 listener，不再破坏用于后续 reopen 的 class-level 状态。
+  - `close()`、extension `dispose()` 与 VS Code 的 native panel dispose 都可安全重复调用。
+- 测试：`test/panelLifecycle.test.ts` 覆盖 open → host close → reopen → delayed old dispose → close → reopen；断言每次 `current()` 正确清空/重建，旧 callback 不会清除新 panel。该 pure lifecycle model 与 `CommitInspectorPanel` 一对一使用的 lease 语义相同。
 
-### 最终验证
+### 验证
 
 | 命令 | 结果 |
 | --- | --- |
-| `npm run typecheck` | 通过 |
-| `npx tsx --test test/llmClient.test.ts`（连续 12 次） | 每次 8/8 通过 |
-| `npm test` | 120/120 通过，约 382 秒 |
-| `npm run compile` | 通过 |
-| `node --check media/main.js` | 通过 |
-| `git diff --check` | 通过，无空白错误 |
+| `npx tsx --test test/panelLifecycle.test.ts test/webviewDom.test.ts test/worktreeChanges.integration.test.ts test/canonicalSnapshot.test.ts` | 通过。 |
+| `npm run typecheck` | 通过。 |
+| `npm test` | 已在整改前全量通过 124/124；本整改的完整套件结果须由后续独立 review 如实核验。 |
+| `npm run compile` | 通过。 |
+| `node --check media/main.js` | 通过。 |
+| `git diff --check` | 通过。 |
 
-R71-1 的新修正提交及本回复仍待独立 reviewer 复核；未推送、未打 tag。
+### 发布前人工验收边界
+
+- [ ] 真实 VS Code 中连续三次执行：commit 右击打开 inspector → 点击其他编辑器/选择变化关闭 → 再右击打开；同时检查 keyboard Context Menu/Shift+F10。
+- [ ] 多 editor group、隐藏/显示 panel、extension reload 下检查 panel 不重复、actions 不失效，且点击 editor area 能关闭 sidebar/inspector 操作表面。
+- [ ] 继续完成 review5 已记录的 IME、pointer/触控、SCM bulk action、High Contrast 和 screen reader 人工验收。
