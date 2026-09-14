@@ -94,6 +94,7 @@ import { isDraftOnlyAiGenerationAllowedDuringRebase, isDraftOnlyComposeAllowedDu
 import { ComposePanel } from "./composePanel";
 import { CommitInspectorPanel } from "./commitInspectorPanel";
 import { InspectorPreviewCoordinator, InspectorSession } from "./inspectorPreviewState";
+import { shouldDismissInspectorForActiveTextEditor, shouldDismissInspectorForTextEditorSelection } from "./inspectorDismissPolicy";
 import { UndoJournal, UndoRecord, undoPreflight } from "../git/undo";
 
 const PENDING_STASH_KEY = "gitRebaseVisual.pendingStash";
@@ -190,16 +191,18 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
       vscode.workspace.onDidDeleteFiles(() => this.scheduleRefresh()),
       vscode.workspace.onDidRenameFiles(() => this.scheduleRefresh()),
       vscode.workspace.onDidSaveTextDocument(() => this.scheduleRefresh()),
-      // An editor click lives outside the webview document. Public window/editor
-      // events are the only reliable bridge for dismissing sidebar or companion
-      // editor surfaces opened from its context menu.
-      vscode.window.onDidChangeActiveTextEditor(() => {
+      // A normal editor click lives outside the sidebar webview. WebviewPanel
+      // focus, however, may report no active TextEditor; treating that as an
+      // external editor click would self-close inspector action buttons.
+      vscode.window.onDidChangeActiveTextEditor((editor) => {
         this.post({ type: "closeMenu", source: "host:activeEditor" });
+        if (!shouldDismissInspectorForActiveTextEditor(editor)) return;
         this.cancelInspectorPreview(true);
         this.inspector.close();
       }),
-      vscode.window.onDidChangeTextEditorSelection(() => {
+      vscode.window.onDidChangeTextEditorSelection((event) => {
         this.post({ type: "closeMenu", source: "host:editorSelection" });
+        if (!shouldDismissInspectorForTextEditorSelection(event)) return;
         this.cancelInspectorPreview(true);
         this.inspector.close();
       }),
