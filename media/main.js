@@ -623,7 +623,7 @@
     // otherwise close the non-obscuring editor-area preview.
     tipHideTimer = setTimeout(() => {
       if (tipHash) {
-        vscode.postMessage({ type: "dismissCommitPreview" });
+        vscode.postMessage({ type: "dismissCommitPreview", hash: tipHash });
         tipHash = null;
       }
     }, 180);

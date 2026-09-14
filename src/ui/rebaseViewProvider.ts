@@ -93,6 +93,7 @@ import { nextCanonicalSnapshotRevision } from "./canonicalSnapshot";
 import { isDraftOnlyAiGenerationAllowedDuringRebase, isDraftOnlyComposeAllowedDuringRebase } from "./composePolicy";
 import { ComposePanel } from "./composePanel";
 import { CommitInspectorPanel } from "./commitInspectorPanel";
+import { InspectorPreviewCoordinator, InspectorSession } from "./inspectorPreviewState";
 import { UndoJournal, UndoRecord, undoPreflight } from "../git/undo";
 
 const PENDING_STASH_KEY = "gitRebaseVisual.pendingStash";
@@ -151,6 +152,7 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
   private readonly statusBar: vscode.StatusBarItem;
   private readonly compose: ComposePanel;
   private readonly inspector: CommitInspectorPanel;
+  private readonly inspectorPreview = new InspectorPreviewCoordinator();
   private previewCloseTimer?: NodeJS.Timeout;
   private generationCancel?: AbortController;
   private readonly commitDiffCache = new Map<string, ReturnType<typeof commitDiffPlan>>();
@@ -170,6 +172,7 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     this.inspector = new CommitInspectorPanel(ctx.extensionUri, (message) => this.onMessage(message), () => {
       if (this.previewCloseTimer) clearTimeout(this.previewCloseTimer);
       this.previewCloseTimer = undefined;
+      this.inspectorPreview.invalidate();
     });
     inlineToastSink = (message, duration) => this.postInlineToast(message, duration);
     ctx.subscriptions.push(this.output, this.statusBar, this.compose, this.inspector, new vscode.Disposable(() => {
@@ -192,12 +195,12 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
       // editor surfaces opened from its context menu.
       vscode.window.onDidChangeActiveTextEditor(() => {
         this.post({ type: "closeMenu", source: "host:activeEditor" });
-        this.cancelInspectorPreview();
+        this.cancelInspectorPreview(true);
         this.inspector.close();
       }),
       vscode.window.onDidChangeTextEditorSelection(() => {
         this.post({ type: "closeMenu", source: "host:editorSelection" });
-        this.cancelInspectorPreview();
+        this.cancelInspectorPreview(true);
         this.inspector.close();
       }),
       vscode.window.onDidChangeWindowState(() => this.post({ type: "closeMenu", source: "host:windowState" })),
@@ -680,10 +683,9 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
           await this.openCommitInspector(cwd!, m.hash, "preview");
           break;
         case "dismissCommitPreview":
-          this.scheduleInspectorPreviewClose();
+          this.scheduleInspectorPreviewClose(m.hash);
           break;
         case "openCommitInspector":
-          this.cancelInspectorPreview();
           await this.openCommitInspector(cwd!, m.hash, "single");
           break;
         case "openBatchInspector":
@@ -2220,18 +2222,23 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     toast("info", snapshot.truncated ? "已生成只读 Diff 文档（输出已截断）。" : "已生成只读 Diff 文档。");
   }
 
-  /** Closes a hover preview after pointer travel but leaves explicit actions open. */
-  private scheduleInspectorPreviewClose(): void {
+  /** Closes only the matching hover preview after pointer travel. */
+  private scheduleInspectorPreviewClose(hash: unknown): void {
+    const dismissed = this.inspectorPreview.dismissPreview(hash);
+    if (!dismissed?.shouldClose) return;
     if (this.previewCloseTimer) clearTimeout(this.previewCloseTimer);
+    const session = dismissed.session;
     this.previewCloseTimer = setTimeout(() => {
       this.previewCloseTimer = undefined;
+      if (!this.inspectorPreview.finishPreviewClose(session)) return;
       this.inspector.close();
     }, 180);
   }
 
-  private cancelInspectorPreview(): void {
+  private cancelInspectorPreview(invalidate = false): void {
     if (this.previewCloseTimer) clearTimeout(this.previewCloseTimer);
     this.previewCloseTimer = undefined;
+    if (invalidate) this.inspectorPreview.invalidate();
   }
 
   /** Opens detail/actions beside the editor instead of obscuring timeline rows. */
@@ -2244,10 +2251,18 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
       throw new Error("commit 列表已更新，请刷新后重试。 ");
     }
     const commit = this.commits.find((item) => item.hash === hash)!;
+    const previewSession = kind === "preview" ? this.inspectorPreview.beginPreview(commit.hash) : undefined;
+    if (kind === "preview" && !previewSession) return;
+    const session: InspectorSession = previewSession ?? this.inspectorPreview.beginAction("single");
     const detail = await commitDetail(cwd, hash);
-    // A hover preview now uses the same editor-area companion (with no actions),
-    // so message detail remains visible without covering nearby timeline rows.
-    // It preserves editor focus and closes after the sidebar pointer leaves.
+    // A slow Git detail query must never overwrite an action inspector opened
+    // after the hover began. Preview and action sessions have separate tokens.
+    const canShow = kind === "preview"
+      ? this.inspectorPreview.showPreview(session)
+      : this.inspectorPreview.canShowAction(session);
+    if (!canShow) return;
+    // A hover preview uses the same editor-area companion (with no actions), so
+    // message detail remains visible without covering nearby timeline rows.
     this.cancelInspectorPreview();
     this.inspector.open({
       kind,
@@ -2269,11 +2284,13 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
 
   /** Opens batch actions in the same non-obscuring companion editor. */
   private async openBatchInspector(value: unknown): Promise<void> {
+    const session = this.inspectorPreview.beginAction("batch");
     this.cancelInspectorPreview();
     const hashes = this.selectedHashes(value);
     if (!hashes || hashes.length < 2) throw new Error("批量选择已过期；请刷新后重试。 ");
     const byHash = new Map(this.commits.map((commit) => [commit.hash, commit]));
     const generated = generatedDiffCommits(this.commits, hashes);
+    if (!this.inspectorPreview.canShowAction(session)) return;
     this.inspector.open({
       kind: "batch",
       revision: this.canonicalRevision,
