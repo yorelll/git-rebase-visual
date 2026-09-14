@@ -23,7 +23,7 @@
 | --- | --- |
 | `npx tsx --test test/panelLifecycle.test.ts test/webviewDom.test.ts test/worktreeChanges.integration.test.ts test/canonicalSnapshot.test.ts` | 通过。 |
 | `npm run typecheck` | 通过。 |
-| `npm test` | 已在整改前全量通过 124/124；本整改的完整套件结果须由后续独立 review 如实核验。 |
+| `npm test` | **125/125 通过**（约 383 秒），包含新增 inspector lifecycle regression。 |
 | `npm run compile` | 通过。 |
 | `node --check media/main.js` | 通过。 |
 | `git diff --check` | 通过。 |
