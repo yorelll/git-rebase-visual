@@ -95,6 +95,7 @@ import { ComposePanel } from "./composePanel";
 import { CommitInspectorPanel } from "./commitInspectorPanel";
 import { InspectorPreviewCoordinator, InspectorSession } from "./inspectorPreviewState";
 import { shouldDismissInspectorForActiveTextEditor, shouldDismissInspectorForTextEditorSelection } from "./inspectorDismissPolicy";
+import { refreshFeedback } from "./refreshFeedbackPolicy";
 import { UndoJournal, UndoRecord, undoPreflight } from "../git/undo";
 
 const PENDING_STASH_KEY = "gitRebaseVisual.pendingStash";
@@ -284,6 +285,13 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
       .replace(/(https?:\/\/)[^\s/@]+@/gi, "$1***@")
       .replace(/(authorization:\s*bearer\s+)\S+/gi, "$1***");
     this.output.appendLine(`[${new Date().toISOString()}] ${operation}: ${safe}`);
+  }
+
+  /** User-initiated title/command refresh with quiet polling kept separate. */
+  public async refreshFromCommand(): Promise<void> {
+    await this.refresh();
+    const feedback = refreshFeedback("command");
+    if (feedback) toast("info", feedback);
   }
 
   public async refresh(): Promise<void> {
@@ -628,7 +636,8 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
           break;
         case "refresh":
           await this.refresh();
-          toast("info", "已刷新");
+          const feedback = refreshFeedback("webview");
+          if (feedback) toast("info", feedback);
           break;
         case "copyHash":
           await vscode.env.clipboard.writeText(m.hash);
@@ -2113,8 +2122,14 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
         "删除文件"
       );
       if (confirm !== "删除文件") return;
-      await deleteUntrackedWorktreeChange(cwd, change);
-      toast("info", `已删除未跟踪文件 ${change.path}。`);
+      // The modal yields control to users/extensions. Re-read and prove this is
+      // still the same untracked working-side entry before touching the disk.
+      const current = (await getWorktreeChanges(cwd)).find((item) => item.path === pathValue);
+      if (!current || current.staged || !current.unstaged || current.worktreeKind !== "untracked") {
+        throw new Error("文件状态已在确认期间变化；未删除文件。 ");
+      }
+      await deleteUntrackedWorktreeChange(cwd, current);
+      toast("info", `已删除未跟踪文件 ${current.path}。`);
     } else {
       const side = sideValue as "working" | "staged";
       const action = side === "working" ? "丢弃该文件未暂存的工作区改动" : "撤销该文件的暂存（工作区内容保留）";

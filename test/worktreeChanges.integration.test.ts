@@ -91,7 +91,20 @@ test("restore separates staged and working sides and protects untracked deletion
   changes = await getWorktreeChanges(cwd);
   const untracked = changes.find((change) => change.path === "untracked.txt")!;
   await assert.rejects(() => restoreWorktreeChange(cwd, untracked, "working"), /未跟踪文件不会自动删除/);
-  await deleteUntrackedWorktreeChange(cwd, untracked);
+  // This is the same post-confirmation contract used by the provider: an old
+  // untracked snapshot cannot delete a file that was staged/changed meanwhile.
+  fs.writeFileSync(path.join(cwd, "untracked.txt"), "now staged\n", "utf8");
+  git(cwd, ["add", "untracked.txt"]);
+  const afterConfirmation = (await getWorktreeChanges(cwd)).find((change) => change.path === "untracked.txt")!;
+  assert.equal(afterConfirmation.worktreeKind, undefined);
+  await assert.rejects(
+    () => deleteUntrackedWorktreeChange(cwd, afterConfirmation),
+    /只有当前未跟踪文件可在确认后删除/
+  );
+  assert.equal(fs.existsSync(path.join(cwd, "untracked.txt")), true, "post-confirmation revalidation protects a newly staged file");
+  git(cwd, ["restore", "--staged", "--", "untracked.txt"]);
+  const revalidatedUntracked = (await getWorktreeChanges(cwd)).find((change) => change.path === "untracked.txt")!;
+  await deleteUntrackedWorktreeChange(cwd, revalidatedUntracked);
   assert.equal(fs.existsSync(path.join(cwd, "untracked.txt")), false);
 });
 

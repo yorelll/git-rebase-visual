@@ -24,7 +24,7 @@ export function activate(context: vscode.ExtensionContext): void {
       provider
     ),
     vscode.commands.registerCommand("gitRebaseVisual.refresh", () =>
-      provider.refresh()
+      provider.refreshFromCommand()
     ),
     vscode.commands.registerCommand("gitRebaseVisual.push", () =>
       provider.pushBranch()

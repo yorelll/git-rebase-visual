@@ -15,6 +15,7 @@ import "./panelLifecycle.test";
 import "./commitInspectorPanel.test";
 import "./inspectorPreviewState.test";
 import "./inspectorDismissPolicy.test";
+import "./refreshFeedbackPolicy.test";
 import "./composeDraft.test";
 import "./composePanelState.test";
 import "./composePolicy.test";
