@@ -28,13 +28,12 @@
 拖动某个 commit 时，行首 grip 与插入线会提示拖拽状态；目标行会明确显示插入到其**之前（较早）/之后（较新）**。松手后会显示历史改写确认，确认后执行 rebase。完成后在通知与 **Git Rebase Visual** Output 中显示操作、old tip、new tip 和受影响 commit 数。拖到最后一行下半区可移动到列表最末位。
 
 ### 2. 悬停查看详情
-鼠标悬停在某个 commit 上约 0.4 秒，会弹出浮层：
-- 顶部：**作者**（加粗）+ 相对/绝对时间（浅灰，带分隔线）。
-- 灰底小徽章：`hash + 变更统计（files changed / insertions / deletions）`。
-- **完整 commit message**：放在带左侧强调边框的独立框里，与元信息层次分明、可选中；message 过长时框内可滚动，浮层保持紧凑、不会覆盖整列 commit。
-- **复制完整 message** 按钮：鼠标可移入浮层再点击复制。
+鼠标悬停在某个 commit 上约 0.4 秒，完整详情会显示在相邻的编辑器区 **Git Rebase · Commit** 面板，而不是覆盖侧栏时间线：
+- 顶部显示 **作者**、相对/绝对时间以及 `hash + 变更统计（files changed / insertions / deletions）`。
+- **完整 commit message** 可在右侧阅读和复制；离开侧栏后预览会保留，直到下一条预览、明确右键操作或用户切换到普通 TextEditor。
+- 右击 commit 或按 `Shift+F10` / Menu 键会在同一 editor-area 面板打开操作；单项操作中的 **停靠在此 (edit)** 位于首位。点击普通 TextEditor 会关闭该面板，随后可再次打开。
 
-> 所有插件弹出的提示（复制成功、变基结果、推送结果等）会在 **10 秒后自动消失**。
+> 侧栏内的成功提示（如 Refresh 的“已刷新”、复制、变基结果、推送结果）会短暂显示在 branch context 区域，不推动 commit 列表。
 
 ### 3. 右键菜单
 

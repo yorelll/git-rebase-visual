@@ -105,6 +105,12 @@ code --install-extension git-rebase-visual-<version>.vsix
 
 ### 更新记录
 
+- **0.7.1** — review5 交互、跨编辑器详情与工作区批量操作升级：
+  - **稳定拖拽与紧凑锁定显示**：工作区状态轮询不再错误地使正常拖拽 session 过期；只有仓库、分支、范围、rebase 状态、commit 顺序或锁定集合发生实际变化时才会拒绝旧 intent。连续锁定 commit 的折叠摘要改为紧凑信息，展开后不再显示贯穿整组的长黄色边线。
+  - **跨编辑器详情与操作**：commit hover、右键和键盘 Context Menu 的详情/操作移到相邻 editor-area inspector，不覆盖侧栏时间线；hover preview 可移动到右侧阅读或复制，明确操作不会被慢速 preview 覆盖；点击普通 TextEditor 会关闭 inspector，之后可可靠重新打开。单项操作将“停靠在此 (edit)”置于首位。
+  - **文件区与批量 SCM**：文件行静止时优先显示文件名和目录，hover/focus 时才覆盖显示 stage/restore 等动作；点击文件行直接打开 VS Code Diff，不再显示重复的打开 Diff 图标。Changes 支持全部暂存/恢复，Staged Changes 支持全部撤销暂存和基于暂存区的 AI message；所有写入在 host 重新读取 Git 状态并通过 mutation gate 串行化。删除未跟踪文件在确认后会再次验证状态，避免确认期间状态变化时误删。
+  - **反馈与质量门禁**：手动 Refresh（侧栏、标题按钮和命令）都会显示“已刷新”，自动轮询保持安静。新增 canonical snapshot、inspector lifecycle/adapter、preview ownership、dismiss policy、refresh feedback 和 bulk SCM 的回归测试；发布门禁使用 `npm run test:release`、VSIX 内容检查与版本化中文发布说明。
+
 - **0.7.0** — 多选/工作区/生成 Diff 的宿主安全闭环与交互可靠性升级：
   - **选择与批量操作语义**：普通点击仅切换 active context，Ctrl/Cmd+点击才建立多选；右击未选 commit 会先原子切换为该单项，右击已选项才保留批量集合，避免批量锁定、删除和 Diff 的目标与鼠标目标不一致。
   - **连续且只读的生成 Diff**：单项或无空洞连续多选才能生成 Diff；非连续选择在 UI 中置灰并给出原因，host 也拒绝 unknown/duplicate/stale/gapped payload。生成结果改为扩展私有、opaque token 的只读 virtual document snapshot，不再打开可编辑 `untitled:` 文档；snapshot 有 repository invalidation、TTL、LRU 和 dispose cleanup。

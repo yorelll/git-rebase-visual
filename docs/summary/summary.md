@@ -1,6 +1,6 @@
 # Git Rebase Visual — 功能、架构与测试总结
 
-> 当前基线：v0.7.0 文件级 SCM 恢复操作、连续只读 generated Diff、selection/drag/IME 协议安全和 Fetch-safe LLM 测试升级。
+> 当前基线：v0.7.1 review5 交互升级——稳定的 canonical drag snapshot、相邻 editor-area Commit Inspector、结构化 SCM 批量操作与 Refresh feedback。
 
 ## 1. 项目定位
 
@@ -33,7 +33,8 @@ Webview (media/main.js)
 | 列表/上下文/可访问性 | 作者文字前缀和稳定语义色、pending 文本、branch/upstream/ahead-behind、`author:`/`msg:`/`hash:0x` 搜索、IME composition、多选、右击目标重定向、安全 locked-run 折叠、ARIA、roving menu、状态栏和 High Contrast fallback。 |
 | 文件级 SCM 恢复与 Diff | porcelain v2 `-z` 结构化 staged/working/untracked 状态；单文件 working/staged restore、确认删除未跟踪文件；公开 `vscode.diff` 的 index↔working、HEAD↔index 和 parent↔commit 对比；opaque request store 防止 URI 暴露仓库/ref/path。 |
 | 连续 generated Diff | 单项或连续多选 commit 的 oldest-first frozen Diff snapshot；webview 禁用非连续选择，host 重验完整 hash、revision 与连续性；扩展私有只读 provider 使用 opaque token、TTL/LRU/repository invalidation。 |
-| 写入与交互协议 | stage/restore 作为 mutation 经 busy 串行化，paused edit-stop 由明确 allow-list 控制；pointer/native drag 使用 immutable canonical session，deferred refresh 不会重新解释旧手势；无副作用 UI 流量不触发暂停告警。 |
+| 写入与交互协议 | stage/restore/bulk stage-discard-unstage 作为 mutation 经 busy 串行化，paused edit-stop 由明确 allow-list 控制；pointer/native drag 使用 immutable canonical session，routine worktree refresh 不会使其 stale，而真正 timeline/lock/rebase 变化仍会拒绝旧手势；无副作用 UI 流量不触发暂停告警。 |
+| Commit Inspector | hover preview 与右键 single/batch action 使用相邻 editor-area `WebviewPanel`，以 `preserveFocus`、per-panel lifecycle lease 和 preview/action session ownership 保持不遮挡、可重开且不受慢 Git detail/旧 dismiss 竞态影响；只有 concrete TextEditor interaction 才关闭。 |
 
 ## 3. 「将暂存区文件添加到此 commit」事务
 
@@ -91,6 +92,12 @@ src/
 ├─ ui/rebaseState.ts               pause/progress/pending/unknown rebase 状态派生
 ├─ ui/undo.ts                      私有 before ref、操作 journal、Undo preflight/reset --keep
 ├─ ui/composePanel.ts              编辑器区 Compose WebviewPanel 与 draft/session 状态
+├─ ui/commitInspectorPanel.ts      相邻 editor-area commit preview/action panel
+├─ ui/panelLifecycle.ts            WebviewPanel lease ownership 与 stale dispose 防护
+├─ ui/inspectorPreviewState.ts     hover preview / explicit action session 协调
+├─ ui/inspectorDismissPolicy.ts    真实 TextEditor close 判定
+├─ ui/canonicalSnapshot.ts          drag canonical revision key
+├─ ui/refreshFeedbackPolicy.ts     manual/poll refresh feedback 策略
 ├─ ui/secretsAccess.ts             SecretStorage 访问器注入桩（安全降级）
 
 media/main.js                      sidebar DOM、拖拽/键盘重排、菜单、筛选/多选/locked 折叠
@@ -121,7 +128,7 @@ media/style.css                    主题语义、pending/status/高对比度 fa
 | Git 集成（推送/守卫） | `test/pushGuard.integration.test.ts` | bare-remote：force-with-lease 并发拒绝、lockedInPush 拦截/解锁 |
 | Git 集成（append 守卫） | `test/appendGuard.integration.test.ts` | 已推 upstream 守卫、锁定 commit patch-id 跨重写稳定 |
 | 注入桩 | `test/secretsAccess.test.ts` | SecretStorage 访问器安全降级与委托 |
-当前测试套件含 120 项测试；0.7 的 UI/交互与安全裁决见 [`../ui-reivew/ui-review-0-7-0.md`](../ui-reivew/ui-review-0-7-0.md)，最终代码评审结论见 [`../review/code-review-0-7-0.md`](../review/code-review-0-7-0.md)。
+当前测试套件在 v0.7.1 候选中扩展至 131 项测试；v0.7.1 的 UI/交互与安全裁决见 [`../ui-reivew/ui-review-0-7-1.md`](../ui-reivew/ui-review-0-7-1.md)，最终发布评审见 [`../review/code-review-0-7-4.md`](../review/code-review-0-7-4.md)。
 
 命令：
 
@@ -156,6 +163,6 @@ npm run package         # 编译并生成 VSIX
 - 真实 VS Code High Contrast Dark/Light、screen reader、Compose Panel/AI 状态和 keyboard-flow 人工验收；
 - 刷新延迟基准与大仓库性能测量；
 
-UI 建议的逐项事实纠正、已修复项与发布前人工验收边界见 [`../ui-reivew/ui-review-0-7-0.md`](../ui-reivew/ui-review-0-7-0.md)；最终代码评审及项目回复见 [`../review/code-review-0-7-0.md`](../review/code-review-0-7-0.md) 与 [`../review/review-response-0-7-0.md`](../review/review-response-0-7-0.md)。
+UI 建议的逐项事实结论、已修复项与真实 VS Code 人工验收边界见 [`../ui-reivew/ui-review-0-7-1.md`](../ui-reivew/ui-review-0-7-1.md)；最终发布评审及项目回复见 [`../review/code-review-0-7-4.md`](../review/code-review-0-7-4.md) 与 [`../review/review-response-0-7-4.md`](../review/review-response-0-7-4.md)。
 
 外部版本化评审原文位于 `../review/code-review-<major>-<minor>-<patch>.md`；项目回复按相同版本号放在 `review-response-<major>-<minor>-<patch>.md`。开始评审前需读取 [`../review/code-review-commit.md`](../review/code-review-commit.md) 确认未覆盖 commit，完成后将精确 SHA 与对应报告写回该台账。
