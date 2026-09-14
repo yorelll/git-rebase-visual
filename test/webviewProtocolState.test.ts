@@ -49,17 +49,16 @@ test("worktree Diff, stage, and restore route by path rather than a commit hash"
   assert.equal(requiresCurrentCommitHash({ type: "generateDiff", hash: "a".repeat(40) }), true);
 });
 
-test("stage and restore are serialized mutations explicitly allowed at an edit stop", () => {
-  assert.equal(webviewMessageIntent("stageFile"), "mutation");
-  assert.equal(webviewMessageIntent("restoreFile"), "mutation");
-  assert.equal(allowedPausedRebaseMutation("stageFile"), true);
-  assert.equal(allowedPausedRebaseMutation("restoreFile"), true);
+test("single and section-level worktree writes are serialized mutations explicitly allowed at an edit stop", () => {
+  for (const type of ["stageFile", "restoreFile", "stageAllFiles", "discardAllFiles", "unstageAllFiles"]) {
+    assert.equal(webviewMessageIntent(type), "mutation", type);
+    assert.equal(allowedPausedRebaseMutation(type), true, type);
+  }
 
   const view = new WebviewProtocolState();
-  view.observe("stageFile", "worktree", true);
-  view.observe("restoreFile", "worktree", true);
+  for (const type of ["stageFile", "restoreFile", "stageAllFiles", "discardAllFiles", "unstageAllFiles"]) view.observe(type, "worktree", true);
   const trace = view.snapshot();
-  assert.equal(trace.mutationCount, 2);
+  assert.equal(trace.mutationCount, 5);
   assert.equal(trace.warningCount, 0);
 });
 

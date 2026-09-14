@@ -133,24 +133,52 @@ button, .grip, .dot, .lock-icon, .stopped-badge {
   font-size: 11.5px;
 }
 
-.file-group-label {
+.file-group-header {
+  position: relative;
+  display: flex;
+  align-items: center;
+  min-height: 21px;
   margin: 8px 0 3px;
+}
+
+.file-group-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: 10px;
   text-transform: uppercase;
   letter-spacing: 0.45px;
   color: var(--vscode-descriptionForeground);
 }
 
+.file-group-actions {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  margin-left: auto;
+  padding-left: 4px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.file-group-header:hover .file-group-actions,
+.file-group-header:focus-within .file-group-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+
 .change-file {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 6px;
   min-width: 0;
-  padding: 3px 3px 3px 5px;
+  padding: 3px 5px;
   border-left: 2px solid var(--vscode-panel-border);
 }
 
-.change-file:hover { background: var(--vscode-list-hoverBackground); }
+.change-file:hover, .change-file:focus-within { background: var(--vscode-list-hoverBackground); }
 
 .change-file .file-open {
   flex: 1 1 auto;
@@ -168,13 +196,16 @@ button, .grip, .dot, .lock-icon, .stopped-badge {
 }
 
 .change-file .file-name {
+  flex: 0 1 auto;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .change-file .file-path {
-  flex: 0 1 auto;
+  flex: 1 1 auto;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -194,11 +225,23 @@ button, .grip, .dot, .lock-icon, .stopped-badge {
 .change-file .file-state-rename { color: var(--vscode-gitDecoration-renamedResourceForeground, var(--vscode-charts-blue)); }
 .change-file .file-state-unmerged { color: var(--vscode-editorError-foreground, var(--vscode-errorForeground)); }
 
-.file-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 2px; opacity: 0; }
-.change-file:hover .file-actions, .change-file:focus-within .file-actions { opacity: 1; }
+.file-actions {
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding-left: 7px;
+  transform: translateY(-50%);
+  opacity: 0;
+  pointer-events: none;
+  background: linear-gradient(90deg, transparent, var(--vscode-list-hoverBackground) 18%, var(--vscode-list-hoverBackground));
+}
+.change-file:hover .file-actions, .change-file:focus-within .file-actions { opacity: 1; pointer-events: auto; }
 .file-action { min-width: 21px; padding: 1px 4px; font: 12px var(--vscode-editor-font-family, monospace); }
-.change-file .file-staged { flex: 0 0 auto; font-size: 10.5px; color: var(--vscode-testing-iconPassed, var(--vscode-descriptionForeground)); }
-@media (hover: none) { .file-actions { opacity: 1; } }
+@media (hover: none) { .file-actions, .file-group-actions { opacity: 1; pointer-events: auto; } }
 
 .direction,
 .timeline-end {
@@ -272,8 +315,12 @@ button, .grip, .dot, .lock-icon, .stopped-badge {
   outline-offset: -1px;
 }
 
+.locked-run[open] {
+  border-left-color: transparent;
+}
+
 .locked-run .commit {
-  margin-left: 3px;
+  margin-left: 0;
 }
 
 .locked-run.drop-before {

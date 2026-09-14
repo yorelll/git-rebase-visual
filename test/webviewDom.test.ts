@@ -36,7 +36,7 @@ function state(commits: string[], revision: number): Record<string, unknown> {
       locked: false,
     })),
     rebaseInProgress: false,
-    llmConfigured: false,
+    llmConfigured: true,
     hasStaged: false,
     hasUnstaged: false,
     changes: [],
@@ -59,6 +59,7 @@ function createHarness(): Harness {
       setState: () => undefined,
     }),
   });
+  Object.defineProperty(window, "confirm", { value: () => true });
   Object.defineProperty(window.document, "elementFromPoint", {
     configurable: true,
     value: () => null,
@@ -93,7 +94,7 @@ function pointerEvent(window: Window, type: string, init: Record<string, unknown
   return event;
 }
 
-test("actual webview pointer and native drop preserve their original drag session before deferred state applies", () => {
+test("actual webview pointer and native drop preserve the original session across a routine same-revision refresh", () => {
   const view = createHarness();
   try {
     view.postState(state([a, b, c], 7));
@@ -103,7 +104,9 @@ test("actual webview pointer and native drop preserve their original drag sessio
     Object.defineProperty(target, "getBoundingClientRect", { configurable: true, value: () => ({ top: 10, height: 20 }) });
 
     sourceGrip.dispatchEvent(pointerEvent(view.dom.window, "pointerdown", { pointerId: 4, clientY: 0 }));
-    view.postState(state([b, a, c], 8));
+    // A routine status refresh now preserves canonical revision. The same drag is
+    // valid; external history changes would carry a different revision instead.
+    view.postState(state([a, b, c], 7));
     sourceGrip.dispatchEvent(pointerEvent(view.dom.window, "pointerup", { pointerId: 4, clientY: 0 }));
 
     const pointerPayload = JSON.parse(JSON.stringify(view.messages.filter((message) => message.type === "reorder").map((message) => ({
@@ -113,29 +116,18 @@ test("actual webview pointer and native drop preserve their original drag sessio
       revision: message.revision,
       order: message.order,
     }))));
-    assert.deepEqual(pointerPayload, [{
-      sourceHash: c,
-      anchorHash: a,
-      placement: "before",
-      revision: 7,
-      order: [c, a, b],
-    }]);
+    assert.deepEqual(pointerPayload, [{ sourceHash: c, anchorHash: a, placement: "before", revision: 7, order: [c, a, b] }]);
     assert.equal(view.dom.window.__grvUiTrace().deferredRefresh, false);
-    assert.equal(view.row(b).classList.contains("commit"), true, "deferred state rendered only after the old-session intent posted");
 
     view.messages.length = 0;
     view.postState(state([a, b, c], 11));
     const nativeSourceGrip = view.row(c).querySelector(".grip") as HTMLElement;
-    nativeSourceGrip.dispatchEvent(mouseEvent(view.dom.window, "dragstart", {
-      dataTransfer: { effectAllowed: "", setData() {} },
-    }));
-    view.postState(state([b, a, c], 12));
+    nativeSourceGrip.dispatchEvent(mouseEvent(view.dom.window, "dragstart", { dataTransfer: { effectAllowed: "", setData() {} } }));
+    view.postState(state([a, b, c], 11));
     const nativeTarget = view.row(a);
     Object.defineProperty(nativeTarget, "getBoundingClientRect", { configurable: true, value: () => ({ top: 10, height: 20 }) });
     nativeTarget.dispatchEvent(mouseEvent(view.dom.window, "drop", { clientY: 0 }));
-    const nativePayload = JSON.parse(JSON.stringify(view.messages.filter((message) => message.type === "reorder").map((message) => ({
-      revision: message.revision, order: message.order,
-    }))));
+    const nativePayload = JSON.parse(JSON.stringify(view.messages.filter((message) => message.type === "reorder").map((message) => ({ revision: message.revision, order: message.order }))));
     assert.deepEqual(nativePayload, [{ revision: 11, order: [c, a, b] }]);
   } finally {
     view.close();
@@ -171,56 +163,94 @@ test("actual webview author dots show a two-character label for same-initial aut
   }
 });
 
-test("actual webview context menus reconcile selection with their pointer target and retain selected batches", () => {
+test("actual webview routes context actions to a non-obscuring editor-area inspector", () => {
   const view = createHarness();
   try {
     view.postState(state([a, b, c], 3));
-    const click = (id: string, extra: Record<string, unknown> = {}) =>
-      view.row(id).dispatchEvent(mouseEvent(view.dom.window, "click", extra));
+    const click = (id: string, extra: Record<string, unknown> = {}) => view.row(id).dispatchEvent(mouseEvent(view.dom.window, "click", extra));
     click(a, { ctrlKey: true });
     click(b, { ctrlKey: true });
     assert.deepEqual(JSON.parse(JSON.stringify(view.dom.window.__grvUiTrace().selectedHashes)).sort(), [a, b]);
 
     view.row(c).dispatchEvent(mouseEvent(view.dom.window, "contextmenu", { clientX: 10, clientY: 10 }));
     assert.deepEqual(JSON.parse(JSON.stringify(view.dom.window.__grvUiTrace().selectedHashes)), []);
-    assert.match(view.dom.window.document.getElementById("menu")?.textContent ?? "", new RegExp(c.slice(0, 8)));
-    assert.doesNotMatch(view.dom.window.document.getElementById("menu")?.textContent ?? "", /批量删除/);
-    const singleGeneratedDiff = [...view.dom.window.document.querySelectorAll("#menu button")]
-      .find((button) => button.textContent?.includes("生成 Diff"));
-    assert.ok(singleGeneratedDiff, "single menu exposes generated Diff");
-    singleGeneratedDiff.click();
-    assert.deepEqual(
-      JSON.parse(JSON.stringify(view.messages.at(-1))),
-      { type: "generateDiff", hash: c, revision: 3, source: "webview:read" },
-      "single menu payload uses the pointer target"
-    );
+    assert.deepEqual(JSON.parse(JSON.stringify(view.messages.at(-1))), { type: "openCommitInspector", hash: c, source: "webview:read" });
+    assert.equal(view.dom.window.document.getElementById("menu")?.classList.contains("hidden"), true, "sidebar menu no longer covers list rows");
 
     click(a, { ctrlKey: true });
     click(b, { ctrlKey: true });
     view.row(a).dispatchEvent(mouseEvent(view.dom.window, "contextmenu", { clientX: 10, clientY: 10 }));
-    assert.deepEqual(JSON.parse(JSON.stringify(view.dom.window.__grvUiTrace().selectedHashes)).sort(), [a, b]);
-    const menuText = view.dom.window.document.getElementById("menu")?.textContent ?? "";
-    assert.match(menuText, /已选择 2 个 commit/);
-    assert.match(menuText, /批量删除 commit/);
-    assert.match(menuText, /编辑 message/);
-    const edit = [...view.dom.window.document.querySelectorAll("#menu button")].find((button) => button.textContent?.includes("编辑 message"));
-    assert.ok(edit?.classList.contains("disabled"), "single-commit action is disabled for a retained batch");
-    const bulkGeneratedDiff = [...view.dom.window.document.querySelectorAll("#menu button")]
-      .find((button) => button.textContent?.includes("生成 Diff"));
-    assert.ok(bulkGeneratedDiff, "batch menu exposes generated Diff");
-    bulkGeneratedDiff.click();
-    assert.deepEqual(
-      JSON.parse(JSON.stringify(view.messages.at(-1))),
-      { type: "bulkGenerateDiff", hashes: [a, b], revision: 3, source: "webview:read" },
-      "contiguous batch payload retains exactly the selected rows"
-    );
+    assert.deepEqual(JSON.parse(JSON.stringify(view.messages.at(-1))), { type: "openBatchInspector", hashes: [a, b], source: "webview:read" });
+    assert.equal(view.dom.window.document.querySelectorAll(".list-controls .btn").length, 0, "redundant top-level bulk actions are removed");
+  } finally {
+    view.close();
+  }
+});
 
-    view.dom.window.document.getElementById("list")?.dispatchEvent(mouseEvent(view.dom.window, "contextmenu"));
-    assert.deepEqual(
-      JSON.parse(JSON.stringify(view.dom.window.__grvUiTrace().selectedHashes)),
-      [],
-      "blank list context menu clears multi-selection"
-    );
+test("actual webview worktree rows expose paths at rest and route file and section actions", () => {
+  const view = createHarness();
+  try {
+    const next = state([a], 9);
+    Object.assign(next, {
+      hasStaged: true,
+      hasUnstaged: true,
+      stagedCount: 1,
+      unstagedCount: 2,
+      changes: [
+        { path: "src/long/path/added.ts", staged: true, unstaged: false, indexKind: "add", conflicted: false },
+        { path: "src/long/path/modified.ts", staged: false, unstaged: true, worktreeKind: "modify", conflicted: false },
+        { path: "tmp/generated.bin", staged: false, unstaged: true, worktreeKind: "untracked", conflicted: false },
+      ],
+    });
+    view.postState(next);
+    const details = view.dom.window.document.querySelector(".changes-more") as HTMLDetailsElement;
+    details.open = true;
+    details.dispatchEvent(new view.dom.window.Event("toggle"));
+    const firstTarget = view.dom.window.document.querySelector(".change-file .file-open") as HTMLButtonElement;
+    assert.equal(firstTarget.title, "src/long/path/added.ts", "file hover is the path only");
+    const fileActions = [...view.dom.window.document.querySelectorAll(".change-file .file-actions .file-action")];
+    assert.equal(fileActions.some((button) => button.getAttribute("aria-label")?.includes("打开")), false, "no redundant open icon; only per-file restore/stage/delete actions remain");
+    assert.equal(fileActions.length, 5, "the staged row restores, while each unstaged row has its meaningful action pair");
+    assert.ok(view.dom.window.document.querySelector(".file-path")?.textContent?.includes("src/long/path/"));
+
+    firstTarget.click();
+    assert.deepEqual(JSON.parse(JSON.stringify(view.messages.at(-1))), { type: "openWorktreeDiff", path: "src/long/path/added.ts", source: "webview:read" });
+
+    const headers = [...view.dom.window.document.querySelectorAll(".file-group-header")];
+    const changesHeader = headers.find((header) => header.querySelector(".file-group-label")?.textContent?.startsWith("Changes"))!;
+    const stageAll = changesHeader.querySelector("button") as HTMLButtonElement;
+    stageAll.click();
+    assert.equal(view.messages.at(-1)?.type, "stageAllFiles");
+
+    const stagedHeader = headers.find((header) => header.querySelector(".file-group-label")?.textContent?.startsWith("Staged Changes"))!;
+    const unstageAll = stagedHeader.querySelector("button") as HTMLButtonElement;
+    unstageAll.click();
+    assert.equal(view.messages.at(-1)?.type, "unstageAllFiles");
+
+    const remove = [...view.dom.window.document.querySelectorAll(".file-action")]
+      .find((button) => button.getAttribute("aria-label") === "删除未跟踪文件") as HTMLButtonElement;
+    remove.click();
+    assert.deepEqual(JSON.parse(JSON.stringify(view.messages.at(-1))), { type: "restoreFile", path: "tmp/generated.bin", side: "unstaged", deleteUntracked: true, source: "webview:worktree-mutation" });
+  } finally {
+    view.close();
+  }
+});
+
+test("locked run summary is compact and removes the expanded long rail", () => {
+  const view = createHarness();
+  try {
+    const next = state([a, b, c], 3);
+    const commits = next.commits as Array<Record<string, unknown>>;
+    commits.forEach((commit, index) => { commit.locked = true; commit.author = ["lawrence_lv", "sally_peng", "yucheng_xiang"][index]; });
+    Object.assign(next, { collapseLockedRuns: true });
+    view.postState(next);
+    const run = view.dom.window.document.querySelector(".locked-run") as HTMLDetailsElement;
+    const summary = run.querySelector("summary")!;
+    assert.match(summary.textContent ?? "", /^🔒 :3 lock · no push · la ×1 · sa ×1 · yu ×1$/);
+    assert.doesNotMatch(summary.textContent ?? "", /[a-f0-9]{8}/i);
+    assert.match(summary.getAttribute("aria-label") ?? "", /lawrence_lv/);
+    run.open = true;
+    assert.equal(run.hasAttribute("open"), true, "CSS removes the long rail only while expanded");
   } finally {
     view.close();
   }
@@ -233,14 +263,7 @@ test("actual webview disables generated Diff for a non-contiguous batch", () => 
     view.row(a).dispatchEvent(mouseEvent(view.dom.window, "click", { ctrlKey: true }));
     view.row(c).dispatchEvent(mouseEvent(view.dom.window, "click", { ctrlKey: true }));
     view.row(a).dispatchEvent(mouseEvent(view.dom.window, "contextmenu", { clientX: 10, clientY: 10 }));
-
-    const generatedDiff = [...view.dom.window.document.querySelectorAll("#menu button")]
-      .find((button) => button.textContent?.includes("生成 Diff"));
-    assert.ok(generatedDiff, "batch menu exposes the generated Diff action");
-    assert.equal(generatedDiff.classList.contains("disabled"), true);
-    assert.match(generatedDiff.getAttribute("aria-description") ?? "", /仅支持连续 commit/);
-    generatedDiff.click();
-    assert.equal(view.messages.some((message) => message.type === "bulkGenerateDiff"), false);
+    assert.deepEqual(JSON.parse(JSON.stringify(view.messages.at(-1))), { type: "openBatchInspector", hashes: [a, c], source: "webview:read" });
   } finally {
     view.close();
   }

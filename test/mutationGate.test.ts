@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { mutationGateDecision } from "../src/ui/mutationGate";
 
-test("provider mutation gate serializes stage and restore writes before paused policy", () => {
-  for (const type of ["stageFile", "restoreFile"]) {
+test("provider mutation gate serializes single and section-level worktree writes before paused policy", () => {
+  for (const type of ["stageFile", "restoreFile", "stageAllFiles", "discardAllFiles", "unstageAllFiles"]) {
     assert.deepEqual(
       mutationGateDecision(type, { busy: false, pausedRebase: true }),
       { kind: "handle", intent: "mutation" },

@@ -195,6 +195,18 @@ export async function stageWorktreeChange(cwd: string, change: WorktreeChange): 
   }
 }
 
+/** Stages every current working/untracked side after the host freshly read status. */
+export async function stageAllWorktreeChanges(cwd: string, changes: readonly WorktreeChange[]): Promise<void> {
+  if (!changes.some((change) => change.unstaged && !change.conflicted)) {
+    throw new Error("没有可暂存的工作区改动。 ");
+  }
+  if (changes.some((change) => change.conflicted)) {
+    throw new Error("存在冲突文件；请先解决冲突后再暂存全部。 ");
+  }
+  const result = await runGit(["add", "-A"], { cwd });
+  if (result.code !== 0) throw new Error(result.stderr || result.stdout || "无法暂存全部工作区改动。 ");
+}
+
 /**
  * Restores only one visible status side. Working restoration resets index →
  * worktree; staged restoration resets HEAD → index without touching the
@@ -236,4 +248,31 @@ export async function deleteUntrackedWorktreeChange(cwd: string, change: Worktre
     throw new Error("Git 状态返回了仓库外路径；未删除文件。 ");
   }
   await fs.rm(absolute, { force: true });
+}
+
+/** Restores tracked working changes and removes untracked files after host confirmation. */
+export async function discardAllWorktreeChanges(cwd: string, changes: readonly WorktreeChange[]): Promise<void> {
+  if (changes.some((change) => change.conflicted)) {
+    throw new Error("存在冲突文件；请先解决冲突后再恢复全部。 ");
+  }
+  const working = changes.filter((change) => change.unstaged && change.worktreeKind !== "untracked");
+  const untracked = changes.filter((change) => change.unstaged && change.worktreeKind === "untracked" && !change.staged);
+  if (!working.length && !untracked.length) throw new Error("没有可恢复的工作区改动。 ");
+  if (working.length) {
+    const result = await runGit(["restore", "--worktree", "--", ...working.map((change) => change.path)], { cwd });
+    if (result.code !== 0) throw new Error(result.stderr || result.stdout || "无法恢复全部工作区改动。 ");
+  }
+  for (const change of untracked) await deleteUntrackedWorktreeChange(cwd, change);
+}
+
+/** Removes all current index changes while deliberately retaining working content. */
+export async function unstageAllWorktreeChanges(cwd: string, changes: readonly WorktreeChange[]): Promise<void> {
+  if (changes.some((change) => change.conflicted)) {
+    throw new Error("存在冲突文件；请先解决冲突后再撤销全部暂存。 ");
+  }
+  const staged = changes.filter((change) => change.staged);
+  if (!staged.length) throw new Error("暂存区为空。 ");
+  const paths = [...new Set(staged.flatMap((change) => change.originalPath ? [change.path, change.originalPath] : [change.path]))];
+  const result = await runGit(["restore", "--staged", "--", ...paths], { cwd });
+  if (result.code !== 0) throw new Error(result.stderr || result.stdout || "无法撤销全部暂存。 ");
 }

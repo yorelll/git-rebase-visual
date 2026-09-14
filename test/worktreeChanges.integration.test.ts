@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import * as fs from "fs";
 import * as path from "path";
-import { deleteUntrackedWorktreeChange, getWorktreeChanges, restoreWorktreeChange, stageWorktreeChange } from "../src/git/worktreeChanges";
+import { deleteUntrackedWorktreeChange, discardAllWorktreeChanges, getWorktreeChanges, restoreWorktreeChange, stageAllWorktreeChanges, stageWorktreeChange, unstageAllWorktreeChanges } from "../src/git/worktreeChanges";
 import { worktreeDiffSpec } from "../src/ui/worktreeDiffState";
 import { commitFile, createRepo, git, removeRepo } from "./helpers/gitTestRepo";
 
@@ -93,6 +93,28 @@ test("restore separates staged and working sides and protects untracked deletion
   await assert.rejects(() => restoreWorktreeChange(cwd, untracked, "working"), /未跟踪文件不会自动删除/);
   await deleteUntrackedWorktreeChange(cwd, untracked);
   assert.equal(fs.existsSync(path.join(cwd, "untracked.txt")), false);
+});
+
+test("section actions stage, discard, and unstage all changes without violating working-side boundaries", async (t) => {
+  const cwd = createRepo();
+  t.after(() => removeRepo(cwd));
+  commitFile(cwd, "tracked.txt", "base\n", "base");
+  fs.writeFileSync(path.join(cwd, "tracked.txt"), "working\n", "utf8");
+  fs.writeFileSync(path.join(cwd, "new.txt"), "new\n", "utf8");
+
+  await stageAllWorktreeChanges(cwd, await getWorktreeChanges(cwd));
+  let changes = await getWorktreeChanges(cwd);
+  assert.equal(changes.every((change) => change.staged && !change.unstaged), true);
+  await unstageAllWorktreeChanges(cwd, changes);
+  changes = await getWorktreeChanges(cwd);
+  assert.equal(changes.some((change) => change.staged), false, "all index entries are restored to HEAD");
+  assert.equal(fs.readFileSync(path.join(cwd, "tracked.txt"), "utf8").replace(/\r\n/g, "\n"), "working\n", "unstage retains working content");
+  assert.equal(fs.readFileSync(path.join(cwd, "new.txt"), "utf8").replace(/\r\n/g, "\n"), "new\n", "unstage retains formerly staged untracked file");
+
+  await discardAllWorktreeChanges(cwd, await getWorktreeChanges(cwd));
+  assert.equal(fs.readFileSync(path.join(cwd, "tracked.txt"), "utf8").replace(/\r\n/g, "\n"), "base\n");
+  assert.equal(fs.existsSync(path.join(cwd, "new.txt")), false, "discard removes explicit untracked changes");
+  assert.deepEqual(await getWorktreeChanges(cwd), []);
 });
 
 test("single-file stage updates an RM record through only its working-side path", async (t) => {

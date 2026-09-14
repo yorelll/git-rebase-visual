@@ -5,8 +5,8 @@
   // rebase warning.
   const sourceForAction = (type) => {
     if (["reorder"].includes(type)) return "webview:reorder";
-    if (["stageFile", "restoreFile"].includes(type)) return "webview:worktree-mutation";
-    if (["requestDetail", "openDiff", "generateDiff", "bulkGenerateDiff", "openWorktreeDiff", "copyHash", "copyMessage", "copyText"].includes(type)) return "webview:read";
+    if (["stageFile", "restoreFile", "stageAllFiles", "discardAllFiles", "unstageAllFiles"].includes(type)) return "webview:worktree-mutation";
+    if (["requestDetail", "openCommitInspector", "openBatchInspector", "openDiff", "generateDiff", "bulkGenerateDiff", "openWorktreeDiff", "copyHash", "copyMessage", "copyText"].includes(type)) return "webview:read";
     if (["ready", "refresh"].includes(type)) return "webview:lifecycle";
     return "webview:ui";
   };
@@ -152,30 +152,47 @@
     const at = normalized.lastIndexOf("/");
     return at < 0 ? { name: normalized, parent: "" } : { name: normalized.slice(at + 1), parent: normalized.slice(0, at + 1) };
   }
+  function changeAction(icon, title, onClick) {
+    const action = document.createElement("button");
+    action.type = "button"; action.className = "btn file-action"; action.textContent = icon;
+    action.title = title; action.setAttribute("aria-label", title);
+    action.addEventListener("pointerdown", (event) => event.stopPropagation());
+    action.addEventListener("click", (event) => { event.stopPropagation(); onClick(); });
+    return action;
+  }
   function appendChangeFiles(parent, changes) {
     const staged = changes.filter((change) => change.staged);
     const unstaged = changes.filter((change) => change.unstaged);
     const appendGroup = (title, items, side) => {
       if (!items.length) return;
-      const label = document.createElement("div"); label.className = "file-group-label"; label.textContent = `${title} (${items.length})`; parent.appendChild(label);
+      const header = document.createElement("div"); header.className = "file-group-header";
+      const label = document.createElement("div"); label.className = "file-group-label"; label.textContent = `${title} (${items.length})`; header.appendChild(label);
+      const groupActions = document.createElement("span"); groupActions.className = "file-group-actions";
+      if (side === "unstaged") {
+        groupActions.append(
+          changeAction("+", "暂存全部更改", () => vscode.postMessage({ type: "stageAllFiles" })),
+          changeAction("↶", "恢复全部更改", () => vscode.postMessage({ type: "discardAllFiles" }))
+        );
+      } else {
+        groupActions.append(
+          changeAction("↶", "撤销全部暂存", () => vscode.postMessage({ type: "unstageAllFiles" })),
+          changeAction("✦", "AI 生成 message 并提交暂存区", () => vscode.postMessage({ type: "openCompose", mode: "staged", ai: true, thenEdit: false }))
+        );
+      }
+      header.appendChild(groupActions); parent.appendChild(header);
       items.forEach((change) => {
-        const row = document.createElement("div"); row.className = "change-file";
+        const row = document.createElement("div"); row.className = "change-file"; row.tabIndex = 0;
         const kind = side === "staged" ? change.indexKind : change.worktreeKind;
         const visual = changeState(kind);
         const status = document.createElement("span"); status.className = `file-state file-state-${kind || "modify"}`; status.textContent = visual.mark; status.title = visual.label; status.setAttribute("aria-label", visual.label);
-        const target = document.createElement("button"); target.type = "button"; target.className = "file-open"; target.title = `打开 ${side === "staged" ? "HEAD ↔ index" : "index ↔ working tree"} Diff: ${change.path}`;
+        const target = document.createElement("button"); target.type = "button"; target.className = "file-open"; target.title = change.path; target.setAttribute("aria-label", `打开 Diff：${change.path}`);
         const pieces = fileNameAndPath(change.path); const name = document.createElement("span"); name.className = "file-name"; name.textContent = pieces.name; const parentPath = document.createElement("span"); parentPath.className = "file-path"; parentPath.textContent = pieces.parent; target.append(name, parentPath); target.onclick = () => vscode.postMessage({ type: "openWorktreeDiff", path: change.path });
         const actions = document.createElement("span"); actions.className = "file-actions";
-        const open = button("↗", () => vscode.postMessage({ type: "openWorktreeDiff", path: change.path }), { title: "打开左右 Diff" }); open.classList.add("file-action"); open.setAttribute("aria-label", "打开左右 Diff"); actions.append(open);
-        if (side === "unstaged" && !change.conflicted) {
-          const stage = button("+", () => vscode.postMessage({ type: "stageFile", path: change.path }), { title: "暂存此文件" }); stage.classList.add("file-action"); stage.setAttribute("aria-label", "暂存此文件"); actions.prepend(stage);
-        } else if (side === "staged") {
-          const ready = document.createElement("span"); ready.className = "file-staged"; ready.textContent = "已暂存"; ready.title = "此状态已在暂存区，不会再次暂存"; actions.prepend(ready);
-        }
+        if (side === "unstaged" && !change.conflicted) actions.append(changeAction("+", "暂存此文件", () => vscode.postMessage({ type: "stageFile", path: change.path })));
         if (!change.conflicted && !(side === "unstaged" && kind === "untracked")) {
-          const restore = button("↶", () => requestRestore(change, side), { title: side === "staged" ? "撤销此文件的暂存" : "恢复此文件的工作区改动" }); restore.classList.add("file-action"); restore.setAttribute("aria-label", restore.title); actions.append(restore);
+          actions.append(changeAction("↶", side === "staged" ? "撤销此文件的暂存" : "恢复此文件的工作区改动", () => requestRestore(change, side)));
         } else if (side === "unstaged" && kind === "untracked") {
-          const remove = button("⌫", () => requestRestore(change, side), { title: "删除未跟踪文件（需确认）" }); remove.classList.add("file-action"); remove.setAttribute("aria-label", remove.title); actions.append(remove);
+          actions.append(changeAction("⌫", "删除未跟踪文件", () => requestRestore(change, side)));
         }
         row.append(status, target, actions); parent.appendChild(row);
       });
@@ -184,10 +201,10 @@
     appendGroup("Changes", unstaged, "unstaged");
   }
   function requestRestore(change, side) {
+    // The extension host owns the authoritative modal after a fresh porcelain
+    // read. Avoid a second webview confirm: it previously made action clicks look
+    // inert and could race with a status refresh before the host received them.
     const untracked = side === "unstaged" && change.worktreeKind === "untracked";
-    const action = untracked ? "永久删除未跟踪文件" : side === "staged" ? "撤销此文件的暂存" : "恢复此文件的工作区改动";
-    const consequence = untracked ? "这会从磁盘删除该未跟踪文件，且不能由 Git 恢复。" : side === "staged" ? "工作区内容不会改变；仅把 index 恢复为 HEAD。" : "这会丢弃该文件尚未暂存的工作区改动。";
-    if (!confirm(`${action}：${change.path}？\n${consequence}`)) return;
     vscode.postMessage({ type: "restoreFile", path: change.path, side, deleteUntracked: untracked });
   }
   function renderChanges() {
@@ -202,17 +219,11 @@
       const hint = document.createElement("div"); hint.className = "changes-hint"; hint.textContent = "配置 LLM 后可生成 AI commit message。";
       changesEl.append(hint, button("打开 LLM 设置", () => vscode.postMessage({ type: "openLlmSettings" })));
     }
-    if (state.hasStaged && !state.rebaseInProgress && state.llmConfigured) {
-      changesEl.appendChild(changeButton("生成 message 并提交暂存区", { mode: "staged", ai: true, primary: true }));
-    }
     const more = document.createElement("details"); more.className = "changes-more"; more.open = changesMoreOpen || atEditStop;
     more.addEventListener("toggle", () => { changesMoreOpen = more.open; persistUi(); });
     const summary = document.createElement("summary"); summary.textContent = atEditStop ? "本次 edit stop 的文件" : "更多提交选项"; more.appendChild(summary);
     appendChangeFiles(more, state.changes || []);
     if (!atEditStop) {
-      if (state.hasUnstaged && state.llmConfigured && !state.rebaseInProgress) {
-        const all = changeButton("提交全部改动（git add -A）⚠", { mode: "working", ai: true }); all.classList.add("danger-choice"); more.appendChild(all);
-      }
       if (state.llmConfigured) more.appendChild(button("仅生成 message（不提交）", () => vscode.postMessage({ type: "openCompose", mode: state.hasStaged ? "staged" : "working", ai: true, thenEdit: false, messageOnly: true })));
     } else {
       const draftMode = state.hasStaged ? "staged" : "working";
@@ -270,12 +281,21 @@
     return identity;
   }
   function lockedRunKey(commits) { return commits.map((c) => c.hash).join(":"); }
+  function compactAuthor(name) {
+    const normalized = String(name || "?").trim();
+    return normalized.slice(0, 2) || "?";
+  }
   function runSummary(commits) {
     const authors = new Map();
     commits.forEach((c) => authors.set(c.author, (authors.get(c.author) || 0) + 1));
-    const authorText = [...authors].map(([name, count]) => `${name} ×${count}`).join(" · ");
-    const pending = commits.some(commitIsPending) ? " · 待重放" : "";
-    return `🔒 ${commits.length} 个锁定 commit · 不会被推送 · ${authorText} · ${short(commits[0].hash)}…${short(commits.at(-1).hash)}${pending}`;
+    const authorText = [...authors].map(([name, count]) => `${compactAuthor(name)} ×${count}`).join(" · ");
+    const pending = commits.some(commitIsPending) ? " · replay" : "";
+    return `🔒 :${commits.length} lock · no push${authorText ? ` · ${authorText}` : ""}${pending}`;
+  }
+  function runSummaryAria(commits) {
+    const authors = new Map();
+    commits.forEach((c) => authors.set(c.author || "未知作者", (authors.get(c.author || "未知作者") || 0) + 1));
+    return `已锁定 ${commits.length} 个 commit，不会被推送；${[...authors].map(([name, count]) => `${name} ${count} 个`).join("，")}`;
   }
 
   function renderList() {
@@ -312,10 +332,6 @@
     controls.appendChild(search);
     const count = document.createElement("span"); count.className = "selection-count"; count.textContent = `${visible.length} / ${state.commits.length}`; controls.appendChild(count);
     if (filterText) controls.appendChild(button("清除", () => { filterText = ""; persistUi(); renderList(); listEl.querySelector(".commit-search")?.focus(); }));
-    if (selectedHashes.size >= 2) {
-      controls.appendChild(button(`批量锁定 ${selectedHashes.size} 个 commit`, () => vscode.postMessage({ type: "bulkLock", hashes: [...selectedHashes] })));
-      controls.appendChild(button(`批量删除 ${selectedHashes.size} 个 commit`, () => vscode.postMessage({ type: "bulkDrop", hashes: [...selectedHashes] }), { danger: true }));
-    }
     listEl.appendChild(controls);
     const top = document.createElement("div"); top.className = "timeline-end"; top.textContent = "↑ Base / 较早"; listEl.appendChild(top);
     let pendingMarkerShown = false;
@@ -342,8 +358,8 @@
   function lockedRunRow(commits) {
     const key = lockedRunKey(commits); const details = document.createElement("details"); details.className = "locked-run"; details.open = expandedLockedRuns.has(key);
     details.addEventListener("toggle", () => { if (details.open) expandedLockedRuns.add(key); else expandedLockedRuns.delete(key); persistUi(); });
-    const summary = document.createElement("summary"); summary.textContent = runSummary(commits);
-    summary.setAttribute("aria-label", `${runSummary(commits)}；拖入上半部插入 run 前，拖入下半部插入 run 后`);
+    const summary = document.createElement("summary"); summary.textContent = runSummary(commits); summary.title = runSummaryAria(commits);
+    summary.setAttribute("aria-label", `${runSummaryAria(commits)}；拖入上半部插入 run 前，拖入下半部插入 run 后`);
     summary.addEventListener("dragover", (event) => { if (!drag || drag.filter || state.rebaseInProgress) return; event.preventDefault(); const after = isAfter(event, summary); clearDropMarkers(); details.classList.toggle("drop-before", !after); details.classList.toggle("drop-after", after); setDragHint(`将 ${short(drag.sourceHash)} 移动到锁定区 ${after ? "之后" : "之前"}`); });
     summary.addEventListener("dragleave", () => details.classList.remove("drop-before", "drop-after"));
     summary.addEventListener("drop", (event) => {
@@ -413,7 +429,8 @@
     row.addEventListener("contextmenu", (event) => {
       event.preventDefault();
       selectContextTarget(c);
-      openMenu(event.clientX, event.clientY, c, row);
+      const hashes = selectedMultiple() ? [...selectedHashes] : undefined;
+      vscode.postMessage(hashes ? { type: "openBatchInspector", hashes } : { type: "openCommitInspector", hash: c.hash });
     });
     row.addEventListener("click", (event) => selectRow(event, c));
     row.addEventListener("keydown", (event) => rowKeydown(event, c));
@@ -451,7 +468,7 @@
     if (selectedHashes.size) { selectedHashes.clear(); selectionAnchor = null; renderList(); }
   }
   function rowKeydown(event, c) {
-    if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) { event.preventDefault(); selectContextTarget(c); const r = event.currentTarget.getBoundingClientRect(); openMenu(r.left + 8, r.bottom, c, event.currentTarget); return; }
+    if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) { event.preventDefault(); selectContextTarget(c); const hashes = selectedMultiple() ? [...selectedHashes] : undefined; vscode.postMessage(hashes ? { type: "openBatchInspector", hashes } : { type: "openCommitInspector", hash: c.hash }); return; }
     if ((event.ctrlKey || event.metaKey) && event.key === " ") { event.preventDefault(); selectRow({ ctrlKey: true, target: event.currentTarget }, c); return; }
     if (event.altKey && (event.key === "ArrowUp" || event.key === "ArrowDown")) {
       event.preventDefault();
@@ -591,19 +608,13 @@
   // postMessage nor persistUi; __grvUiTrace exposes that invariant to tests.
   document.addEventListener("scroll", () => { menuScrollCloseCount++; closeMenu(); }, true); window.addEventListener("resize", closeMenu);
 
-  function scheduleTooltip(c, row) { if (tipTimer) clearTimeout(tipTimer); if (tipHideTimer) clearTimeout(tipHideTimer); tipHash = c.hash; tipAnchor = row; tipTimer = setTimeout(() => vscode.postMessage({ type: "requestDetail", hash: c.hash }), 400); }
-  function cancelTooltip() { if (tipTimer) clearTimeout(tipTimer); if (tipHideTimer) clearTimeout(tipHideTimer); tipHideTimer = setTimeout(() => { if (!tipOverTip) hideTooltip(); }, 200); }
-  function hideTooltip() { tooltipEl.classList.add("hidden"); tipHash = null; tipAnchor = null; }
-  function compactStat(stat) { const match = (stat || "").match(/(\d+) files? changed(?:, (\d+) insertions?\(\+\))?(?:, (\d+) deletions?\(-\))?/); return match ? `${match[1]} file${match[1] === "1" ? "" : "s"}${match[2] ? ` · +${match[2]}` : ""}${match[3] ? ` −${match[3]}` : ""}` : stat; }
-  function showDetail(d) {
-    if (d.hash !== tipHash || !tipAnchor) return; tooltipEl.innerHTML = "";
-    const top = document.createElement("div"); top.className = "tip-top"; const meta = document.createElement("div"); meta.className = "tip-meta"; meta.textContent = `${d.author} · ${d.relDate} · ${d.absDate}`;
-    const actions = document.createElement("div"); actions.className = "tip-actions"; actions.append(button("⧉", () => vscode.postMessage({ type: "copyText", text: d.message }), { title: "复制完整 message" }), button("◫", () => vscode.postMessage({ type: "openDiff", hash: d.hash }), { title: "打开变更" })); top.append(meta, actions);
-    const stat = document.createElement("div"); stat.className = "tip-stat"; stat.textContent = `${short(d.hash)} · ${compactStat(d.stat)}`;
-    const msg = document.createElement("pre"); msg.className = "tip-msg"; msg.textContent = d.message; tooltipEl.append(top, stat, msg); tooltipEl.classList.remove("hidden");
-    const r = tipAnchor.getBoundingClientRect(); const tw = tooltipEl.offsetWidth; const th = tooltipEl.offsetHeight; let topPos = r.bottom + 4; if (topPos + th > window.innerHeight - 4) topPos = Math.max(4, r.top - th - 4); tooltipEl.style.left = Math.max(4, Math.min(r.left, window.innerWidth - tw - 4)) + "px"; tooltipEl.style.top = topPos + "px";
-  }
-  tooltipEl.addEventListener("mouseenter", () => { tipOverTip = true; }); tooltipEl.addEventListener("mouseleave", () => { tipOverTip = false; hideTooltip(); });
+  // Commit detail is intentionally shown in the VS Code editor-area inspector,
+  // never as a fixed sidebar tooltip that can cover other commit rows.
+  function scheduleTooltip(c) { if (tipTimer) clearTimeout(tipTimer); tipTimer = setTimeout(() => vscode.postMessage({ type: "requestDetail", hash: c.hash }), 400); }
+  function cancelTooltip() { if (tipTimer) clearTimeout(tipTimer); }
+  function hideTooltip() { tipHash = null; tipAnchor = null; }
+  function showDetail() { /* Inspector panel owns detail presentation. */ }
+  tooltipEl.classList.add("hidden");
 
   function persistUi() { vscode.setState({ filterText, changesMoreOpen, expandedLockedRuns: [...expandedLockedRuns] }); }
   function restoreUi() { const saved = vscode.getState(); if (!saved) return; filterText = typeof saved.filterText === "string" ? saved.filterText : ""; changesMoreOpen = !!saved.changesMoreOpen; (saved.expandedLockedRuns || []).forEach((key) => expandedLockedRuns.add(key)); }
