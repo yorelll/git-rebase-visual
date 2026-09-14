@@ -129,10 +129,11 @@ test("CommitInspectorPanel adapter survives host close, delayed old dispose, and
     const received: any[] = [];
     const inspector = new CommitInspectorPanel({} as any, (message: any) => received.push(message));
 
-    inspector.open(payload("first"));
+    inspector.open({ ...payload("first"), kind: "preview" });
     const first = factory.panels[0]!;
     assert.deepEqual(factory.createCalls[0]?.options, { viewColumn: 2, preserveFocus: true }, "opening inspector preserves the existing active editor and cannot self-trigger its close bridge");
-    assert.equal(first.disposed, false, "panel remains open immediately after creation");
+    assert.equal(first.disposed, false, "cross-pane hover preview remains visible immediately after creation");
+    assert.deepEqual(first.webview.posted[0], { type: "show", payload: { ...payload("first"), kind: "preview" } }, "hover detail is actually delivered to the non-obscuring inspector");
     assert.equal(first.webview.posted.length, 1);
     assert.equal(first.webview.activeMessageListeners(), 1);
     assert.equal(first.activeDisposeListeners(), 1);

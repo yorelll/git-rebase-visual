@@ -163,7 +163,7 @@ test("actual webview author dots show a two-character label for same-initial aut
   }
 });
 
-test("actual webview routes context actions to a non-obscuring editor-area inspector", () => {
+test("actual webview routes context actions to a non-obscuring editor-area inspector", async () => {
   const view = createHarness();
   try {
     view.postState(state([a, b, c], 3));
@@ -177,6 +177,15 @@ test("actual webview routes context actions to a non-obscuring editor-area inspe
     assert.deepEqual(JSON.parse(JSON.stringify(view.messages.at(-1))), { type: "openCommitInspector", hash: c, source: "webview:read" });
     assert.equal(view.dom.window.document.getElementById("menu")?.classList.contains("hidden"), true, "sidebar menu no longer covers list rows");
 
+    view.messages.length = 0;
+    view.row(c).dispatchEvent(mouseEvent(view.dom.window, "mouseenter"));
+    await new Promise((resolve) => setTimeout(resolve, 420));
+    assert.deepEqual(JSON.parse(JSON.stringify(view.messages.at(-1))), { type: "requestDetail", hash: c, source: "webview:read" }, "hover requests an editor-area detail preview");
+    view.row(c).dispatchEvent(mouseEvent(view.dom.window, "mouseleave"));
+    await new Promise((resolve) => setTimeout(resolve, 210));
+    assert.equal(view.messages.some((message) => message.type === "dismissCommitPreview"), true, "leaving a commit schedules dismissal of the cross-pane preview");
+
+    view.messages.length = 0;
     click(a, { ctrlKey: true });
     click(b, { ctrlKey: true });
     view.row(a).dispatchEvent(mouseEvent(view.dom.window, "contextmenu", { clientX: 10, clientY: 10 }));

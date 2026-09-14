@@ -26,7 +26,7 @@ const mutationActions = new Set([
 
 const readActions = new Set([
   "copyHash", "copyMessage", "openDiff", "generateDiff", "bulkGenerateDiff", "openWorktreeDiff", "requestDetail",
-  "openCommitInspector", "openBatchInspector", "copyText", "openLlmSettings", "ready", "refresh",
+  "openCommitInspector", "openBatchInspector", "dismissCommitPreview", "copyText", "openLlmSettings", "ready", "refresh",
 ]);
 
 /**

@@ -151,6 +151,7 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
   private readonly statusBar: vscode.StatusBarItem;
   private readonly compose: ComposePanel;
   private readonly inspector: CommitInspectorPanel;
+  private previewCloseTimer?: NodeJS.Timeout;
   private generationCancel?: AbortController;
   private readonly commitDiffCache = new Map<string, ReturnType<typeof commitDiffPlan>>();
 
@@ -166,10 +167,14 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     this.statusBar.command = "gitRebaseVisual.reveal";
     this.statusBar.tooltip = "显示 Git Rebase Visual";
     this.compose = new ComposePanel(ctx.extensionUri, (message) => this.onMessage(message));
-    this.inspector = new CommitInspectorPanel(ctx.extensionUri, (message) => this.onMessage(message));
+    this.inspector = new CommitInspectorPanel(ctx.extensionUri, (message) => this.onMessage(message), () => {
+      if (this.previewCloseTimer) clearTimeout(this.previewCloseTimer);
+      this.previewCloseTimer = undefined;
+    });
     inlineToastSink = (message, duration) => this.postInlineToast(message, duration);
     ctx.subscriptions.push(this.output, this.statusBar, this.compose, this.inspector, new vscode.Disposable(() => {
       if (inlineToastSink) inlineToastSink = undefined;
+      if (this.previewCloseTimer) clearTimeout(this.previewCloseTimer);
       this.commitDiffCache.clear();
       this.generatedDiffSnapshots.clear();
     }));
@@ -187,10 +192,12 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
       // editor surfaces opened from its context menu.
       vscode.window.onDidChangeActiveTextEditor(() => {
         this.post({ type: "closeMenu", source: "host:activeEditor" });
+        this.cancelInspectorPreview();
         this.inspector.close();
       }),
       vscode.window.onDidChangeTextEditorSelection(() => {
         this.post({ type: "closeMenu", source: "host:editorSelection" });
+        this.cancelInspectorPreview();
         this.inspector.close();
       }),
       vscode.window.onDidChangeWindowState(() => this.post({ type: "closeMenu", source: "host:windowState" })),
@@ -672,7 +679,11 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
         case "requestDetail":
           await this.openCommitInspector(cwd!, m.hash, "preview");
           break;
+        case "dismissCommitPreview":
+          this.scheduleInspectorPreviewClose();
+          break;
         case "openCommitInspector":
+          this.cancelInspectorPreview();
           await this.openCommitInspector(cwd!, m.hash, "single");
           break;
         case "openBatchInspector":
@@ -2209,6 +2220,20 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     toast("info", snapshot.truncated ? "已生成只读 Diff 文档（输出已截断）。" : "已生成只读 Diff 文档。");
   }
 
+  /** Closes a hover preview after pointer travel but leaves explicit actions open. */
+  private scheduleInspectorPreviewClose(): void {
+    if (this.previewCloseTimer) clearTimeout(this.previewCloseTimer);
+    this.previewCloseTimer = setTimeout(() => {
+      this.previewCloseTimer = undefined;
+      this.inspector.close();
+    }, 180);
+  }
+
+  private cancelInspectorPreview(): void {
+    if (this.previewCloseTimer) clearTimeout(this.previewCloseTimer);
+    this.previewCloseTimer = undefined;
+  }
+
   /** Opens detail/actions beside the editor instead of obscuring timeline rows. */
   private async openCommitInspector(
     cwd: string,
@@ -2220,9 +2245,10 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     }
     const commit = this.commits.find((item) => item.hash === hash)!;
     const detail = await commitDetail(cwd, hash);
-    // A hover preview must remain non-obscuring and non-focus-stealing; explicit
-    // context actions open the same editor-area surface with its full controls.
-    if (kind === "preview") return;
+    // A hover preview now uses the same editor-area companion (with no actions),
+    // so message detail remains visible without covering nearby timeline rows.
+    // It preserves editor focus and closes after the sidebar pointer leaves.
+    this.cancelInspectorPreview();
     this.inspector.open({
       kind,
       revision: this.canonicalRevision,
@@ -2243,6 +2269,7 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
 
   /** Opens batch actions in the same non-obscuring companion editor. */
   private async openBatchInspector(value: unknown): Promise<void> {
+    this.cancelInspectorPreview();
     const hashes = this.selectedHashes(value);
     if (!hashes || hashes.length < 2) throw new Error("批量选择已过期；请刷新后重试。 ");
     const byHash = new Map(this.commits.map((commit) => [commit.hash, commit]));
