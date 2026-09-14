@@ -25,7 +25,7 @@ test("paused-rebase UI/read traffic is traced but never becomes a warning mutati
   const view = new WebviewProtocolState();
   for (const [type, source] of [
     ["refresh", "poll"], ["pointermove", "pointer"], ["selection", "selection"],
-    ["compositionupdate", "ime"], ["toast", "toast"], ["openWorktreeDiff", "file"], ["dismissCommitPreview", "hover"],
+    ["compositionupdate", "ime"], ["toast", "toast"], ["openWorktreeDiff", "file"],
   ] as const) view.observe(type, source, true);
   view.openMenu();
   view.closeMenuFromHost();
@@ -34,7 +34,7 @@ test("paused-rebase UI/read traffic is traced but never becomes a warning mutati
   assert.equal(trace.warningCount, 0);
   assert.equal(trace.hostCloseCount, 1);
   assert.equal(trace.menuOpen, false);
-  assert.equal(trace.sources.length, 7);
+  assert.equal(trace.sources.length, 6);
 });
 
 test("worktree Diff, stage, and restore route by path rather than a commit hash", () => {

@@ -612,21 +612,15 @@
   // never as a fixed sidebar tooltip that can cover other commit rows.
   function scheduleTooltip(c) {
     if (tipTimer) clearTimeout(tipTimer);
-    if (tipHideTimer) clearTimeout(tipHideTimer);
     tipHash = c.hash;
     tipTimer = setTimeout(() => vscode.postMessage({ type: "requestDetail", hash: c.hash }), 400);
   }
   function cancelTooltip() {
     if (tipTimer) clearTimeout(tipTimer);
-    if (tipHideTimer) clearTimeout(tipHideTimer);
-    // Give a neighbouring commit a moment to become the next preview target;
-    // otherwise close the non-obscuring editor-area preview.
-    tipHideTimer = setTimeout(() => {
-      if (tipHash) {
-        vscode.postMessage({ type: "dismissCommitPreview", hash: tipHash });
-        tipHash = null;
-      }
-    }, 180);
+    // The detail lives in a separate editor group. Unlike an in-sidebar hover,
+    // it must remain readable/copyable after the pointer leaves this commit.
+    // A later preview, explicit action, or genuine external TextEditor event
+    // replaces/closes it through the host ownership coordinator.
   }
   function hideTooltip() { tipHash = null; tipAnchor = null; }
   function showDetail() { /* Inspector panel owns detail presentation. */ }

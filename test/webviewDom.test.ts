@@ -183,7 +183,7 @@ test("actual webview routes context actions to a non-obscuring editor-area inspe
     assert.deepEqual(JSON.parse(JSON.stringify(view.messages.at(-1))), { type: "requestDetail", hash: c, source: "webview:read" }, "hover requests an editor-area detail preview");
     view.row(c).dispatchEvent(mouseEvent(view.dom.window, "mouseleave"));
     await new Promise((resolve) => setTimeout(resolve, 210));
-    assert.equal(view.messages.some((message) => message.type === "dismissCommitPreview"), true, "leaving a commit schedules dismissal of the cross-pane preview");
+    assert.equal(view.messages.some((message) => message.type === "dismissCommitPreview"), false, "leaving the sidebar commit keeps the cross-pane preview readable");
 
     view.messages.length = 0;
     click(a, { ctrlKey: true });

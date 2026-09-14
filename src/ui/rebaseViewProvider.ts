@@ -154,7 +154,6 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
   private readonly compose: ComposePanel;
   private readonly inspector: CommitInspectorPanel;
   private readonly inspectorPreview = new InspectorPreviewCoordinator();
-  private previewCloseTimer?: NodeJS.Timeout;
   private generationCancel?: AbortController;
   private readonly commitDiffCache = new Map<string, ReturnType<typeof commitDiffPlan>>();
 
@@ -171,14 +170,11 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     this.statusBar.tooltip = "显示 Git Rebase Visual";
     this.compose = new ComposePanel(ctx.extensionUri, (message) => this.onMessage(message));
     this.inspector = new CommitInspectorPanel(ctx.extensionUri, (message) => this.onMessage(message), () => {
-      if (this.previewCloseTimer) clearTimeout(this.previewCloseTimer);
-      this.previewCloseTimer = undefined;
       this.inspectorPreview.invalidate();
     });
     inlineToastSink = (message, duration) => this.postInlineToast(message, duration);
     ctx.subscriptions.push(this.output, this.statusBar, this.compose, this.inspector, new vscode.Disposable(() => {
       if (inlineToastSink) inlineToastSink = undefined;
-      if (this.previewCloseTimer) clearTimeout(this.previewCloseTimer);
       this.commitDiffCache.clear();
       this.generatedDiffSnapshots.clear();
     }));
@@ -686,7 +682,9 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
           await this.openCommitInspector(cwd!, m.hash, "preview");
           break;
         case "dismissCommitPreview":
-          this.scheduleInspectorPreviewClose(m.hash);
+          // Cross-pane preview remains available for reading/copying after the
+          // sidebar pointer leaves; explicit actions or real editor interaction
+          // replace/close it through InspectorPreviewCoordinator ownership.
           break;
         case "openCommitInspector":
           await this.openCommitInspector(cwd!, m.hash, "single");
@@ -2225,22 +2223,7 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     toast("info", snapshot.truncated ? "已生成只读 Diff 文档（输出已截断）。" : "已生成只读 Diff 文档。");
   }
 
-  /** Closes only the matching hover preview after pointer travel. */
-  private scheduleInspectorPreviewClose(hash: unknown): void {
-    const dismissed = this.inspectorPreview.dismissPreview(hash);
-    if (!dismissed?.shouldClose) return;
-    if (this.previewCloseTimer) clearTimeout(this.previewCloseTimer);
-    const session = dismissed.session;
-    this.previewCloseTimer = setTimeout(() => {
-      this.previewCloseTimer = undefined;
-      if (!this.inspectorPreview.finishPreviewClose(session)) return;
-      this.inspector.close();
-    }, 180);
-  }
-
   private cancelInspectorPreview(invalidate = false): void {
-    if (this.previewCloseTimer) clearTimeout(this.previewCloseTimer);
-    this.previewCloseTimer = undefined;
     if (invalidate) this.inspectorPreview.invalidate();
   }
 
