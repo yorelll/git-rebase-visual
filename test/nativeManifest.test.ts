@@ -59,6 +59,11 @@ test("native manifest retains readonly commit actions for locked and batch conte
   ]) {
     const when = contextMenu(command).when ?? "";
     assert.match(when, /viewItem == gitRebaseVisual\.commit/);
-    assert.doesNotMatch(when, /locked|batch/, `${command} must remain unavailable for locked or batch contexts`);
+    assert.doesNotMatch(when, /locked/, `${command} must remain unavailable for locked contexts`);
   }
+  assert.doesNotMatch(
+    contextMenu("gitRebaseVisual.commit.bulkDrop").when ?? "",
+    /locked/,
+    "a batch containing any locked commit must not offer a rewrite drop route"
+  );
 });

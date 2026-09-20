@@ -346,7 +346,7 @@
         },
         {
           "command": "gitRebaseVisual.commit.bulkDrop",
-          "when": "view == gitRebaseVisual.commits && (viewItem == gitRebaseVisual.commit.batch || viewItem == gitRebaseVisual.commit.batch.contiguous || viewItem == gitRebaseVisual.commit.locked.batch || viewItem == gitRebaseVisual.commit.locked.batch.contiguous)",
+          "when": "view == gitRebaseVisual.commits && (viewItem == gitRebaseVisual.commit.batch || viewItem == gitRebaseVisual.commit.batch.contiguous)",
           "group": "danger@2"
         },
         {
