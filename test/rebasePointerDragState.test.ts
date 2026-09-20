@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { beginPointerDrag, canStartReorder, oneStepReorderIntent, pointerDropIntent } from "../src/ui/rebasePointerDragState";
+import { beginPointerDrag, canStartReorder, nativeTreeDropIntent, oneStepReorderIntent, pointerDropIntent } from "../src/ui/rebasePointerDragState";
 
 const a = "a".repeat(40);
 const b = "b".repeat(40);
@@ -18,6 +18,14 @@ test("pointer drag produces the same complete canonical intent as native drag", 
     sourceHash: c, pointerId: 42, revision: 9, anchorHash: a, placement: "before", order: [c, a, b, locked],
   });
   assert.equal(pointerDropIntent(session, { anchorHash: c, placement: "after" }, canonical), undefined);
+});
+
+test("native TreeView drop produces a no-layout-shift canonical intent", () => {
+  assert.deepEqual(nativeTreeDropIntent(c, a, canonical, 12), {
+    sourceHash: c, anchorHash: a, placement: "before", revision: 12, order: [c, a, b, locked],
+  });
+  assert.equal(nativeTreeDropIntent(c, c, canonical, 12), undefined);
+  assert.equal(nativeTreeDropIntent("missing", a, canonical, 12), undefined);
 });
 
 test("Alt arrows derive one-step canonical intents with boundaries and revision", () => {

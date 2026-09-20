@@ -86,6 +86,7 @@ import {
 import { applyCommitBinaryStatus, commitDiffPlan, parseCommitChangedFiles } from "./commitDiffState";
 import { ensureEditStopTarget, writeEditStopCommit } from "./editStopCommit";
 import { validateReorderRequest } from "./rebaseReorderState";
+import { nativeTreeDropIntent } from "./rebasePointerDragState";
 import { nextCanonicalSnapshotRevision } from "./canonicalSnapshot";
 import { isDraftOnlyAiGenerationAllowedDuringRebase, isDraftOnlyComposeAllowedDuringRebase } from "./composePolicy";
 import { ComposePanel } from "./composePanel";
@@ -624,22 +625,16 @@ export class RebaseViewProvider {
         } catch {
           return;
         }
-        if (typeof drag.hash !== "string") return;
+        if (typeof drag.hash !== "string" || typeof drag.revision !== "number") return;
         const canonicalOrder = this.commits.slice().reverse().map((commit) => commit.hash);
         const sourceIndex = canonicalOrder.indexOf(drag.hash);
         const targetIndex = canonicalOrder.indexOf(target.commit.hash);
         if (sourceIndex < 0 || targetIndex < 0 || sourceIndex === targetIndex) return;
-        const order = canonicalOrder.filter((hash) => hash !== drag.hash);
-        order.splice(order.indexOf(target.commit.hash), 0, drag.hash);
-        await this.onMessage({
-          type: "reorder",
-          source: "native-tree",
-          sourceHash: drag.hash,
-          anchorHash: target.commit.hash,
-          placement: "before",
-          revision: drag.revision,
-          order,
-        });
+        const intent = nativeTreeDropIntent(drag.hash, target.commit.hash, canonicalOrder, drag.revision);
+        // Native DnD never inserts a hint/list row during drag. On drop it sends
+        // only the full captured canonical intent, which handleReorder rechecks.
+        if (!intent) return;
+        await this.onMessage({ type: "reorder", source: "native-tree", ...intent });
       },
     };
   }

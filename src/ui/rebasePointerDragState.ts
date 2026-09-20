@@ -35,6 +35,21 @@ export function pointerDropIntent(
   return order ? { ...session, anchorHash: target.anchorHash, placement: target.placement, order } : undefined;
 }
 
+/**
+ * Native TreeView DnD always inserts before the dropped commit. The controller
+ * never mutates provider rows while dragging, so there is no normal-flow hint
+ * row or list shift; it only sends this immutable canonical intent on drop.
+ */
+export function nativeTreeDropIntent(
+  sourceHash: string,
+  targetHash: string,
+  canonicalOrder: readonly string[],
+  revision: number
+): { sourceHash: string; anchorHash: string; placement: "before"; revision: number; order: string[] } | undefined {
+  const order = reorderAround(canonicalOrder, sourceHash, targetHash, "before");
+  return order ? { sourceHash, anchorHash: targetHash, placement: "before", revision, order } : undefined;
+}
+
 /** Returns the canonical one-step keyboard move, including its complete order. */
 export function oneStepReorderIntent(
   canonicalOrder: readonly string[],
