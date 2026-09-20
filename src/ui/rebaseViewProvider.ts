@@ -722,14 +722,19 @@ export class RebaseViewProvider {
   }
 
   /** Opens working-tree AI compose while preserving its paused-rebase draft policy. */
-  private openWorkingAiCompose(element?: NativeCommitTreeElement): Promise<void> {
-    if (element?.kind !== "message") return Promise.resolve();
-    const request = nativeWorkingAiComposeRequest(isLlmConfigured(), element.rebase !== undefined);
+  private async openWorkingAiCompose(element?: NativeCommitTreeElement): Promise<void> {
+    if (element?.kind !== "message") return;
+    // Working-section headers are not themselves paused-rebase message rows, so
+    // query the authoritative Git state rather than inferring policy from their
+    // presentation data. `openCompose` independently rechecks this before use.
+    const cwd = this.cwd();
+    const rebaseInProgress = !!cwd && await isRebaseInProgress(cwd);
+    const request = nativeWorkingAiComposeRequest(isLlmConfigured(), rebaseInProgress);
     if (!request) {
       toast("error", "请先在设置中配置 gitRebaseVisual.llm.baseUrl 与 apiKey。");
-      return Promise.resolve();
+      return;
     }
-    return this.onMessage({ ...request, source: "native-tree" });
+    await this.onMessage({ ...request, source: "native-tree" });
   }
 
   private async onMessage(m: FromWebview): Promise<void> {
