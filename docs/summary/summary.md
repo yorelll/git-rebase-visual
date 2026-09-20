@@ -37,7 +37,7 @@ Commit Inspector 不在当前激活架构或用户路径中，仅保留为历史
 | 自动状态同步 | 文件事件与节流 index 轮询刷新 staged/unstaged 文件数；后台 status 使用 `GIT_OPTIONAL_LOCKS=0`，避免 optional `index.lock` 与终端写操作竞争。 |
 | 列表/上下文/可访问性 | 作者文字前缀和稳定语义色、pending 文本、branch/upstream/ahead-behind、原生多选、原生 context target、锁定批次限制、locked-run 折叠、状态栏和 High Contrast fallback。历史 Webview 的 `author:`/`msg:`/`hash:0x` 搜索、IME 输入和键盘 pickup/drop 不属于当前 TreeView 用户路径。 |
 | 文件级 SCM 恢复与 Diff | porcelain v2 `-z` 结构化 staged/working/untracked 状态；单文件 working/staged restore、host modal 确认后再次读取并验证状态才删除未跟踪文件；公开 `vscode.diff` 的 index↔working、HEAD↔index 和 parent↔commit 对比；opaque request store 防止 URI 暴露仓库/ref/path。 |
-| 连续 generated Diff | 单项或连续多选 commit 的 oldest-first frozen Diff snapshot；webview 禁用非连续选择，host 重验完整 hash、revision 与连续性；扩展私有只读 provider 使用 opaque token、TTL/LRU/repository invalidation。 |
+| 连续 generated Diff | 单项或连续多选 commit 的 oldest-first frozen Diff snapshot；原生 context menu 不向非连续选择暴露批量 Generate Diff，host 仍重验完整 hash、revision 与连续性；扩展私有只读 provider 使用 opaque token、TTL/LRU/repository invalidation。 |
 | 写入与交互协议 | stage/restore/bulk stage-discard-unstage 作为 mutation 经 busy 串行化，paused edit-stop 由明确 allow-list 控制；native DnD 使用 immutable canonical session，routine worktree refresh 不会使其 stale，而真正 timeline/lock/rebase 变化仍会拒绝旧手势；无副作用 UI 流量不触发暂停告警。 |
 | 历史 Inspector | `commitInspectorPanel` 及相关测试仅为历史/非激活代码，不属于当前用户界面。当前 hover 和 context 操作均由原生 TreeView tooltip/context menu 承担，禁止用 Inspector 重新创建 editor-area 详情或上下文面板。 |
 
