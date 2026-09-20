@@ -266,22 +266,22 @@
       "view/item/context": [
         {
           "command": "gitRebaseVisual.commit.copyHash",
-          "when": "view == gitRebaseVisual.commits && viewItem == gitRebaseVisual.commit",
+          "when": "view == gitRebaseVisual.commits && (viewItem == gitRebaseVisual.commit || viewItem == gitRebaseVisual.commit.locked)",
           "group": "navigation@1"
         },
         {
           "command": "gitRebaseVisual.commit.copyMessage",
-          "when": "view == gitRebaseVisual.commits && viewItem == gitRebaseVisual.commit",
+          "when": "view == gitRebaseVisual.commits && (viewItem == gitRebaseVisual.commit || viewItem == gitRebaseVisual.commit.locked)",
           "group": "navigation@2"
         },
         {
           "command": "gitRebaseVisual.commit.openDiff",
-          "when": "view == gitRebaseVisual.commits && viewItem == gitRebaseVisual.commit",
+          "when": "view == gitRebaseVisual.commits && (viewItem == gitRebaseVisual.commit || viewItem == gitRebaseVisual.commit.locked)",
           "group": "navigation@3"
         },
         {
           "command": "gitRebaseVisual.commit.generateDiff",
-          "when": "view == gitRebaseVisual.commits && viewItem == gitRebaseVisual.commit",
+          "when": "view == gitRebaseVisual.commits && (viewItem == gitRebaseVisual.commit || viewItem == gitRebaseVisual.commit.locked)",
           "group": "navigation@4"
         },
         {
