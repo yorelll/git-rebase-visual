@@ -32,7 +32,6 @@
     "views": {
       "gitRebaseVisual": [
         {
-          "type": "webview",
           "id": "gitRebaseVisual.commits",
           "name": "Commits"
         }
@@ -73,6 +72,96 @@
         "command": "gitRebaseVisual.reveal",
         "title": "Show Git Rebase Visual",
         "category": "Git Rebase"
+      },
+      {
+        "command": "gitRebaseVisual.commit.copyHash",
+        "title": "Copy Commit Hash",
+        "category": "Git Rebase"
+      },
+      {
+        "command": "gitRebaseVisual.commit.copyMessage",
+        "title": "Copy Commit Message",
+        "category": "Git Rebase"
+      },
+      {
+        "command": "gitRebaseVisual.commit.openDiff",
+        "title": "Open Commit Diff…",
+        "category": "Git Rebase"
+      },
+      {
+        "command": "gitRebaseVisual.commit.generateDiff",
+        "title": "Generate Diff",
+        "category": "Git Rebase"
+      },
+      {
+        "command": "gitRebaseVisual.commit.reword",
+        "title": "Edit Commit Message…",
+        "category": "Git Rebase"
+      },
+      {
+        "command": "gitRebaseVisual.commit.aiMessage",
+        "title": "Generate Commit Message…",
+        "category": "Git Rebase"
+      },
+      {
+        "command": "gitRebaseVisual.commit.rebaseTo",
+        "title": "Stop Here (edit)",
+        "category": "Git Rebase"
+      },
+      {
+        "command": "gitRebaseVisual.commit.appendStaged",
+        "title": "Append Staged Changes",
+        "category": "Git Rebase"
+      },
+      {
+        "command": "gitRebaseVisual.commit.lock",
+        "title": "Lock Commit",
+        "category": "Git Rebase"
+      },
+      {
+        "command": "gitRebaseVisual.commit.unlock",
+        "title": "Unlock Commit",
+        "category": "Git Rebase"
+      },
+      {
+        "command": "gitRebaseVisual.commit.drop",
+        "title": "Drop Commit",
+        "category": "Git Rebase"
+      },
+      {
+        "command": "gitRebaseVisual.commit.bulkLock",
+        "title": "Lock Selected Commits",
+        "category": "Git Rebase"
+      },
+      {
+        "command": "gitRebaseVisual.commit.bulkDrop",
+        "title": "Drop Selected Commits",
+        "category": "Git Rebase"
+      },
+      {
+        "command": "gitRebaseVisual.commit.bulkGenerateDiff",
+        "title": "Generate Selected Diff",
+        "category": "Git Rebase"
+      },
+      {
+        "command": "gitRebaseVisual.worktree.openDiff",
+        "title": "Open Diff",
+        "category": "Git Rebase"
+      },
+      {
+        "command": "gitRebaseVisual.worktree.stage",
+        "title": "Stage File",
+        "category": "Git Rebase"
+      },
+      {
+        "command": "gitRebaseVisual.worktree.restore",
+        "title": "Restore File",
+        "category": "Git Rebase"
+      },
+      {
+        "command": "gitRebaseVisual.worktree.deleteUntracked",
+        "title": "Delete Untracked File",
+        "category": "Git Rebase"
       }
     ],
     "menus": {
@@ -101,6 +190,98 @@
           "command": "gitRebaseVisual.refresh",
           "when": "view == gitRebaseVisual.commits",
           "group": "navigation@5"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "gitRebaseVisual.commit.copyHash",
+          "when": "view == gitRebaseVisual.commits && viewItem == gitRebaseVisual.commit",
+          "group": "navigation@1"
+        },
+        {
+          "command": "gitRebaseVisual.commit.copyMessage",
+          "when": "view == gitRebaseVisual.commits && viewItem == gitRebaseVisual.commit",
+          "group": "navigation@2"
+        },
+        {
+          "command": "gitRebaseVisual.commit.openDiff",
+          "when": "view == gitRebaseVisual.commits && viewItem == gitRebaseVisual.commit",
+          "group": "navigation@3"
+        },
+        {
+          "command": "gitRebaseVisual.commit.generateDiff",
+          "when": "view == gitRebaseVisual.commits && viewItem == gitRebaseVisual.commit",
+          "group": "navigation@4"
+        },
+        {
+          "command": "gitRebaseVisual.commit.reword",
+          "when": "view == gitRebaseVisual.commits && viewItem == gitRebaseVisual.commit",
+          "group": "edit@1"
+        },
+        {
+          "command": "gitRebaseVisual.commit.aiMessage",
+          "when": "view == gitRebaseVisual.commits && viewItem == gitRebaseVisual.commit",
+          "group": "edit@2"
+        },
+        {
+          "command": "gitRebaseVisual.commit.rebaseTo",
+          "when": "view == gitRebaseVisual.commits && viewItem == gitRebaseVisual.commit",
+          "group": "edit@3"
+        },
+        {
+          "command": "gitRebaseVisual.commit.appendStaged",
+          "when": "view == gitRebaseVisual.commits && viewItem == gitRebaseVisual.commit",
+          "group": "edit@4"
+        },
+        {
+          "command": "gitRebaseVisual.commit.lock",
+          "when": "view == gitRebaseVisual.commits && viewItem == gitRebaseVisual.commit",
+          "group": "edit@5"
+        },
+        {
+          "command": "gitRebaseVisual.commit.unlock",
+          "when": "view == gitRebaseVisual.commits && viewItem =~ /gitRebaseVisual\\.commit\\.locked/",
+          "group": "edit@5"
+        },
+        {
+          "command": "gitRebaseVisual.commit.drop",
+          "when": "view == gitRebaseVisual.commits && viewItem == gitRebaseVisual.commit",
+          "group": "danger@1"
+        },
+        {
+          "command": "gitRebaseVisual.commit.bulkGenerateDiff",
+          "when": "view == gitRebaseVisual.commits && viewItem =~ /gitRebaseVisual\\.commit\\.batch\\.contiguous/",
+          "group": "batch@1"
+        },
+        {
+          "command": "gitRebaseVisual.commit.bulkLock",
+          "when": "view == gitRebaseVisual.commits && viewItem =~ /gitRebaseVisual\\.commit\\.batch/",
+          "group": "batch@2"
+        },
+        {
+          "command": "gitRebaseVisual.commit.bulkDrop",
+          "when": "view == gitRebaseVisual.commits && viewItem =~ /gitRebaseVisual\\.commit\\.batch/",
+          "group": "danger@2"
+        },
+        {
+          "command": "gitRebaseVisual.worktree.openDiff",
+          "when": "view == gitRebaseVisual.commits && (viewItem == gitRebaseVisual.worktree.staged || viewItem == gitRebaseVisual.worktree.working || viewItem == gitRebaseVisual.worktree.untracked)",
+          "group": "navigation@1"
+        },
+        {
+          "command": "gitRebaseVisual.worktree.stage",
+          "when": "view == gitRebaseVisual.commits && (viewItem == gitRebaseVisual.worktree.working || viewItem == gitRebaseVisual.worktree.untracked)",
+          "group": "edit@1"
+        },
+        {
+          "command": "gitRebaseVisual.worktree.restore",
+          "when": "view == gitRebaseVisual.commits && (viewItem == gitRebaseVisual.worktree.staged || viewItem == gitRebaseVisual.worktree.working)",
+          "group": "edit@2"
+        },
+        {
+          "command": "gitRebaseVisual.worktree.deleteUntracked",
+          "when": "view == gitRebaseVisual.commits && viewItem == gitRebaseVisual.worktree.untracked",
+          "group": "danger@1"
         }
       ]
     },

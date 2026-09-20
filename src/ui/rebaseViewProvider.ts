@@ -1,5 +1,4 @@
 import * as vscode from "vscode";
-import * as fs from "fs";
 import * as path from "path";
 import {
   Commit,
@@ -9,8 +8,6 @@ import {
   rebaseStoppedSha,
   rebaseAtEditStop,
   rebaseTodoFiles,
-  currentUserEmail,
-  authorColorKey,
   rebasingBranch,
   currentBranch,
   repoRoot,
@@ -92,15 +89,17 @@ import { validateReorderRequest } from "./rebaseReorderState";
 import { nextCanonicalSnapshotRevision } from "./canonicalSnapshot";
 import { isDraftOnlyAiGenerationAllowedDuringRebase, isDraftOnlyComposeAllowedDuringRebase } from "./composePolicy";
 import { ComposePanel } from "./composePanel";
-import { CommitInspectorPanel } from "./commitInspectorPanel";
-import { InspectorPreviewCoordinator, InspectorSession } from "./inspectorPreviewState";
-import { shouldDismissInspectorForActiveTextEditor, shouldDismissInspectorForTextEditorSelection } from "./inspectorDismissPolicy";
+import {
+  NativeCommitTreeElement,
+  NativeCommitTreeProvider,
+  nativeCommitTreeMime,
+  nativeCommitTreeViewId,
+} from "./nativeCommitTree";
 import { refreshFeedback } from "./refreshFeedbackPolicy";
 import { UndoJournal, UndoRecord, undoPreflight } from "../git/undo";
 
 const PENDING_STASH_KEY = "gitRebaseVisual.pendingStash";
 const PENDING_APPEND_KEY = "gitRebaseVisual.pendingAppend";
-let inlineToastSink: ((message: string, duration?: number) => void) | undefined;
 
 interface PendingAppend {
   /** Full pre-append snapshot, including the original index and worktree. */
@@ -121,10 +120,12 @@ interface FromWebview {
   [k: string]: any;
 }
 
-export class RebaseViewProvider implements vscode.WebviewViewProvider {
-  public static readonly viewType = "gitRebaseVisual.commits";
+export class RebaseViewProvider {
+  public static readonly viewType = nativeCommitTreeViewId;
 
-  private view?: vscode.WebviewView;
+  private readonly treeProvider = new NativeCommitTreeProvider();
+  private readonly tree: vscode.TreeView<NativeCommitTreeElement>;
+  private nativeSelectionHashes = new Set<string>();
   private commits: Commit[] = [];
   private root?: string;
   private busy = false;
@@ -153,8 +154,6 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
   private readonly undo: UndoJournal;
   private readonly statusBar: vscode.StatusBarItem;
   private readonly compose: ComposePanel;
-  private readonly inspector: CommitInspectorPanel;
-  private readonly inspectorPreview = new InspectorPreviewCoordinator();
   private generationCancel?: AbortController;
   private readonly commitDiffCache = new Map<string, ReturnType<typeof commitDiffPlan>>();
 
@@ -170,12 +169,13 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     this.statusBar.command = "gitRebaseVisual.reveal";
     this.statusBar.tooltip = "显示 Git Rebase Visual";
     this.compose = new ComposePanel(ctx.extensionUri, (message) => this.onMessage(message));
-    this.inspector = new CommitInspectorPanel(ctx.extensionUri, (message) => this.onMessage(message), () => {
-      this.inspectorPreview.invalidate();
+    this.tree = vscode.window.createTreeView(RebaseViewProvider.viewType, {
+      treeDataProvider: this.treeProvider,
+      showCollapseAll: false,
+      canSelectMany: true,
+      dragAndDropController: this.nativeDragAndDropController(),
     });
-    inlineToastSink = (message, duration) => this.postInlineToast(message, duration);
-    ctx.subscriptions.push(this.output, this.statusBar, this.compose, this.inspector, new vscode.Disposable(() => {
-      if (inlineToastSink) inlineToastSink = undefined;
+    ctx.subscriptions.push(this.output, this.statusBar, this.compose, this.treeProvider, this.tree, new vscode.Disposable(() => {
       this.commitDiffCache.clear();
       this.generatedDiffSnapshots.clear();
     }));
@@ -188,22 +188,23 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
       vscode.workspace.onDidDeleteFiles(() => this.scheduleRefresh()),
       vscode.workspace.onDidRenameFiles(() => this.scheduleRefresh()),
       vscode.workspace.onDidSaveTextDocument(() => this.scheduleRefresh()),
-      // A normal editor click lives outside the sidebar webview. WebviewPanel
-      // focus, however, may report no active TextEditor; treating that as an
-      // external editor click would self-close inspector action buttons.
-      vscode.window.onDidChangeActiveTextEditor((editor) => {
-        this.post({ type: "closeMenu", source: "host:activeEditor" });
-        if (!shouldDismissInspectorForActiveTextEditor(editor)) return;
-        this.cancelInspectorPreview(true);
-        this.inspector.close();
+      this.tree.onDidChangeVisibility(() => {
+        if (this.tree.visible) {
+          this.startStatusPolling();
+          void this.refresh();
+        } else {
+          this.stopStatusPolling();
+        }
       }),
-      vscode.window.onDidChangeTextEditorSelection((event) => {
-        this.post({ type: "closeMenu", source: "host:editorSelection" });
-        if (!shouldDismissInspectorForTextEditorSelection(event)) return;
-        this.cancelInspectorPreview(true);
-        this.inspector.close();
+      this.tree.onDidChangeSelection((event) => {
+        this.nativeSelectionHashes = new Set(event.selection
+          .filter((item): item is Extract<NativeCommitTreeElement, { kind: "commit" }> => item.kind === "commit")
+          .map((item) => item.commit.hash));
+        const order = this.commits.slice().reverse().map((commit) => commit.hash);
+        const indices = order.map((hash, index) => this.nativeSelectionHashes.has(hash) ? index : -1).filter((index) => index >= 0);
+        const contiguous = indices.length < 2 || indices.at(-1)! - indices[0]! + 1 === indices.length;
+        this.treeProvider.setSelection({ hashes: this.nativeSelectionHashes, contiguous });
       }),
-      vscode.window.onDidChangeWindowState(() => this.post({ type: "closeMenu", source: "host:windowState" })),
       new vscode.Disposable(() => {
         if (this.refreshTimer) {
           clearTimeout(this.refreshTimer);
@@ -215,43 +216,22 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     );
   }
 
-  resolveWebviewView(view: vscode.WebviewView): void {
-    this.view = view;
+  /** Starts native-tree refreshes after activation without creating a webview. */
+  public start(): void {
     this.startStatusPolling();
-    const stopPolling = () => {
-      if (this.statusPoller) {
-        clearInterval(this.statusPoller);
-        this.statusPoller = undefined;
-      }
-      if (this.refreshTimer) {
-        clearTimeout(this.refreshTimer);
-        this.refreshTimer = undefined;
-      }
-      this.statusPollerStarted = false;
-    };
-    view.onDidChangeVisibility(() => {
-      if (view.visible) {
-        this.startStatusPolling();
-        void this.refresh();
-      } else {
-        stopPolling();
-      }
-    });
-    view.onDidDispose(() => {
-      stopPolling();
-      if (this.view === view) {
-        this.view = undefined;
-      }
-    });
-    view.webview.options = {
-      enableScripts: true,
-      localResourceRoots: [
-        vscode.Uri.joinPath(this.ctx.extensionUri, "media"),
-      ],
-    };
-    view.webview.html = this.html(view.webview);
-    view.webview.onDidReceiveMessage((m) => this.onMessage(m));
     void this.refresh();
+  }
+
+  private stopStatusPolling(): void {
+    if (this.statusPoller) {
+      clearInterval(this.statusPoller);
+      this.statusPoller = undefined;
+    }
+    if (this.refreshTimer) {
+      clearTimeout(this.refreshTimer);
+      this.refreshTimer = undefined;
+    }
+    this.statusPollerStarted = false;
   }
 
   private cwd(): string | undefined {
@@ -274,7 +254,7 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
       this.refreshTimer = undefined;
       if (this.busy) {
         this.refreshQueued = true;
-      } else if (this.view) {
+      } else {
         void this.refresh();
       }
     }, 400);
@@ -297,18 +277,17 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
   public async refresh(): Promise<void> {
     const generation = ++this.refreshGeneration;
     const isCurrent = () => generation === this.refreshGeneration;
-    const postCurrent = (msg: any) => {
-      if (isCurrent()) {
-        this.post(msg);
-      }
-    };
     const folder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
     if (!folder) {
-      return postCurrent({ type: "state", error: "No workspace folder open." });
+      this.tree.message = "No workspace folder open.";
+      this.treeProvider.setElements([]);
+      return;
     }
     const root = await repoRoot(folder);
     if (!root) {
-      return postCurrent({ type: "state", error: "Not a git repository." });
+      this.tree.message = "Not a git repository.";
+      this.treeProvider.setElements([]);
+      return;
     }
     if (!isCurrent()) {
       return;
@@ -328,11 +307,8 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
       return;
     }
     if (!gitOk.ok) {
-      postCurrent({
-        type: "state",
-        error: gitOk.message ?? "Git 环境异常。",
-        rebaseInProgress: false,
-      });
+      this.tree.message = gitOk.message ?? "Git 环境异常。";
+      this.treeProvider.setElements([]);
       return;
     }
 
@@ -394,25 +370,28 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     });
     const range = await resolveRange(root, rangeConfig, tipRef ?? "HEAD");
     if ("error" in range) {
-      return postCurrent({ type: "state", error: range.error, rebaseInProgress, ...presentation, collapseLockedRuns: getCollapseLockedRuns() });
+      this.tree.message = range.error;
+      this.treeProvider.setElements([]);
+      return;
     }
 
     let commits: Commit[];
     try {
       commits = await getCommits(root, range.revRange);
     } catch (e: any) {
-      return postCurrent({ type: "state", error: String(e.message ?? e), rebaseInProgress });
+      this.tree.message = String(e.message ?? e);
+      this.treeProvider.setElements([]);
+      return;
     }
 
-    const [stoppedAt, atEditStop, conflictPaths, todoFiles, userEmail] = rebaseInProgress
+    const [stoppedAt, atEditStop, conflictPaths, todoFiles] = rebaseInProgress
       ? await Promise.all([
           rebaseStoppedSha(root),
           rebaseAtEditStop(root),
           conflictedFiles(root),
           rebaseTodoFiles(root),
-          currentUserEmail(root),
         ])
-      : [undefined, false, [] as string[], {}, await currentUserEmail(root)];
+      : [undefined, false, [] as string[], {}];
     const progress = rebaseProgressState({
       rebaseInProgress,
       atEditStop,
@@ -471,56 +450,52 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     this.canonicalSnapshotKey = snapshot.key;
     this.canonicalRevision = snapshot.revision;
 
-    // Send oldest-first (root at top, newest at bottom) for a natural timeline.
+    // TreeView rows are native workbench items. Their context menu and tooltip
+    // are rendered by VS Code outside any webview iframe, so the menu naturally
+    // anchors at the pointer, can overlap editor content, and closes on Escape.
     const ordered = [...commits].reverse();
-    postCurrent({
-      type: "state",
-      rebaseInProgress,
-      stoppedAt,
-      ...progress,
-      llmConfigured: isLlmConfigured(),
-      undoHistory: this.undo.records().filter((record) => record.repository === root),
-      undoAvailable: !!this.undo.latestCompleted(root),
-      currentUserEmail: userEmail,
-      currentAuthorKnown: !!userEmail,
-      ...presentation,
-      collapseLockedRuns: getCollapseLockedRuns(),
-      hasStaged: status.hasStaged,
-      hasUnstaged: status.hasUnstaged,
-      stagedCount: status.stagedCount,
-      unstagedCount: status.unstagedCount,
-      changes: changes.map((change) => ({
-        path: change.path,
-        originalPath: change.originalPath,
-        staged: change.staged,
-        unstaged: change.unstaged,
-        indexKind: change.indexKind,
-        worktreeKind: change.worktreeKind,
-        conflicted: change.conflicted,
-      })),
-      canonicalRevision: this.canonicalRevision,
-      canonicalOrder: ordered.map((commit) => commit.hash),
-      commits: ordered.map((c) => ({
-        hash: c.hash,
-        shortHash: c.shortHash,
-        subject: c.subject,
-        author: c.author,
-        authorEmail: c.authorEmail,
-        authorInitial: (c.author || c.authorEmail || "?").trim().charAt(0).toUpperCase() || "?",
-        authorColorKey: authorColorKey(c.authorEmail || c.author),
-        isCurrentAuthor: userEmail ? c.authorEmail.toLowerCase() === userEmail.toLowerCase() : "unknown",
-        date: c.date,
-        locked: lockedFlags.get(c.hash) ?? false,
-      })),
-    });
-  }
-
-  private post(msg: any): void {
-    this.view?.webview.postMessage(msg);
-  }
-
-  private postInlineToast(message: string, duration = 2500): void {
-    this.post({ type: "inlineToast", level: "success", message, duration });
+    const elements: NativeCommitTreeElement[] = [];
+    const branchDescription = presentation.branchName
+      ? `${presentation.branchName} · ${presentation.upstreamRef ?? "no upstream"} · ↑${presentation.aheadCount ?? 0} ↓${presentation.behindCount ?? 0}`
+      : undefined;
+    if (branchDescription) {
+      elements.push({ kind: "message", label: branchDescription, tooltip: `${presentation.rangeLabel ?? ""} · ↑ Base / 较早` });
+    } else {
+      elements.push({ kind: "message", label: "↑ Base / 较早" });
+    }
+    const detailResults = await Promise.all(ordered.map(async (commit) => {
+      try {
+        return [commit.hash, await commitDetail(root, commit.hash)] as const;
+      } catch {
+        // The concise commit row remains usable if a rich tooltip read fails.
+        return [commit.hash, undefined] as const;
+      }
+    }));
+    if (!isCurrent()) return;
+    const details = new Map(detailResults);
+    for (const commit of ordered) {
+      elements.push({
+        kind: "commit",
+        commit,
+        locked: lockedFlags.get(commit.hash) ?? false,
+        stopped: progress.pausedReason === "edit" && stoppedAt === commit.hash,
+        pending: progress.pendingHashes?.some((hash) => commit.hash.startsWith(hash) || hash.startsWith(commit.hash)) ?? false,
+        detail: details.get(commit.hash),
+      });
+    }
+    if (changes.length) {
+      elements.push({ kind: "message", label: "未提交的改动", tooltip: "右键文件可查看 Diff、暂存、恢复或删除未跟踪文件。" });
+      for (const change of changes.filter((item) => item.staged)) {
+        elements.push({ kind: "worktree", change, side: "staged" });
+      }
+      for (const change of changes.filter((item) => item.unstaged)) {
+        elements.push({ kind: "worktree", change, side: "working" });
+      }
+    }
+    this.tree.message = undefined;
+    this.tree.description = rebaseInProgress ? `rebase · ${progress.pausedReason ?? "进行中"}` : branchDescription;
+    this.tree.badge = { value: commits.length, tooltip: `${commits.length} commits · ↑ Base / 较早 · ↓ HEAD / 较新` };
+    this.treeProvider.setElements(elements);
   }
 
   private isCurrentCommitHash(value: unknown): value is string {
@@ -543,6 +518,119 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
         action: (override?.(c.hash) ?? "pick") as RebaseItem["action"],
         subject: c.subject,
       }));
+  }
+
+  /** Runs a native TreeView command through the same serialized host safety gate. */
+  private async onNativeCommand(type: string, element?: NativeCommitTreeElement): Promise<void> {
+    const message: FromWebview = { type, source: "native-tree" };
+    if (element?.kind === "commit") message.hash = element.commit.hash;
+    if (element?.kind === "worktree") {
+      message.path = element.change.path;
+      message.side = element.side === "working" ? "working" : "staged";
+    }
+    if (type === "bulkLock" || type === "bulkDrop" || type === "bulkGenerateDiff") {
+      const hashes = this.nativeSelectedHashes(element);
+      if (hashes.length < 2) return;
+      message.hashes = hashes;
+      if (type === "bulkGenerateDiff") message.revision = this.canonicalRevision;
+    }
+    await this.onMessage(message);
+  }
+
+  private nativeSelectedHashes(element?: NativeCommitTreeElement): string[] {
+    const selected = this.nativeSelectionHashes.size > 1
+      ? [...this.nativeSelectionHashes]
+      : element?.kind === "commit" ? [element.commit.hash] : [];
+    return this.commits.slice().reverse().map((commit) => commit.hash).filter((hash) => selected.includes(hash));
+  }
+
+  private nativeDragAndDropController(): vscode.TreeDragAndDropController<NativeCommitTreeElement> {
+    return {
+      dragMimeTypes: [nativeCommitTreeMime],
+      dropMimeTypes: [nativeCommitTreeMime],
+      handleDrag: (source, transfer) => {
+        const commits = source.filter((item): item is Extract<NativeCommitTreeElement, { kind: "commit" }> => item.kind === "commit");
+        if (commits.length !== 1 || commits[0].locked) return;
+        transfer.set(nativeCommitTreeMime, new vscode.DataTransferItem(JSON.stringify({
+          hash: commits[0].commit.hash,
+          revision: this.canonicalRevision,
+          order: this.commits.slice().reverse().map((commit) => commit.hash),
+        })));
+      },
+      handleDrop: async (target, transfer) => {
+        if (target?.kind !== "commit" || target.locked) return;
+        const data = transfer.get(nativeCommitTreeMime);
+        if (!data) return;
+        let drag: { hash?: unknown; revision?: unknown; order?: unknown };
+        try {
+          drag = JSON.parse(await data.asString()) as typeof drag;
+        } catch {
+          return;
+        }
+        if (typeof drag.hash !== "string") return;
+        const canonicalOrder = this.commits.slice().reverse().map((commit) => commit.hash);
+        const sourceIndex = canonicalOrder.indexOf(drag.hash);
+        const targetIndex = canonicalOrder.indexOf(target.commit.hash);
+        if (sourceIndex < 0 || targetIndex < 0 || sourceIndex === targetIndex) return;
+        const order = canonicalOrder.filter((hash) => hash !== drag.hash);
+        order.splice(order.indexOf(target.commit.hash), 0, drag.hash);
+        await this.onMessage({
+          type: "reorder",
+          source: "native-tree",
+          sourceHash: drag.hash,
+          anchorHash: target.commit.hash,
+          placement: "before",
+          revision: drag.revision,
+          order,
+        });
+      },
+    };
+  }
+
+  /** Command registrations are intentionally explicit: context menus are native UI. */
+  public nativeCommand(command: string, element?: NativeCommitTreeElement): Promise<void> {
+    switch (command) {
+      case "copyHash":
+        return this.onNativeCommand("copyHash", element);
+      case "copyMessage":
+        return this.onNativeCommand("copyMessage", element);
+      case "openDiff":
+        return this.onNativeCommand("openDiff", element);
+      case "generateDiff":
+        return this.onNativeCommand("generateDiff", element);
+      case "drop":
+        return this.onNativeCommand("drop", element);
+      case "lock":
+        return this.onNativeCommand("lock", element);
+      case "unlock":
+        return this.onNativeCommand("unlock", element);
+      case "rebaseTo":
+        return this.onNativeCommand("rebaseTo", element);
+      case "appendStaged":
+        return this.onNativeCommand("appendStaged", element);
+      case "reword":
+        if (element?.kind !== "commit") return Promise.resolve();
+        return this.onMessage({ type: "openCompose", source: "native-tree", mode: "commit", hash: element.commit.hash, ai: false, thenEdit: false });
+      case "aiMessage":
+        if (element?.kind !== "commit") return Promise.resolve();
+        return this.onMessage({ type: "openCompose", source: "native-tree", mode: "commit", hash: element.commit.hash, ai: true, thenEdit: false });
+      case "openWorktreeDiff":
+        return this.onNativeCommand("openWorktreeDiff", element);
+      case "stageFile":
+        return this.onNativeCommand("stageFile", element);
+      case "restoreFile":
+        return this.onNativeCommand("restoreFile", element);
+      case "deleteUntrackedFile":
+        return this.onNativeCommand("deleteUntrackedFile", element);
+      case "bulkLock":
+        return this.onNativeCommand("bulkLock", element);
+      case "bulkDrop":
+        return this.onNativeCommand("bulkDrop", element);
+      case "bulkGenerateDiff":
+        return this.onNativeCommand("bulkGenerateDiff", element);
+      default:
+        return Promise.resolve();
+    }
   }
 
   private async onMessage(m: FromWebview): Promise<void> {
@@ -666,7 +754,10 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
           await this.stageChangedFile(cwd!, m.path);
           break;
         case "restoreFile":
-          await this.restoreChangedFile(cwd!, m.path, m.side, m.deleteUntracked === true);
+          await this.restoreChangedFile(cwd!, m.path, m.side);
+          break;
+        case "deleteUntrackedFile":
+          await this.deleteUntrackedChangedFile(cwd!, m.path);
           break;
         case "stageAllFiles":
           await this.stageAllChangedFiles(cwd!);
@@ -686,20 +777,6 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
             "workbench.action.openSettings",
             "gitRebaseVisual.llm"
           );
-          break;
-        case "requestDetail":
-          await this.openCommitInspector(cwd!, m.hash, "preview");
-          break;
-        case "dismissCommitPreview":
-          // Cross-pane preview remains available for reading/copying after the
-          // sidebar pointer leaves; explicit actions or real editor interaction
-          // replace/close it through InspectorPreviewCoordinator ownership.
-          break;
-        case "openCommitInspector":
-          await this.openCommitInspector(cwd!, m.hash, "single");
-          break;
-        case "openBatchInspector":
-          await this.openBatchInspector(m.hashes);
           break;
         case "reorder":
           await this.handleReorder(cwd!, m);
@@ -1024,7 +1101,6 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     await writeEditStopCommit(cwd, kind, message);
     this.compose.clearDraft(sessionId, revision);
     this.compose.post({ type: "applySucceeded" });
-    this.post({ type: "applySucceeded" });
     toast("info", kind === "amend" ? "已 amend 当前 edit commit。" : "已在 edit 停靠创建新 commit。 ");
   }
 
@@ -2103,43 +2179,49 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     await this.refresh();
   }
 
-  /** Restores only the displayed side after webview-side explicit confirmation. */
+  /** Restores only a tracked staged/working side after fresh host-side status. */
   private async restoreChangedFile(
     cwd: string,
     pathValue: unknown,
     sideValue: unknown,
-    deleteUntracked: boolean
   ): Promise<void> {
     if (typeof pathValue !== "string" || (sideValue !== "working" && sideValue !== "staged")) {
       throw new Error("缺少要恢复的文件状态。 ");
     }
     const change = (await getWorktreeChanges(cwd)).find((item) => item.path === pathValue);
     if (!change) throw new Error("文件状态已变化；请刷新后重试。 ");
-    if (deleteUntracked) {
-      const confirm = await vscode.window.showWarningMessage(
-        `删除未跟踪文件 ${change.path}？此操作会从磁盘永久删除，Git 不能恢复。`,
-        { modal: true },
-        "删除文件"
-      );
-      if (confirm !== "删除文件") return;
-      // The modal yields control to users/extensions. Re-read and prove this is
-      // still the same untracked working-side entry before touching the disk.
-      const current = (await getWorktreeChanges(cwd)).find((item) => item.path === pathValue);
-      if (!current || current.staged || !current.unstaged || current.worktreeKind !== "untracked") {
-        throw new Error("文件状态已在确认期间变化；未删除文件。 ");
-      }
-      await deleteUntrackedWorktreeChange(cwd, current);
-      toast("info", `已删除未跟踪文件 ${current.path}。`);
-    } else {
-      const side = sideValue as "working" | "staged";
-      const action = side === "working" ? "丢弃该文件未暂存的工作区改动" : "撤销该文件的暂存（工作区内容保留）";
-      const confirm = await vscode.window.showWarningMessage(
-        `${action}：${change.path}？`, { modal: true }, "确认恢复"
-      );
-      if (confirm !== "确认恢复") return;
-      await restoreWorktreeChange(cwd, change, side);
-      toast("info", side === "working" ? `已恢复工作区文件 ${change.path}。` : `已撤销暂存 ${change.path}；工作区内容未改变。`);
+    if (sideValue === "working" && change.worktreeKind === "untracked") {
+      throw new Error("未跟踪文件必须使用“删除未跟踪文件”操作。 ");
     }
+    const action = sideValue === "working" ? "丢弃该文件未暂存的工作区改动" : "撤销该文件的暂存（工作区内容保留）";
+    const confirm = await vscode.window.showWarningMessage(
+      `${action}：${change.path}？`, { modal: true }, "确认恢复"
+    );
+    if (confirm !== "确认恢复") return;
+    await restoreWorktreeChange(cwd, change, sideValue);
+    toast("info", sideValue === "working" ? `已恢复工作区文件 ${change.path}。` : `已撤销暂存 ${change.path}；工作区内容未改变。`);
+    await this.refresh();
+  }
+
+  /** Deletes an untracked file only after confirmation and a fresh porcelain revalidation. */
+  private async deleteUntrackedChangedFile(cwd: string, pathValue: unknown): Promise<void> {
+    if (typeof pathValue !== "string") throw new Error("缺少要删除的未跟踪文件路径。 ");
+    const change = (await getWorktreeChanges(cwd)).find((item) => item.path === pathValue);
+    if (!change || change.staged || !change.unstaged || change.worktreeKind !== "untracked") {
+      throw new Error("文件不是当前未跟踪状态；未删除文件。 ");
+    }
+    const confirm = await vscode.window.showWarningMessage(
+      `删除未跟踪文件 ${change.path}？此操作会从磁盘永久删除，Git 不能恢复。`,
+      { modal: true },
+      "删除文件"
+    );
+    if (confirm !== "删除文件") return;
+    const current = (await getWorktreeChanges(cwd)).find((item) => item.path === pathValue);
+    if (!current || current.staged || !current.unstaged || current.worktreeKind !== "untracked") {
+      throw new Error("文件状态已在确认期间变化；未删除文件。 ");
+    }
+    await deleteUntrackedWorktreeChange(cwd, current);
+    toast("info", `已删除未跟踪文件 ${current.path}。`);
     await this.refresh();
   }
 
@@ -2236,82 +2318,6 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     const document = await vscode.workspace.openTextDocument(uri);
     await vscode.window.showTextDocument(document, { preview: true });
     toast("info", snapshot.truncated ? "已生成只读 Diff 文档（输出已截断）。" : "已生成只读 Diff 文档。");
-  }
-
-  private cancelInspectorPreview(invalidate = false): void {
-    if (invalidate) this.inspectorPreview.invalidate();
-  }
-
-  /** Opens detail/actions beside the editor instead of obscuring timeline rows. */
-  private async openCommitInspector(
-    cwd: string,
-    hash: unknown,
-    kind: "preview" | "single"
-  ): Promise<void> {
-    if (!this.isCurrentCommitHash(hash)) {
-      throw new Error("commit 列表已更新，请刷新后重试。 ");
-    }
-    const commit = this.commits.find((item) => item.hash === hash)!;
-    const previewSession = kind === "preview" ? this.inspectorPreview.beginPreview(commit.hash) : undefined;
-    if (kind === "preview" && !previewSession) return;
-    const session: InspectorSession = previewSession ?? this.inspectorPreview.beginAction("single");
-    const detail = await commitDetail(cwd, hash);
-    // A slow Git detail query must never overwrite an action inspector opened
-    // after the hover began. Preview and action sessions have separate tokens.
-    const canShow = kind === "preview"
-      ? this.inspectorPreview.showPreview(session)
-      : this.inspectorPreview.canShowAction(session);
-    if (!canShow) return;
-    // A hover preview uses the same editor-area companion (with no actions), so
-    // message detail remains visible without covering nearby timeline rows.
-    this.cancelInspectorPreview();
-    this.inspector.open({
-      kind,
-      revision: this.canonicalRevision,
-      commit: {
-        hash: commit.hash,
-        shortHash: commit.shortHash,
-        subject: commit.subject,
-        author: commit.author,
-        date: commit.date,
-        locked: this.lockedHashes.has(commit.hash),
-      },
-      detail,
-      llmConfigured: isLlmConfigured(),
-      rebaseInProgress: await isRebaseInProgress(cwd),
-      hasStaged: (await workingStatus(cwd)).hasStaged,
-    });
-  }
-
-  /** Opens batch actions in the same non-obscuring companion editor. */
-  private async openBatchInspector(value: unknown): Promise<void> {
-    const session = this.inspectorPreview.beginAction("batch");
-    this.cancelInspectorPreview();
-    const hashes = this.selectedHashes(value);
-    if (!hashes || hashes.length < 2) throw new Error("批量选择已过期；请刷新后重试。 ");
-    const byHash = new Map(this.commits.map((commit) => [commit.hash, commit]));
-    const generated = generatedDiffCommits(this.commits, hashes);
-    if (!this.inspectorPreview.canShowAction(session)) return;
-    this.inspector.open({
-      kind: "batch",
-      revision: this.canonicalRevision,
-      commits: hashes.map((hash) => {
-        const commit = byHash.get(hash)!;
-        return {
-          hash: commit.hash,
-          shortHash: commit.shortHash,
-          subject: commit.subject,
-          author: commit.author,
-          date: commit.date,
-          locked: this.lockedHashes.has(commit.hash),
-        };
-      }),
-      llmConfigured: isLlmConfigured(),
-      rebaseInProgress: false,
-      hasStaged: false,
-      generatedDiffEnabled: !!generated,
-      generatedDiffReason: generated ? undefined : "仅支持连续 commit；请取消未连续选择或使用单项 Diff。",
-    });
   }
 
   /** Command-palette/title entry point for the latest private-ref undo record. */
@@ -2515,96 +2521,15 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     await this.refresh();
   }
 
-  private html(webview: vscode.Webview): string {
-    const mediaUri = vscode.Uri.joinPath(this.ctx.extensionUri, "media");
-    const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(mediaUri, "main.js"));
-    const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(mediaUri, "style.css"));
-    const nonce = getNonce();
-    const csp = `default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}';`;
-    return `<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-<meta charset="UTF-8">
-<meta http-equiv="Content-Security-Policy" content="${csp}">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<link href="${styleUri}" rel="stylesheet">
-<title>Git Rebase</title>
-</head>
-<body>
-<div id="banner" class="banner hidden" role="status" aria-live="polite"></div>
-<div id="context" class="branch-context hidden"><span id="context-text"></span><div id="inline-toast" class="inline-toast hidden" role="status" aria-live="polite"></div></div>
-<div id="changes" class="changes hidden"></div>
-<div id="direction" class="direction" role="status" aria-live="polite"></div>
-<div id="list" class="list" role="list"></div>
-<div id="menu" class="menu hidden" role="menu" aria-label="Commit 操作菜单"></div>
-<div id="tooltip" class="tooltip hidden"></div>
-<div id="dialog" class="dialog-backdrop hidden" role="presentation">
-  <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="dialog-title" aria-describedby="dialog-error">
-    <div class="dialog-title" id="dialog-title">编辑 commit message</div>
-    <div id="dialog-error" class="dialog-error hidden" role="alert"></div>
-
-    <div id="orig-block" class="pane-block hidden">
-      <div class="pane-label">
-        <span>原始 message</span>
-        <button id="orig-copy" class="link-btn">复制</button>
-      </div>
-      <textarea id="orig-text" class="pane readonly" readonly spellcheck="false"></textarea>
-    </div>
-
-    <div id="ai-block" class="ai-block hidden">
-      <div class="pane-label">补充信息给 AI（可选，如链接、Issue 号等）</div>
-      <textarea id="ai-extra" class="ai-extra" spellcheck="false"
-        placeholder="例如：关联 IPCSDK-31159 ，或要求输出对应链接…"></textarea>
-      <button id="ai-generate" class="btn primary small">生成 / 重新生成</button>
-    </div>
-
-    <div class="pane-label"><span id="result-label">Commit message</span></div>
-    <textarea id="dialog-text" class="pane" spellcheck="false"></textarea>
-
-    <div id="trailer-block" class="pane-block hidden">
-      <div class="pane-label">保留的 trailer（Change-Id / Signed-off-by，不会被修改）</div>
-      <pre id="trailer-text" class="trailer"></pre>
-    </div>
-
-    <div class="dialog-actions">
-      <button id="dialog-cancel" class="btn">取消</button>
-      <button id="dialog-ok" class="btn primary">应用</button>
-    </div>
-  </div>
-</div>
-<div id="live" class="sr-only" role="status" aria-live="polite"></div>
-<script nonce="${nonce}" src="${scriptUri}"></script>
-</body>
-</html>`;
-  }
 }
 
-/**
- * Success feedback belongs to the active rebase panel and is deliberately
- * short-lived. Warnings and errors are actionable system notifications: VS
- * Code owns their dismissal, rather than hiding them after an arbitrary timer.
- */
-function toast(level: "info" | "warn" | "error", message: string, duration = 2500): void {
+/** Native workbench notifications replace webview-only inline feedback. */
+function toast(level: "info" | "warn" | "error", message: string, _duration?: number): void {
   if (level === "info") {
-    if (inlineToastSink) {
-      inlineToastSink(message, duration);
-    } else {
-      void vscode.window.showInformationMessage(message);
-    }
-    return;
-  }
-  if (level === "warn") {
+    void vscode.window.showInformationMessage(message);
+  } else if (level === "warn") {
     void vscode.window.showWarningMessage(message);
   } else {
     void vscode.window.showErrorMessage(message);
   }
-}
-
-function getNonce(): string {
-  let text = "";
-  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-  for (let i = 0; i < 32; i++) {
-    text += chars.charAt(Math.floor(Math.random() * chars.length));
-  }
-  return text;
 }

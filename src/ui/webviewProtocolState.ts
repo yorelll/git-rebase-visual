@@ -21,7 +21,7 @@ const mutationActions = new Set([
   "openCompose", "generate", "apply", "appendStaged", "continueRebase", "abortRebase",
   "skipRebase", "undo", "showUndoHistory", "squash", "fixup", "commitEditAmend", "commitEditNew",
   // These perform git add, git restore, or an explicitly confirmed disk delete.
-  "stageFile", "restoreFile", "stageAllFiles", "discardAllFiles", "unstageAllFiles",
+  "stageFile", "restoreFile", "deleteUntrackedFile", "stageAllFiles", "discardAllFiles", "unstageAllFiles",
 ]);
 
 const readActions = new Set([
@@ -77,7 +77,7 @@ export function requiresCurrentCommitHash(message: {
 export function allowedPausedRebaseMutation(type: string): boolean {
   return new Set([
     "continueRebase", "abortRebase", "skipRebase", "commitEditAmend", "commitEditNew",
-    "stageFile", "restoreFile", "stageAllFiles", "discardAllFiles", "unstageAllFiles",
+    "stageFile", "restoreFile", "deleteUntrackedFile", "stageAllFiles", "discardAllFiles", "unstageAllFiles",
   ]).has(type);
 }
 

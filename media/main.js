@@ -5,8 +5,8 @@
   // rebase warning.
   const sourceForAction = (type) => {
     if (["reorder"].includes(type)) return "webview:reorder";
-    if (["stageFile", "restoreFile", "stageAllFiles", "discardAllFiles", "unstageAllFiles"].includes(type)) return "webview:worktree-mutation";
-    if (["requestDetail", "openCommitInspector", "openBatchInspector", "openDiff", "generateDiff", "bulkGenerateDiff", "openWorktreeDiff", "copyHash", "copyMessage", "copyText"].includes(type)) return "webview:read";
+    if (["stageFile", "restoreFile", "deleteUntrackedFile", "stageAllFiles", "discardAllFiles", "unstageAllFiles"].includes(type)) return "webview:worktree-mutation";
+    if (["openDiff", "generateDiff", "bulkGenerateDiff", "openWorktreeDiff", "copyHash", "copyMessage", "copyText"].includes(type)) return "webview:read";
     if (["ready", "refresh"].includes(type)) return "webview:lifecycle";
     return "webview:ui";
   };
@@ -58,8 +58,13 @@
   function setDragHint(message) { dragHint = message; renderDirection(); }
   function clearDragHint() { dragHint = ""; renderDirection(); }
   function renderDirection() {
-    directionEl.textContent = dragHint;
-    directionEl.classList.toggle("hidden", !dragHint);
+    // Kept only for legacy webview drag feedback. The existing Base marker is
+    // replaced in-place, so dragging never inserts a normal-flow row or shifts
+    // the commit list vertically.
+    const base = listEl.querySelector(".timeline-end.base");
+    if (base) base.textContent = dragHint || "↑ Base / 较早";
+    directionEl.textContent = "";
+    directionEl.classList.add("hidden");
   }
 
   function captureSearchFocus() {
@@ -192,7 +197,7 @@
         if (!change.conflicted && !(side === "unstaged" && kind === "untracked")) {
           actions.append(changeAction("↶", side === "staged" ? "撤销此文件的暂存" : "恢复此文件的工作区改动", () => requestRestore(change, side)));
         } else if (side === "unstaged" && kind === "untracked") {
-          actions.append(changeAction("⌫", "删除未跟踪文件", () => requestRestore(change, side)));
+          actions.append(changeAction("⌫", "删除未跟踪文件", () => requestDeleteUntracked(change)));
         }
         row.append(status, target, actions); parent.appendChild(row);
       });
@@ -202,10 +207,12 @@
   }
   function requestRestore(change, side) {
     // The extension host owns the authoritative modal after a fresh porcelain
-    // read. Avoid a second webview confirm: it previously made action clicks look
-    // inert and could race with a status refresh before the host received them.
-    const untracked = side === "unstaged" && change.worktreeKind === "untracked";
-    vscode.postMessage({ type: "restoreFile", path: change.path, side, deleteUntracked: untracked });
+    // read. A tracked side uses the restore route; untracked deletion has its
+    // own host command and can never be misparsed as a restore side.
+    vscode.postMessage({ type: "restoreFile", path: change.path, side: side === "unstaged" ? "working" : "staged" });
+  }
+  function requestDeleteUntracked(change) {
+    vscode.postMessage({ type: "deleteUntrackedFile", path: change.path });
   }
   function renderChanges() {
     changesEl.innerHTML = "";
@@ -223,9 +230,7 @@
     more.addEventListener("toggle", () => { changesMoreOpen = more.open; persistUi(); });
     const summary = document.createElement("summary"); summary.textContent = atEditStop ? "本次 edit stop 的文件" : "更多提交选项"; more.appendChild(summary);
     appendChangeFiles(more, state.changes || []);
-    if (!atEditStop) {
-      if (state.llmConfigured) more.appendChild(button("仅生成 message（不提交）", () => vscode.postMessage({ type: "openCompose", mode: state.hasStaged ? "staged" : "working", ai: true, thenEdit: false, messageOnly: true })));
-    } else {
+    if (atEditStop) {
       const draftMode = state.hasStaged ? "staged" : "working";
       more.appendChild(button("AI 仅生成 message（不提交）", () => vscode.postMessage({ type: "openCompose", mode: draftMode, ai: true, thenEdit: false, messageOnly: true }), { disabled: !state.llmConfigured, title: state.llmConfigured ? "仅生成草稿，不执行提交" : "请先配置 LLM。" }));
     }
@@ -290,7 +295,7 @@
     commits.forEach((c) => authors.set(c.author, (authors.get(c.author) || 0) + 1));
     const authorText = [...authors].map(([name, count]) => `${compactAuthor(name)} ×${count}`).join(" · ");
     const pending = commits.some(commitIsPending) ? " · replay" : "";
-    return `🔒 :${commits.length} lock · no push${authorText ? ` · ${authorText}` : ""}${pending}`;
+    return `🔒 : ${commits.length} lock · no push${authorText ? ` · ${authorText}` : ""}${pending}`;
   }
   function runSummaryAria(commits) {
     const authors = new Map();
@@ -333,7 +338,7 @@
     const count = document.createElement("span"); count.className = "selection-count"; count.textContent = `${visible.length} / ${state.commits.length}`; controls.appendChild(count);
     if (filterText) controls.appendChild(button("清除", () => { filterText = ""; persistUi(); renderList(); listEl.querySelector(".commit-search")?.focus(); }));
     listEl.appendChild(controls);
-    const top = document.createElement("div"); top.className = "timeline-end"; top.textContent = "↑ Base / 较早"; listEl.appendChild(top);
+    const top = document.createElement("div"); top.className = "timeline-end base"; top.textContent = dragHint || "↑ Base / 较早"; listEl.appendChild(top);
     let pendingMarkerShown = false;
     let i = 0;
     while (i < visible.length) {
@@ -426,15 +431,11 @@
       event.preventDefault();
       completeDrag({ anchorHash: c.hash, after: isAfter(event, row) });
     });
-    row.addEventListener("contextmenu", (event) => {
-      event.preventDefault();
-      selectContextTarget(c);
-      const hashes = selectedMultiple() ? [...selectedHashes] : undefined;
-      vscode.postMessage(hashes ? { type: "openBatchInspector", hashes } : { type: "openCommitInspector", hash: c.hash });
-    });
+    // Commit hover and right-click are implemented by the native TreeView. Do
+    // not create a webview inspector/menu here: iframe DOM cannot cross the
+    // sidebar boundary or overlay the editor workbench.
     row.addEventListener("click", (event) => selectRow(event, c));
     row.addEventListener("keydown", (event) => rowKeydown(event, c));
-    row.addEventListener("mouseenter", () => scheduleTooltip(c, row)); row.addEventListener("mouseleave", cancelTooltip);
     return row;
   }
   function selectRow(event, c) {
@@ -468,7 +469,7 @@
     if (selectedHashes.size) { selectedHashes.clear(); selectionAnchor = null; renderList(); }
   }
   function rowKeydown(event, c) {
-    if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) { event.preventDefault(); selectContextTarget(c); const hashes = selectedMultiple() ? [...selectedHashes] : undefined; vscode.postMessage(hashes ? { type: "openBatchInspector", hashes } : { type: "openCommitInspector", hash: c.hash }); return; }
+    if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) { event.preventDefault(); announce("Commit 操作菜单由原生 Git Rebase TreeView 提供。"); return; }
     if ((event.ctrlKey || event.metaKey) && event.key === " ") { event.preventDefault(); selectRow({ ctrlKey: true, target: event.currentTarget }, c); return; }
     if (event.altKey && (event.key === "ArrowUp" || event.key === "ArrowDown")) {
       event.preventDefault();
@@ -608,22 +609,10 @@
   // postMessage nor persistUi; __grvUiTrace exposes that invariant to tests.
   document.addEventListener("scroll", () => { menuScrollCloseCount++; closeMenu(); }, true); window.addEventListener("resize", closeMenu);
 
-  // Commit detail is deliberately shown in the VS Code editor-area inspector,
-  // never as a fixed sidebar tooltip that can cover other commit rows.
-  function scheduleTooltip(c) {
-    if (tipTimer) clearTimeout(tipTimer);
-    tipHash = c.hash;
-    tipTimer = setTimeout(() => vscode.postMessage({ type: "requestDetail", hash: c.hash }), 400);
-  }
-  function cancelTooltip() {
-    if (tipTimer) clearTimeout(tipTimer);
-    // The detail lives in a separate editor group. Unlike an in-sidebar hover,
-    // it must remain readable/copyable after the pointer leaves this commit.
-    // A later preview, explicit action, or genuine external TextEditor event
-    // replaces/closes it through the host ownership coordinator.
-  }
+  // Native TreeView owns hover and context UI. These no-op compatibility
+  // helpers remain only for the legacy drag/menu code path, which is no longer
+  // registered as the extension sidebar.
   function hideTooltip() { tipHash = null; tipAnchor = null; }
-  function showDetail() { /* Inspector panel owns detail presentation. */ }
   tooltipEl.classList.add("hidden");
 
   function persistUi() { vscode.setState({ filterText, changesMoreOpen, expandedLockedRuns: [...expandedLockedRuns] }); }
@@ -645,8 +634,7 @@
       // applied after the shared session ends, preserving its revision guard.
       if (drag) { deferredState = m; return; }
       state = m; render();
-    } else if (m.type === "detail") showDetail(m);
-    else if (m.type === "inlineToast") showInlineToast(m.message, m.duration);
+    } else if (m.type === "inlineToast") showInlineToast(m.message, m.duration);
     else if (m.type === "closeMenu") closeMenu();
   });
   // Expose only a narrow trace hook for non-browser regression harnesses. It is

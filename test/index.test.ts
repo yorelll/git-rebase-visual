@@ -25,6 +25,7 @@ import "./rebaseReorderState.test";
 import "./webviewProtocolState.test";
 import "./mutationGate.test";
 import "./webviewDom.test";
+import "./nativeCommitTree.test";
 import "./gitRunner.integration.test";
 import "./llmClient.test";
 import "./message.test";

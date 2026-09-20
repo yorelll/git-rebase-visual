@@ -19,10 +19,24 @@ export function activate(context: vscode.ExtensionContext): void {
     generatedDiffProvider,
     vscode.workspace.registerTextDocumentContentProvider(gitContentScheme, contentProvider),
     vscode.workspace.registerTextDocumentContentProvider(generatedDiffScheme, generatedDiffProvider),
-    vscode.window.registerWebviewViewProvider(
-      RebaseViewProvider.viewType,
-      provider
-    ),
+    vscode.commands.registerCommand("gitRebaseVisual.commit.copyHash", (element) => provider.nativeCommand("copyHash", element)),
+    vscode.commands.registerCommand("gitRebaseVisual.commit.copyMessage", (element) => provider.nativeCommand("copyMessage", element)),
+    vscode.commands.registerCommand("gitRebaseVisual.commit.openDiff", (element) => provider.nativeCommand("openDiff", element)),
+    vscode.commands.registerCommand("gitRebaseVisual.commit.generateDiff", (element) => provider.nativeCommand("generateDiff", element)),
+    vscode.commands.registerCommand("gitRebaseVisual.commit.reword", (element) => provider.nativeCommand("reword", element)),
+    vscode.commands.registerCommand("gitRebaseVisual.commit.aiMessage", (element) => provider.nativeCommand("aiMessage", element)),
+    vscode.commands.registerCommand("gitRebaseVisual.commit.rebaseTo", (element) => provider.nativeCommand("rebaseTo", element)),
+    vscode.commands.registerCommand("gitRebaseVisual.commit.appendStaged", (element) => provider.nativeCommand("appendStaged", element)),
+    vscode.commands.registerCommand("gitRebaseVisual.commit.lock", (element) => provider.nativeCommand("lock", element)),
+    vscode.commands.registerCommand("gitRebaseVisual.commit.unlock", (element) => provider.nativeCommand("unlock", element)),
+    vscode.commands.registerCommand("gitRebaseVisual.commit.drop", (element) => provider.nativeCommand("drop", element)),
+    vscode.commands.registerCommand("gitRebaseVisual.commit.bulkLock", (element) => provider.nativeCommand("bulkLock", element)),
+    vscode.commands.registerCommand("gitRebaseVisual.commit.bulkDrop", (element) => provider.nativeCommand("bulkDrop", element)),
+    vscode.commands.registerCommand("gitRebaseVisual.commit.bulkGenerateDiff", (element) => provider.nativeCommand("bulkGenerateDiff", element)),
+    vscode.commands.registerCommand("gitRebaseVisual.worktree.openDiff", (element) => provider.nativeCommand("openWorktreeDiff", element)),
+    vscode.commands.registerCommand("gitRebaseVisual.worktree.stage", (element) => provider.nativeCommand("stageFile", element)),
+    vscode.commands.registerCommand("gitRebaseVisual.worktree.restore", (element) => provider.nativeCommand("restoreFile", element)),
+    vscode.commands.registerCommand("gitRebaseVisual.worktree.deleteUntracked", (element) => provider.nativeCommand("deleteUntrackedFile", element)),
     vscode.commands.registerCommand("gitRebaseVisual.refresh", () =>
       provider.refreshFromCommand()
     ),
@@ -45,6 +59,7 @@ export function activate(context: vscode.ExtensionContext): void {
       vscode.commands.executeCommand("workbench.view.extension.gitRebaseVisual")
     )
   );
+  provider.start();
 }
 
 export function deactivate(): void {

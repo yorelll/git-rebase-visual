@@ -163,34 +163,19 @@ test("actual webview author dots show a two-character label for same-initial aut
   }
 });
 
-test("actual webview routes context actions to a non-obscuring editor-area inspector", async () => {
+test("legacy webview has no commit hover or context-inspector route", async () => {
   const view = createHarness();
   try {
     view.postState(state([a, b, c], 3));
-    const click = (id: string, extra: Record<string, unknown> = {}) => view.row(id).dispatchEvent(mouseEvent(view.dom.window, "click", extra));
-    click(a, { ctrlKey: true });
-    click(b, { ctrlKey: true });
-    assert.deepEqual(JSON.parse(JSON.stringify(view.dom.window.__grvUiTrace().selectedHashes)).sort(), [a, b]);
-
     view.row(c).dispatchEvent(mouseEvent(view.dom.window, "contextmenu", { clientX: 10, clientY: 10 }));
-    assert.deepEqual(JSON.parse(JSON.stringify(view.dom.window.__grvUiTrace().selectedHashes)), []);
-    assert.deepEqual(JSON.parse(JSON.stringify(view.messages.at(-1))), { type: "openCommitInspector", hash: c, source: "webview:read" });
-    assert.equal(view.dom.window.document.getElementById("menu")?.classList.contains("hidden"), true, "sidebar menu no longer covers list rows");
-
-    view.messages.length = 0;
     view.row(c).dispatchEvent(mouseEvent(view.dom.window, "mouseenter"));
     await new Promise((resolve) => setTimeout(resolve, 420));
-    assert.deepEqual(JSON.parse(JSON.stringify(view.messages.at(-1))), { type: "requestDetail", hash: c, source: "webview:read" }, "hover requests an editor-area detail preview");
-    view.row(c).dispatchEvent(mouseEvent(view.dom.window, "mouseleave"));
-    await new Promise((resolve) => setTimeout(resolve, 210));
-    assert.equal(view.messages.some((message) => message.type === "dismissCommitPreview"), false, "leaving the sidebar commit keeps the cross-pane preview readable");
-
-    view.messages.length = 0;
-    click(a, { ctrlKey: true });
-    click(b, { ctrlKey: true });
-    view.row(a).dispatchEvent(mouseEvent(view.dom.window, "contextmenu", { clientX: 10, clientY: 10 }));
-    assert.deepEqual(JSON.parse(JSON.stringify(view.messages.at(-1))), { type: "openBatchInspector", hashes: [a, b], source: "webview:read" });
-    assert.equal(view.dom.window.document.querySelectorAll(".list-controls .btn").length, 0, "redundant top-level bulk actions are removed");
+    assert.equal(
+      view.messages.some((message) => ["openCommitInspector", "openBatchInspector", "requestDetail"].includes(message.type)),
+      false,
+      "native TreeView owns hover/context UI; the iframe cannot request an inspector"
+    );
+    assert.equal(view.dom.window.document.getElementById("menu")?.classList.contains("hidden"), true);
   } finally {
     view.close();
   }
@@ -239,7 +224,7 @@ test("actual webview worktree rows expose paths at rest and route file and secti
     const remove = [...view.dom.window.document.querySelectorAll(".file-action")]
       .find((button) => button.getAttribute("aria-label") === "删除未跟踪文件") as HTMLButtonElement;
     remove.click();
-    assert.deepEqual(JSON.parse(JSON.stringify(view.messages.at(-1))), { type: "restoreFile", path: "tmp/generated.bin", side: "unstaged", deleteUntracked: true, source: "webview:worktree-mutation" });
+    assert.deepEqual(JSON.parse(JSON.stringify(view.messages.at(-1))), { type: "deleteUntrackedFile", path: "tmp/generated.bin", source: "webview:worktree-mutation" });
   } finally {
     view.close();
   }
@@ -255,7 +240,7 @@ test("locked run summary is compact and removes the expanded long rail", () => {
     view.postState(next);
     const run = view.dom.window.document.querySelector(".locked-run") as HTMLDetailsElement;
     const summary = run.querySelector("summary")!;
-    assert.match(summary.textContent ?? "", /^🔒 :3 lock · no push · la ×1 · sa ×1 · yu ×1$/);
+    assert.match(summary.textContent ?? "", /^🔒 : 3 lock · no push · la ×1 · sa ×1 · yu ×1$/);
     assert.doesNotMatch(summary.textContent ?? "", /[a-f0-9]{8}/i);
     assert.match(summary.getAttribute("aria-label") ?? "", /lawrence_lv/);
     run.open = true;
@@ -265,14 +250,35 @@ test("locked run summary is compact and removes the expanded long rail", () => {
   }
 });
 
-test("actual webview disables generated Diff for a non-contiguous batch", () => {
+test("legacy drag guidance replaces the fixed Base marker without adding a direction row", () => {
   const view = createHarness();
   try {
     view.postState(state([a, b, c], 3));
-    view.row(a).dispatchEvent(mouseEvent(view.dom.window, "click", { ctrlKey: true }));
-    view.row(c).dispatchEvent(mouseEvent(view.dom.window, "click", { ctrlKey: true }));
-    view.row(a).dispatchEvent(mouseEvent(view.dom.window, "contextmenu", { clientX: 10, clientY: 10 }));
-    assert.deepEqual(JSON.parse(JSON.stringify(view.messages.at(-1))), { type: "openBatchInspector", hashes: [a, c], source: "webview:read" });
+    const base = view.dom.window.document.querySelector(".timeline-end.base") as HTMLElement;
+    assert.equal(base.textContent, "↑ Base / 较早");
+    const grip = view.row(c).querySelector(".grip") as HTMLElement;
+    grip.dispatchEvent(pointerEvent(view.dom.window, "pointerdown", { pointerId: 4, clientY: 0 }));
+    assert.match(base.textContent ?? "", /正在移动/);
+    assert.equal(view.dom.window.document.getElementById("direction")?.classList.contains("hidden"), true);
+  } finally {
+    view.close();
+  }
+});
+
+test("lower worktree details do not add a redundant draft-only action", () => {
+  const view = createHarness();
+  try {
+    const next = state([a], 3);
+    Object.assign(next, {
+      hasUnstaged: true,
+      unstagedCount: 1,
+      changes: [{ path: "file.ts", staged: false, unstaged: true, worktreeKind: "modify", conflicted: false }],
+    });
+    view.postState(next);
+    const more = view.dom.window.document.querySelector(".changes-more") as HTMLDetailsElement;
+    more.open = true;
+    more.dispatchEvent(new view.dom.window.Event("toggle"));
+    assert.equal([...more.querySelectorAll("button")].some((button) => button.textContent === "仅生成 message（不提交）"), false);
   } finally {
     view.close();
   }
