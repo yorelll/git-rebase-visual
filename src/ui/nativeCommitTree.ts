@@ -11,6 +11,8 @@ export const nativeLockedCommitContext = "gitRebaseVisual.commit.locked";
 export const nativeSelectedCommitContext = "gitRebaseVisual.commit.selected";
 export const nativeBatchCommitContext = "gitRebaseVisual.commit.batch";
 export const nativeContiguousBatchCommitContext = "gitRebaseVisual.commit.batch.contiguous";
+export const nativeLockedBatchCommitContext = "gitRebaseVisual.commit.locked.batch";
+export const nativeLockedContiguousBatchCommitContext = "gitRebaseVisual.commit.locked.batch.contiguous";
 
 export type NativeCommitTreeElement =
   | NativeCommitTreeCommit
@@ -106,7 +108,10 @@ function commitContext(element: NativeCommitTreeCommit, selection: NativeCommitT
   // Each TreeItem has exactly one context value. The ordinary primary context
   // intentionally survives selection; special contexts are for menus which
   // must only apply to those states.
-  if (batch && selected) return batch && selection.contiguous ? nativeContiguousBatchCommitContext : nativeBatchCommitContext;
+  if (batch && selected) {
+    if (element.locked) return selection.contiguous ? nativeLockedContiguousBatchCommitContext : nativeLockedBatchCommitContext;
+    return selection.contiguous ? nativeContiguousBatchCommitContext : nativeBatchCommitContext;
+  }
   if (element.locked) return nativeLockedCommitContext;
   // Selection itself must not hide the ordinary single-item command set.
   if (selected) return nativeCommitContext;

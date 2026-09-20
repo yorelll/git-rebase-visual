@@ -95,6 +95,11 @@ test("native commit contexts keep ordinary menus available for selected, locked,
     (native.nativeCommitTreeItem(make(), { hashes: new Set([hash, "b".repeat(40)]), contiguous: false }) as unknown as FakeTreeItem).contextValue,
     native.nativeBatchCommitContext
   );
+  assert.equal(
+    (native.nativeCommitTreeItem(make({ locked: true }), { hashes: new Set([hash, "b".repeat(40)]), contiguous: true }) as unknown as FakeTreeItem).contextValue,
+    native.nativeLockedContiguousBatchCommitContext,
+    "locked multi-selection preserves the batch route rather than hiding it"
+  );
 }));
 
 test("native locked run preserves the exact compact visual summary and author semantics", () => withNativeTree((native) => {

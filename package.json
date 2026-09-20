@@ -331,17 +331,17 @@
         },
         {
           "command": "gitRebaseVisual.commit.bulkGenerateDiff",
-          "when": "view == gitRebaseVisual.commits && viewItem =~ /gitRebaseVisual\\.commit\\.batch\\.contiguous/",
+          "when": "view == gitRebaseVisual.commits && (viewItem == gitRebaseVisual.commit.batch.contiguous || viewItem == gitRebaseVisual.commit.locked.batch.contiguous)",
           "group": "batch@1"
         },
         {
           "command": "gitRebaseVisual.commit.bulkLock",
-          "when": "view == gitRebaseVisual.commits && viewItem =~ /gitRebaseVisual\\.commit\\.batch/",
+          "when": "view == gitRebaseVisual.commits && (viewItem == gitRebaseVisual.commit.batch || viewItem == gitRebaseVisual.commit.batch.contiguous || viewItem == gitRebaseVisual.commit.locked.batch || viewItem == gitRebaseVisual.commit.locked.batch.contiguous)",
           "group": "batch@2"
         },
         {
           "command": "gitRebaseVisual.commit.bulkDrop",
-          "when": "view == gitRebaseVisual.commits && viewItem =~ /gitRebaseVisual\\.commit\\.batch/",
+          "when": "view == gitRebaseVisual.commits && (viewItem == gitRebaseVisual.commit.batch || viewItem == gitRebaseVisual.commit.batch.contiguous || viewItem == gitRebaseVisual.commit.locked.batch || viewItem == gitRebaseVisual.commit.locked.batch.contiguous)",
           "group": "danger@2"
         },
         {
