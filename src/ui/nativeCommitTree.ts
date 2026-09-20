@@ -100,6 +100,8 @@ function worktreeLabel(change: WorktreeChange, side: "staged" | "working"): stri
 export interface NativeCommitTreeSelection {
   readonly hashes: ReadonlySet<string>;
   readonly contiguous: boolean;
+  /** True when any selected row is locked, not merely the row under the pointer. */
+  readonly hasLocked?: boolean;
 }
 
 /**
@@ -129,7 +131,11 @@ function commitContext(element: NativeCommitTreeCommit, selection: NativeCommitT
   // intentionally survives selection; special contexts are for menus which
   // must only apply to those states.
   if (batch && selected) {
-    if (element.locked) return selection.contiguous ? nativeLockedContiguousBatchCommitContext : nativeLockedBatchCommitContext;
+    // Batch rewrite commands must not appear on an unlocked row when another
+    // selected row is locked. Model the whole selection as locked in that case.
+    if (selection.hasLocked || element.locked) {
+      return selection.contiguous ? nativeLockedContiguousBatchCommitContext : nativeLockedBatchCommitContext;
+    }
     return selection.contiguous ? nativeContiguousBatchCommitContext : nativeBatchCommitContext;
   }
   if (element.locked) return nativeLockedCommitContext;

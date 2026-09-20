@@ -209,7 +209,8 @@ export class RebaseViewProvider {
         const order = this.commits.slice().reverse().map((commit) => commit.hash);
         const indices = order.map((hash, index) => this.nativeSelectionHashes.has(hash) ? index : -1).filter((index) => index >= 0);
         const contiguous = indices.length < 2 || indices.at(-1)! - indices[0]! + 1 === indices.length;
-        this.treeProvider.setSelection({ hashes: this.nativeSelectionHashes, contiguous });
+        const hasLocked = [...this.nativeSelectionHashes].some((hash) => this.lockedHashes.has(hash));
+        this.treeProvider.setSelection({ hashes: this.nativeSelectionHashes, contiguous, hasLocked });
         for (const item of event.selection) {
           if (item.kind !== "commit" || item.detail || !this.root) continue;
           const root = this.root;
