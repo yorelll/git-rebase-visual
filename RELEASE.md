@@ -105,6 +105,13 @@ code --install-extension git-rebase-visual-<version>.vsix
 
 ### 更新记录
 
+- **0.7.2** — 原生 TreeView 迁移完成与安全交互整改：
+  - **原生 hover、context 与选择**：commit tooltip 和右键菜单由 VS Code workbench 的原生 TreeView 绘制；普通点击只选择，Ctrl/Cmd 多选不再打开 editor Tab。Commit Inspector 不再是激活路径，Compose Panel 仍仅用于编辑/生成 message。
+  - **完整原生操作入口**：恢复暂停 rebase 的 Continue/Abort/Skip、edit stop amend/new/draft、squash/fixup、工作区 section 操作和 staged/working AI message。暂停 rebase 时 staged/working AI 只能生成可复制草稿；缺少 LLM 配置时明确提示而不打开不可用 Compose。
+  - **可靠拖拽、锁定与批量边界**：native DnD 可投放到 newest/end 边界，并由 source/anchor/placement/revision/完整 canonical order 与锁定状态在宿主重新验证。连续 locked commit 使用 `🔒 : N lock · no push` 原生摘要；batch 命令要求命令参数属于当前选择，含 locked 项的批次不暴露 Drop 等改写路由。
+  - **只读访问和工作区安全**：locked/batch/locked-batch 项保留复制与只读 Diff；未跟踪文件删除只走专用 host 路径，在 modal 确认后重新读取 porcelain 状态再执行。Git 派生 tooltip 文本均作为纯文本渲染，不解释 Markdown。
+  - **质量门禁**：新增 native TreeItem、tooltip 注入、working AI policy、batch target、manifest 可达性和 native DnD end boundary 回归；测试套件为 146 项。
+
 - **0.7.1** — review5 交互、跨编辑器详情与工作区批量操作升级：
   - **稳定拖拽与紧凑锁定显示**：工作区状态轮询不再错误地使正常拖拽 session 过期；只有仓库、分支、范围、rebase 状态、commit 顺序或锁定集合发生实际变化时才会拒绝旧 intent。连续锁定 commit 的折叠摘要改为紧凑信息，展开后不再显示贯穿整组的长黄色边线。
   - **跨编辑器详情与操作**：commit hover、右键和键盘 Context Menu 的详情/操作移到相邻 editor-area inspector，不覆盖侧栏时间线；hover preview 可移动到右侧阅读或复制，明确操作不会被慢速 preview 覆盖；点击普通 TextEditor 会关闭 inspector，之后可可靠重新打开。单项操作将“停靠在此 (edit)”置于首位。

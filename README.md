@@ -25,17 +25,18 @@
 所有操作都通过**拖拽**或**右键菜单**触发。
 
 ### 1. 拖拽重排
-拖动某个 commit 时，行首 grip 与插入线会提示拖拽状态；目标行会明确显示插入到其**之前（较早）/之后（较新）**。松手后会显示历史改写确认，确认后执行 rebase。完成后在通知与 **Git Rebase Visual** Output 中显示操作、old tip、new tip 和受影响 commit 数。拖到最后一行下半区可移动到列表最末位。
+原生 TreeView 支持拖拽重排：将 commit 放到目标项之前，或拖到列表底部的 end 边界以成为最新一项。松手后会显示历史改写确认，确认后执行 rebase。拖拽意图携带完整 canonical 顺序和 revision；宿主会在确认前后重新验证当前顺序、锁定状态与 revision，拒绝过期或无效请求。完成后在通知与 **Git Rebase Visual** Output 中显示操作、old tip、new tip 和受影响 commit 数。
 
-### 2. 悬停查看详情
-鼠标悬停在某个 commit 上约 0.4 秒，完整详情会显示在相邻的编辑器区 **Git Rebase · Commit** 面板，而不是覆盖侧栏时间线：
-- 顶部显示 **作者**、相对/绝对时间以及 `hash + 变更统计（files changed / insertions / deletions）`。
-- **完整 commit message** 可在右侧阅读和复制；离开侧栏后预览会保留，直到下一条预览、明确右键操作或用户切换到普通 TextEditor。
-- 右击 commit 或按 `Shift+F10` / Menu 键会在同一 editor-area 面板打开操作；单项操作中的 **停靠在此 (edit)** 位于首位。点击普通 TextEditor 会关闭该面板，随后可再次打开。
+### 2. 原生悬停与选择
+commit 的详情由 VS Code 原生 TreeView tooltip 显示，包含 subject、hash、作者、日期，以及按需加载的完整 message/变更统计。Git 派生文本会作为纯文本渲染，不被解释为 Markdown。
+
+- 普通单击只选择 TreeItem；Ctrl/Cmd+单击可建立多选，不会打开 editor Tab。
+- tooltip 和右键菜单均由 VS Code workbench 绘制；不会创建 Commit Inspector 或其他 editor-area 的详情/上下文面板。
+- 连续锁定 commit 可折叠为原生摘要，例如 `🔒 : 8 lock · no push · la ×5`；展开后仍可查看每一项。
 
 > 侧栏内的成功提示（如 Refresh 的“已刷新”、复制、变基结果、推送结果）会短暂显示在 branch context 区域，不推动 commit 列表。
 
-### 3. 右键菜单
+### 3. 原生右键菜单
 
 | 菜单项 | 作用 |
 |--------|------|
@@ -99,9 +100,11 @@
 - 推送版本标签触发 Release 时，GitHub Actions 会依次执行类型检查、覆盖率测试、VSIX 打包、VSIX 内容检查以及 RELEASE.md 版本记录检查；任一步失败都不会创建 Release。
 
 ### 9. 为未提交的改动生成 message 并提交
-当工作区有未提交改动、且已配置 LLM 时，面板顶部出现 **未提交的改动** 区，提供：
+当工作区有未提交改动、且已配置 LLM 时，在原生 TreeView 的 **Staged Changes** 或 **Changes** 标题上右键，提供：
 - **为暂存区生成并提交**：基于 `git diff --cached` 生成 message，确认后 `git commit`（仅提交暂存内容）。
 - **为工作区生成并提交**：基于 `git diff HEAD` 生成 message，确认后 `git add -A && git commit`。
+- rebase 暂停期间，暂存区或工作区 AI 入口只打开“仅生成 message，不提交”的草稿 Compose；发生冲突时不能生成。未配置 LLM 时会提示先配置，而不会打开不可用的 Compose。
+- 删除未跟踪文件不会复用“恢复”操作：扩展会先显示确认框，并在确认后重新读取 porcelain 状态；文件若已暂存、变为已跟踪或已不存在，删除会被拒绝。
 
 ### 10. 变基进行中（暂停状态）
 当选择「变基到此 commit」或发生冲突时，rebase 会**暂停**：
@@ -134,7 +137,7 @@
 ### 13. commit 锁定（防误推他人提交）
 典型场景：你 cherry-pick 了别人的 commit A 作为依赖，在其之上写了自己的 B、C。推送时不应把别人的 A 一起推出去。
 
-- 右键 A → **锁定 commit**（出现 🔒、左侧橙色条）。
+- 右键 A → **锁定 commit**（出现原生 lock 图标；连续锁定项可显示紧凑的 `🔒 : N lock · no push` 摘要）。
 - 点顶部 **Push** 时，若推送范围（`@{upstream}..HEAD`）里**包含**被锁定的 commit，会被**拒绝**并提示。
 - 解决办法：把锁定的 commit 移出推送范围（拖到你要推送的提交之后，或先 drop），再推送。
 - 锁定采用 **git patch-id** 作为标识（并保留 hash 作为后备）。patch-id 在 cherry-pick / rebase 后保持稳定，因此**即使 commit hash 因变基而改变、或被 cherry-pick 到别处，锁定依然生效**，不会「莫名解锁」。
@@ -164,7 +167,7 @@
 ### AI 生成 commit message 使用步骤
 1. 填好 `llm.baseUrl` 与 `llm.apiKey`（未填时相关菜单/按钮为灰）。
 2. （可选）在 `llm.skillPath` 指向一个规则 md，例如约定用 Conventional Commits、中文/英文、是否带 body、是否要求输出关联链接等。
-3. 右键某 commit → **为此 commit 生成 AI message**，或在顶部 **未提交的改动** 区点生成按钮。
+3. 右键某 commit → **为此 commit 生成 AI message**，或右键 **Staged Changes / Changes** 标题选择对应的 AI message 操作。
 4. 弹窗中可在 **补充信息给 AI** 填写额外上下文，点 **生成 / 重新生成**；右下角显示「生成中…」（可取消）。
 5. 生成结果填入 **Commit message** 框，可编辑；确认后 **应用**（保留 trailer），或 **取消** 丢弃。
 
