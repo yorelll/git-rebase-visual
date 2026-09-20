@@ -129,6 +129,16 @@
         "category": "Git Rebase"
       },
       {
+        "command": "gitRebaseVisual.commit.squash",
+        "title": "Squash into Previous Commit",
+        "category": "Git Rebase"
+      },
+      {
+        "command": "gitRebaseVisual.commit.fixup",
+        "title": "Fixup into Previous Commit",
+        "category": "Git Rebase"
+      },
+      {
         "command": "gitRebaseVisual.commit.bulkLock",
         "title": "Lock Selected Commits",
         "category": "Git Rebase"
@@ -161,6 +171,57 @@
       {
         "command": "gitRebaseVisual.worktree.deleteUntracked",
         "title": "Delete Untracked File",
+        "category": "Git Rebase",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "gitRebaseVisual.worktree.stageAll",
+        "title": "Stage All Changes",
+        "category": "Git Rebase"
+      },
+      {
+        "command": "gitRebaseVisual.worktree.discardAll",
+        "title": "Discard All Working Changes",
+        "category": "Git Rebase"
+      },
+      {
+        "command": "gitRebaseVisual.worktree.unstageAll",
+        "title": "Unstage All Changes",
+        "category": "Git Rebase"
+      },
+      {
+        "command": "gitRebaseVisual.worktree.stagedAiMessage",
+        "title": "Generate Commit Message for Staged Changes…",
+        "category": "Git Rebase"
+      },
+      {
+        "command": "gitRebaseVisual.rebase.continue",
+        "title": "Continue Rebase",
+        "category": "Git Rebase"
+      },
+      {
+        "command": "gitRebaseVisual.rebase.abort",
+        "title": "Abort Rebase",
+        "category": "Git Rebase"
+      },
+      {
+        "command": "gitRebaseVisual.rebase.skip",
+        "title": "Skip Conflicted Commit",
+        "category": "Git Rebase"
+      },
+      {
+        "command": "gitRebaseVisual.rebase.editStopAmend",
+        "title": "Amend at Edit Stop…",
+        "category": "Git Rebase"
+      },
+      {
+        "command": "gitRebaseVisual.rebase.editStopNew",
+        "title": "Create Commit at Edit Stop…",
+        "category": "Git Rebase"
+      },
+      {
+        "command": "gitRebaseVisual.rebase.editStopDraft",
+        "title": "Generate Draft Message at Edit Stop…",
         "category": "Git Rebase"
       }
     ],
@@ -190,6 +251,16 @@
           "command": "gitRebaseVisual.refresh",
           "when": "view == gitRebaseVisual.commits",
           "group": "navigation@5"
+        },
+        {
+          "command": "gitRebaseVisual.rebase.continue",
+          "when": "view == gitRebaseVisual.commits",
+          "group": "navigation@6"
+        },
+        {
+          "command": "gitRebaseVisual.rebase.abort",
+          "when": "view == gitRebaseVisual.commits",
+          "group": "navigation@7"
         }
       ],
       "view/item/context": [
@@ -240,8 +311,18 @@
         },
         {
           "command": "gitRebaseVisual.commit.unlock",
-          "when": "view == gitRebaseVisual.commits && viewItem =~ /gitRebaseVisual\\.commit\\.locked/",
+          "when": "view == gitRebaseVisual.commits && viewItem == gitRebaseVisual.commit.locked",
           "group": "edit@5"
+        },
+        {
+          "command": "gitRebaseVisual.commit.squash",
+          "when": "view == gitRebaseVisual.commits && viewItem == gitRebaseVisual.commit",
+          "group": "edit@6"
+        },
+        {
+          "command": "gitRebaseVisual.commit.fixup",
+          "when": "view == gitRebaseVisual.commits && viewItem == gitRebaseVisual.commit",
+          "group": "edit@7"
         },
         {
           "command": "gitRebaseVisual.commit.drop",
@@ -281,7 +362,57 @@
         {
           "command": "gitRebaseVisual.worktree.deleteUntracked",
           "when": "view == gitRebaseVisual.commits && viewItem == gitRebaseVisual.worktree.untracked",
+          "group": "inline@1"
+        },
+        {
+          "command": "gitRebaseVisual.worktree.stageAll",
+          "when": "view == gitRebaseVisual.commits && viewItem == gitRebaseVisual.worktree.workingSection",
+          "group": "navigation@1"
+        },
+        {
+          "command": "gitRebaseVisual.worktree.discardAll",
+          "when": "view == gitRebaseVisual.commits && viewItem == gitRebaseVisual.worktree.workingSection",
           "group": "danger@1"
+        },
+        {
+          "command": "gitRebaseVisual.worktree.unstageAll",
+          "when": "view == gitRebaseVisual.commits && viewItem == gitRebaseVisual.worktree.stagedSection",
+          "group": "navigation@1"
+        },
+        {
+          "command": "gitRebaseVisual.worktree.stagedAiMessage",
+          "when": "view == gitRebaseVisual.commits && viewItem == gitRebaseVisual.worktree.stagedSection",
+          "group": "edit@1"
+        },
+        {
+          "command": "gitRebaseVisual.rebase.continue",
+          "when": "view == gitRebaseVisual.commits && (viewItem == gitRebaseVisual.rebase || viewItem == gitRebaseVisual.editStop)",
+          "group": "navigation@1"
+        },
+        {
+          "command": "gitRebaseVisual.rebase.abort",
+          "when": "view == gitRebaseVisual.commits && (viewItem == gitRebaseVisual.rebase || viewItem == gitRebaseVisual.editStop)",
+          "group": "danger@2"
+        },
+        {
+          "command": "gitRebaseVisual.rebase.skip",
+          "when": "view == gitRebaseVisual.commits && viewItem == gitRebaseVisual.rebase",
+          "group": "danger@1"
+        },
+        {
+          "command": "gitRebaseVisual.rebase.editStopAmend",
+          "when": "view == gitRebaseVisual.commits && viewItem == gitRebaseVisual.editStop",
+          "group": "edit@1"
+        },
+        {
+          "command": "gitRebaseVisual.rebase.editStopNew",
+          "when": "view == gitRebaseVisual.commits && viewItem == gitRebaseVisual.editStop",
+          "group": "edit@2"
+        },
+        {
+          "command": "gitRebaseVisual.rebase.editStopDraft",
+          "when": "view == gitRebaseVisual.commits && viewItem == gitRebaseVisual.editStop",
+          "group": "edit@3"
         }
       ]
     },

@@ -95,6 +95,8 @@ import {
   nativeCommitTreeMime,
   nativeCommitTreeViewId,
 } from "./nativeCommitTree";
+import { CommitDetailCache } from "./commitDetailCache";
+import { nativeCommandIntent } from "./nativeCommandIntent";
 import { refreshFeedback } from "./refreshFeedbackPolicy";
 import { UndoJournal, UndoRecord, undoPreflight } from "../git/undo";
 
@@ -156,6 +158,8 @@ export class RebaseViewProvider {
   private readonly compose: ComposePanel;
   private generationCancel?: AbortController;
   private readonly commitDiffCache = new Map<string, ReturnType<typeof commitDiffPlan>>();
+  /** Immutable commit tooltip metadata, fetched lazily once rather than per poll. */
+  private readonly commitDetailCache = new CommitDetailCache<Awaited<ReturnType<typeof commitDetail>>>(64);
 
   constructor(
     private readonly ctx: vscode.ExtensionContext,
@@ -177,6 +181,7 @@ export class RebaseViewProvider {
     });
     ctx.subscriptions.push(this.output, this.statusBar, this.compose, this.treeProvider, this.tree, new vscode.Disposable(() => {
       this.commitDiffCache.clear();
+      this.commitDetailCache.clear();
       this.generatedDiffSnapshots.clear();
     }));
     ctx.subscriptions.push(
@@ -204,6 +209,15 @@ export class RebaseViewProvider {
         const indices = order.map((hash, index) => this.nativeSelectionHashes.has(hash) ? index : -1).filter((index) => index >= 0);
         const contiguous = indices.length < 2 || indices.at(-1)! - indices[0]! + 1 === indices.length;
         this.treeProvider.setSelection({ hashes: this.nativeSelectionHashes, contiguous });
+        for (const item of event.selection) {
+          if (item.kind !== "commit" || item.detail || !this.root) continue;
+          const root = this.root;
+          const hash = item.commit.hash;
+          void this.commitDetailCache.getOrLoad(`${root}:${hash}`, () => commitDetail(root, hash)).then(
+            (detail) => this.treeProvider.setCommitDetail(hash, detail),
+            () => undefined // concise commit data remains an accurate fallback tooltip
+          );
+        }
       }),
       new vscode.Disposable(() => {
         if (this.refreshTimer) {
@@ -296,6 +310,7 @@ export class RebaseViewProvider {
       this.diffRequests.invalidateRepository(this.root);
       this.generatedDiffSnapshots.invalidateRepository(this.root);
       this.commitDiffCache.clear();
+      this.commitDetailCache.clear();
     }
     this.root = root;
 
@@ -463,39 +478,86 @@ export class RebaseViewProvider {
     } else {
       elements.push({ kind: "message", label: "↑ Base / 较早" });
     }
-    const detailResults = await Promise.all(ordered.map(async (commit) => {
-      try {
-        return [commit.hash, await commitDetail(root, commit.hash)] as const;
-      } catch {
-        // The concise commit row remains usable if a rich tooltip read fails.
-        return [commit.hash, undefined] as const;
-      }
-    }));
-    if (!isCurrent()) return;
-    const details = new Map(detailResults);
+
+    // A status poll can run every 1.5 seconds. Commit objects are immutable, so
+    // populate only uncached visible tooltip details and never wait on one Git
+    // subprocess per row before rendering the actionable native TreeView.
+    const details = new Map<string, Awaited<ReturnType<typeof commitDetail>>>();
     for (const commit of ordered) {
+      const detail = this.commitDetailCache.get(`${root}:${commit.hash}`);
+      if (detail) details.set(commit.hash, detail);
+    }
+    const commitItems = ordered.map((commit) => ({
+      kind: "commit" as const,
+      commit,
+      locked: lockedFlags.get(commit.hash) ?? false,
+      stopped: progress.pausedReason === "edit" && stoppedAt === commit.hash,
+      pending: progress.pendingHashes?.some((hash) => commit.hash.startsWith(hash) || hash.startsWith(commit.hash)) ?? false,
+      detail: details.get(commit.hash),
+    }));
+    this.appendNativeCommitItems(elements, commitItems);
+
+    if (rebaseInProgress) {
+      const stoppedCommit = commitItems.find((item) => item.stopped);
+      const pausedLabel = progress.pausedReason === "conflict"
+        ? `变基暂停：${progress.conflictCount} 个冲突文件 · Continue / Skip / Abort`
+        : progress.pausedReason === "edit"
+          ? `变基停靠 (edit)：${stoppedCommit?.commit.shortHash ?? "当前 commit"} · Amend / 新建 commit / 草稿 / Continue / Abort`
+          : "变基进行中：Continue / Abort";
       elements.push({
-        kind: "commit",
-        commit,
-        locked: lockedFlags.get(commit.hash) ?? false,
-        stopped: progress.pausedReason === "edit" && stoppedAt === commit.hash,
-        pending: progress.pendingHashes?.some((hash) => commit.hash.startsWith(hash) || hash.startsWith(commit.hash)) ?? false,
-        detail: details.get(commit.hash),
+        kind: "message",
+        label: pausedLabel,
+        tooltip: progress.pausedReason === "conflict"
+          ? `请解决并暂存冲突：${progress.conflictFiles.join("、")}`
+          : "在此原生树项目右键使用 rebase 操作。",
+        context: progress.pausedReason === "edit" ? "editStop" : "rebase",
+        rebase: {
+          pausedReason: progress.pausedReason,
+          conflictCount: progress.conflictCount,
+          stoppedCommit,
+          hasStaged: status.hasStaged,
+          llmConfigured: isLlmConfigured(),
+        },
       });
     }
     if (changes.length) {
-      elements.push({ kind: "message", label: "未提交的改动", tooltip: "右键文件可查看 Diff、暂存、恢复或删除未跟踪文件。" });
-      for (const change of changes.filter((item) => item.staged)) {
-        elements.push({ kind: "worktree", change, side: "staged" });
+      const staged = changes.filter((item) => item.staged);
+      const working = changes.filter((item) => item.unstaged);
+      if (staged.length) {
+        elements.push({ kind: "message", label: `Staged Changes (${staged.length}) · 右键：撤销全部暂存 / AI 生成 message 并提交`, tooltip: "右键此标题管理已暂存文件。", context: "worktreeStaged" });
+        for (const change of staged) elements.push({ kind: "worktree", change, side: "staged" });
       }
-      for (const change of changes.filter((item) => item.unstaged)) {
-        elements.push({ kind: "worktree", change, side: "working" });
+      if (working.length) {
+        elements.push({ kind: "message", label: `Changes (${working.length}) · 右键：暂存全部 / 恢复全部`, tooltip: "右键此标题管理工作区文件；未跟踪文件可在其行右键删除。", context: "worktreeWorking" });
+        for (const change of working) elements.push({ kind: "worktree", change, side: "working" });
       }
     }
     this.tree.message = undefined;
     this.tree.description = rebaseInProgress ? `rebase · ${progress.pausedReason ?? "进行中"}` : branchDescription;
     this.tree.badge = { value: commits.length, tooltip: `${commits.length} commits · ↑ Base / 较早 · ↓ HEAD / 较新` };
     this.treeProvider.setElements(elements);
+  }
+
+  /** Preserves the legacy collapse behavior as a real native TreeView parent. */
+  private appendNativeCommitItems(
+    elements: NativeCommitTreeElement[],
+    commits: Array<Extract<NativeCommitTreeElement, { kind: "commit" }>>
+  ): void {
+    let index = 0;
+    while (index < commits.length) {
+      const current = commits[index];
+      if (getCollapseLockedRuns() && current.locked && !current.stopped && !current.pending) {
+        let end = index + 1;
+        while (end < commits.length && commits[end].locked && !commits[end].stopped && !commits[end].pending) end += 1;
+        if (end - index >= 3) {
+          elements.push({ kind: "lockedRun", commits: commits.slice(index, end) });
+          index = end;
+          continue;
+        }
+      }
+      elements.push(current);
+      index += 1;
+    }
   }
 
   private isCurrentCommitHash(value: unknown): value is string {
@@ -522,19 +584,14 @@ export class RebaseViewProvider {
 
   /** Runs a native TreeView command through the same serialized host safety gate. */
   private async onNativeCommand(type: string, element?: NativeCommitTreeElement): Promise<void> {
-    const message: FromWebview = { type, source: "native-tree" };
-    if (element?.kind === "commit") message.hash = element.commit.hash;
-    if (element?.kind === "worktree") {
-      message.path = element.change.path;
-      message.side = element.side === "working" ? "working" : "staged";
-    }
-    if (type === "bulkLock" || type === "bulkDrop" || type === "bulkGenerateDiff") {
-      const hashes = this.nativeSelectedHashes(element);
-      if (hashes.length < 2) return;
-      message.hashes = hashes;
-      if (type === "bulkGenerateDiff") message.revision = this.canonicalRevision;
-    }
-    await this.onMessage(message);
+    const intent = nativeCommandIntent(
+      type,
+      element,
+      this.canonicalRevision,
+      (type === "bulkLock" || type === "bulkDrop" || type === "bulkGenerateDiff") ? this.nativeSelectedHashes(element) : []
+    );
+    if (!intent) return;
+    await this.onMessage({ ...intent, source: "native-tree" });
   }
 
   private nativeSelectedHashes(element?: NativeCommitTreeElement): string[] {
@@ -600,6 +657,10 @@ export class RebaseViewProvider {
         return this.onNativeCommand("generateDiff", element);
       case "drop":
         return this.onNativeCommand("drop", element);
+      case "squash":
+        return this.onNativeCommand("squash", element);
+      case "fixup":
+        return this.onNativeCommand("fixup", element);
       case "lock":
         return this.onNativeCommand("lock", element);
       case "unlock":
@@ -628,6 +689,29 @@ export class RebaseViewProvider {
         return this.onNativeCommand("bulkDrop", element);
       case "bulkGenerateDiff":
         return this.onNativeCommand("bulkGenerateDiff", element);
+      case "continueRebase":
+        return this.onNativeCommand("continueRebase", element);
+      case "abortRebase":
+        return this.onNativeCommand("abortRebase", element);
+      case "skipRebase":
+        return this.onNativeCommand("skipRebase", element);
+      case "editStopAmend":
+        if (element?.kind !== "message" || !element.rebase?.stoppedCommit) return Promise.resolve();
+        return this.onMessage({ type: "openCompose", source: "native-tree", mode: "commit", hash: element.rebase.stoppedCommit.commit.hash, ai: false, thenEdit: true, editKind: "amend" });
+      case "editStopNew":
+        return this.onMessage({ type: "openCompose", source: "native-tree", mode: "staged", ai: false, thenEdit: false, editKind: "new" });
+      case "editStopDraft":
+        if (element?.kind !== "message" || !element.rebase?.hasStaged) return Promise.resolve();
+        return this.onMessage({ type: "openCompose", source: "native-tree", mode: "staged", ai: true, thenEdit: false, messageOnly: true });
+      case "stageAllFiles":
+        return this.onNativeCommand("stageAllFiles", element);
+      case "discardAllFiles":
+        return this.onNativeCommand("discardAllFiles", element);
+      case "unstageAllFiles":
+        return this.onNativeCommand("unstageAllFiles", element);
+      case "stagedAiMessage":
+        if (element?.kind !== "message") return Promise.resolve();
+        return this.onMessage({ type: "openCompose", source: "native-tree", mode: "staged", ai: true, thenEdit: false });
       default:
         return Promise.resolve();
     }

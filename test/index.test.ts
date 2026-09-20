@@ -26,6 +26,8 @@ import "./webviewProtocolState.test";
 import "./mutationGate.test";
 import "./webviewDom.test";
 import "./nativeCommitTree.test";
+import "./commitDetailCache.test";
+import "./nativeCommandIntent.test";
 import "./gitRunner.integration.test";
 import "./llmClient.test";
 import "./message.test";

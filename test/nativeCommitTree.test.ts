@@ -72,7 +72,48 @@ test("native commit item has a workbench tooltip and context value", () => withN
   assert.ok(item.tooltip instanceof FakeMarkdownString);
   assert.match((item.tooltip as FakeMarkdownString).value, new RegExp(hash));
   assert.match((item.tooltip as FakeMarkdownString).value, /Use native context menu/);
-  assert.equal(item.command?.command, "gitRebaseVisual.commit.copyHash");
+  assert.equal(item.command?.command, "gitRebaseVisual.commit.openDiff");
+}));
+
+test("native commit contexts keep ordinary menus available for selected, locked, and multi states", () => withNativeTree((native) => {
+  const make = (overrides: Partial<{ locked: boolean }> = {}) => ({
+    kind: "commit" as const,
+    commit: { hash, shortHash: hash.slice(0, 8), subject: "Context", author: "Author", authorEmail: "a@example.test", date: "today" },
+    locked: false,
+    stopped: false,
+    pending: false,
+    ...overrides,
+  });
+  assert.equal((native.nativeCommitTreeItem(make()) as unknown as FakeTreeItem).contextValue, native.nativeCommitContext);
+  assert.equal((native.nativeCommitTreeItem(make(), { hashes: new Set([hash]), contiguous: true }) as unknown as FakeTreeItem).contextValue, native.nativeCommitContext, "single selection preserves ordinary command visibility");
+  assert.equal((native.nativeCommitTreeItem(make({ locked: true })) as unknown as FakeTreeItem).contextValue, native.nativeLockedCommitContext);
+  assert.equal(
+    (native.nativeCommitTreeItem(make(), { hashes: new Set([hash, "b".repeat(40)]), contiguous: true }) as unknown as FakeTreeItem).contextValue,
+    native.nativeContiguousBatchCommitContext
+  );
+  assert.equal(
+    (native.nativeCommitTreeItem(make(), { hashes: new Set([hash, "b".repeat(40)]), contiguous: false }) as unknown as FakeTreeItem).contextValue,
+    native.nativeBatchCommitContext
+  );
+}));
+
+test("native locked run preserves the exact compact visual summary and author semantics", () => withNativeTree((native) => {
+  const commits = [
+    ["lawrence_lv", "a"], ["lawrence_lv", "b"], ["lawrence_lv", "c"],
+    ["sally_peng", "d"], ["sally_peng", "e"],
+    ["yucheng_xiang", "f"],
+  ].map(([author, letter]) => ({
+    kind: "commit" as const,
+    commit: { hash: letter.repeat(40), shortHash: letter.repeat(8), subject: "locked", author, authorEmail: `${letter}@example.test`, date: "today" },
+    locked: true,
+    stopped: false,
+    pending: false,
+  }));
+  const summary = native.lockedRunSummary(commits);
+  assert.equal(summary.label, "🔒 : 6 lock · no push · la ×3 · sa ×2 · yu ×1");
+  assert.match(summary.tooltip, /lawrence_lv ×3/);
+  assert.match(summary.tooltip, /sally_peng ×2/);
+  assert.match(summary.tooltip, /yucheng_xiang ×1/);
 }));
 
 test("untracked worktree item carries a distinct native delete context", () => withNativeTree((native) => {
