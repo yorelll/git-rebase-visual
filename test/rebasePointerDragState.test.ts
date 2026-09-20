@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { beginPointerDrag, canStartReorder, nativeTreeDropIntent, oneStepReorderIntent, pointerDropIntent } from "../src/ui/rebasePointerDragState";
+import { beginPointerDrag, canStartReorder, nativeTreeDropAtEndIntent, nativeTreeDropIntent, oneStepReorderIntent, pointerDropIntent } from "../src/ui/rebasePointerDragState";
+import { validateReorderRequest } from "../src/ui/rebaseReorderState";
 
 const a = "a".repeat(40);
 const b = "b".repeat(40);
@@ -26,6 +27,18 @@ test("native TreeView drop produces a no-layout-shift canonical intent", () => {
   });
   assert.equal(nativeTreeDropIntent(c, c, canonical, 12), undefined);
   assert.equal(nativeTreeDropIntent("missing", a, canonical, 12), undefined);
+});
+
+test("native TreeView end boundary moves a commit to newest and remains host-validated", () => {
+  const intent = nativeTreeDropAtEndIntent(b, canonical, 12);
+  assert.deepEqual(intent, {
+    sourceHash: b, anchorHash: locked, placement: "after", revision: 12, order: [a, c, locked, b],
+  });
+  assert.equal(validateReorderRequest(intent!, canonical, 12, new Set()).ok, true);
+  assert.equal(validateReorderRequest(intent!, canonical, 13, new Set()).ok, false, "stale revision is rejected");
+  assert.equal(validateReorderRequest(intent!, canonical, 12, new Set([locked])).ok, false, "locked end anchor is rejected");
+  assert.equal(nativeTreeDropAtEndIntent(b, canonical, 12, new Set([locked])), undefined, "native end target rejects a locked newest commit");
+  assert.equal(nativeTreeDropAtEndIntent(locked, canonical, 12), undefined, "already-newest source cannot be dropped after itself");
 });
 
 test("Alt arrows derive one-step canonical intents with boundaries and revision", () => {

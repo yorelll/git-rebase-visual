@@ -86,9 +86,9 @@ import {
 import { applyCommitBinaryStatus, commitDiffPlan, parseCommitChangedFiles } from "./commitDiffState";
 import { ensureEditStopTarget, writeEditStopCommit } from "./editStopCommit";
 import { validateReorderRequest } from "./rebaseReorderState";
-import { nativeTreeDropIntent } from "./rebasePointerDragState";
+import { nativeTreeDropAtEndIntent, nativeTreeDropIntent } from "./rebasePointerDragState";
 import { nextCanonicalSnapshotRevision } from "./canonicalSnapshot";
-import { isDraftOnlyAiGenerationAllowedDuringRebase, isDraftOnlyComposeAllowedDuringRebase } from "./composePolicy";
+import { isDraftOnlyAiGenerationAllowedDuringRebase, isDraftOnlyComposeAllowedDuringRebase, nativeWorkingAiComposeRequest } from "./composePolicy";
 import { ComposePanel } from "./composePanel";
 import {
   NativeCommitTreeElement,
@@ -529,7 +529,7 @@ export class RebaseViewProvider {
         for (const change of staged) elements.push({ kind: "worktree", change, side: "staged" });
       }
       if (working.length) {
-        elements.push({ kind: "message", label: `Changes (${working.length}) · 右键：暂存全部 / 恢复全部`, tooltip: "右键此标题管理工作区文件；未跟踪文件可在其行右键删除。", context: "worktreeWorking" });
+        elements.push({ kind: "message", label: `Changes (${working.length}) · 右键：暂存全部 / 恢复全部 / AI 生成 message`, tooltip: "右键此标题管理工作区文件；未跟踪文件可在其行右键删除。", context: "worktreeWorking" });
         for (const change of working) elements.push({ kind: "worktree", change, side: "working" });
       }
     }
@@ -616,7 +616,6 @@ export class RebaseViewProvider {
         })));
       },
       handleDrop: async (target, transfer) => {
-        if (target?.kind !== "commit" || target.locked) return;
         const data = transfer.get(nativeCommitTreeMime);
         if (!data) return;
         let drag: { hash?: unknown; revision?: unknown; order?: unknown };
@@ -628,9 +627,16 @@ export class RebaseViewProvider {
         if (typeof drag.hash !== "string" || typeof drag.revision !== "number") return;
         const canonicalOrder = this.commits.slice().reverse().map((commit) => commit.hash);
         const sourceIndex = canonicalOrder.indexOf(drag.hash);
-        const targetIndex = canonicalOrder.indexOf(target.commit.hash);
-        if (sourceIndex < 0 || targetIndex < 0 || sourceIndex === targetIndex) return;
-        const intent = nativeTreeDropIntent(drag.hash, target.commit.hash, canonicalOrder, drag.revision);
+        if (sourceIndex < 0) return;
+
+        // Dropping in native TreeView's empty lower area represents the explicit
+        // final boundary. It still carries the newest real commit as an anchor,
+        // preserving host-side canonical/revision/lock validation.
+        const intent = target === undefined
+          ? nativeTreeDropAtEndIntent(drag.hash, canonicalOrder, drag.revision, this.lockedHashes)
+          : target.kind === "commit" && !target.locked && canonicalOrder.indexOf(target.commit.hash) >= 0
+            ? nativeTreeDropIntent(drag.hash, target.commit.hash, canonicalOrder, drag.revision)
+            : undefined;
         // Native DnD never inserts a hint/list row during drag. On drop it sends
         // only the full captured canonical intent, which handleReorder rechecks.
         if (!intent) return;
@@ -707,9 +713,22 @@ export class RebaseViewProvider {
       case "stagedAiMessage":
         if (element?.kind !== "message") return Promise.resolve();
         return this.onMessage({ type: "openCompose", source: "native-tree", mode: "staged", ai: true, thenEdit: false });
+      case "workingAiMessage":
+        return this.openWorkingAiCompose(element);
       default:
         return Promise.resolve();
     }
+  }
+
+  /** Opens working-tree AI compose while preserving its paused-rebase draft policy. */
+  private openWorkingAiCompose(element?: NativeCommitTreeElement): Promise<void> {
+    if (element?.kind !== "message") return Promise.resolve();
+    const request = nativeWorkingAiComposeRequest(isLlmConfigured(), element.rebase !== undefined);
+    if (!request) {
+      toast("error", "请先在设置中配置 gitRebaseVisual.llm.baseUrl 与 apiKey。");
+      return Promise.resolve();
+    }
+    return this.onMessage({ ...request, source: "native-tree" });
   }
 
   private async onMessage(m: FromWebview): Promise<void> {

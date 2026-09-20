@@ -63,6 +63,11 @@ export function validateReorderRequest(
   if (lockedHashes.has(request.sourceHash)) {
     return { ok: false, reason: "已锁定的 commit 不能被拖动。" };
   }
+  // A drop is positioned relative to its anchor. Revalidate that boundary as
+  // well, including native TreeView's explicit "after newest" endpoint.
+  if (lockedHashes.has(request.anchorHash)) {
+    return { ok: false, reason: "不能以已锁定的 commit 作为拖拽目标。" };
+  }
   const expected = reorderAround(canonicalOrder, request.sourceHash, request.anchorHash, request.placement);
   if (!expected) {
     return { ok: false, reason: "拖拽目标不在当前完整 commit 列表中。" };

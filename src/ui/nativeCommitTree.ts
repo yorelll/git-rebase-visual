@@ -62,12 +62,32 @@ export interface NativeRebaseActionState {
 function commitTooltip(commit: Commit, detail?: CommitDetail): vscode.MarkdownString {
   const tooltip = new vscode.MarkdownString(undefined, true);
   tooltip.isTrusted = false;
-  tooltip.appendMarkdown(`**${commit.subject || "(no subject)"}**\n\n`);
-  tooltip.appendMarkdown(`\`${commit.hash}\`\n\n`);
-  tooltip.appendMarkdown(`Author: ${detail?.author ?? commit.author} <${detail?.email ?? commit.authorEmail}>\n\n`);
-  tooltip.appendMarkdown(`Date: ${detail?.absDate ?? commit.date}${detail?.relDate ? ` (${detail.relDate})` : ""}`);
-  if (detail?.stat) tooltip.appendMarkdown(`\n\n${detail.stat}`);
-  if (detail?.message) tooltip.appendMarkdown(`\n\n---\n\n${detail.message.trim()}`);
+  // Git objects are repository-controlled input. `isTrusted = false` prevents
+  // command links but does not stop Markdown syntax from changing the rendered
+  // tooltip, so append every Git-derived fragment as literal text.
+  tooltip.appendMarkdown("**");
+  tooltip.appendText(commit.subject || "(no subject)");
+  tooltip.appendMarkdown("**\n\n`");
+  tooltip.appendText(commit.hash);
+  tooltip.appendMarkdown("`\n\nAuthor: ");
+  tooltip.appendText(detail?.author ?? commit.author);
+  tooltip.appendMarkdown(" <");
+  tooltip.appendText(detail?.email ?? commit.authorEmail);
+  tooltip.appendMarkdown(">\n\nDate: ");
+  tooltip.appendText(detail?.absDate ?? commit.date);
+  if (detail?.relDate) {
+    tooltip.appendMarkdown(" (");
+    tooltip.appendText(detail.relDate);
+    tooltip.appendMarkdown(")");
+  }
+  if (detail?.stat) {
+    tooltip.appendMarkdown("\n\n");
+    tooltip.appendText(detail.stat);
+  }
+  if (detail?.message) {
+    tooltip.appendMarkdown("\n\n---\n\n");
+    tooltip.appendText(detail.message.trim());
+  }
   return tooltip;
 }
 
@@ -130,11 +150,8 @@ export function nativeCommitTreeItem(
     item.tooltip = commitTooltip(commit, detail);
     item.contextValue = commitContext(element, selection);
     item.iconPath = new vscode.ThemeIcon(locked ? "lock" : stopped ? "debug-pause" : pending ? "history" : "git-commit");
-    item.command = {
-      command: "gitRebaseVisual.commit.openDiff",
-      title: "Open Commit Diff",
-      arguments: [element],
-    };
+    // Do not assign a default row command. Native TreeView clicks must update
+    // selection only so Ctrl/Cmd multi-selection does not open editor tabs.
     return item;
   }
 

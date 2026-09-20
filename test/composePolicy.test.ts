@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { isDraftOnlyAiGenerationAllowedDuringRebase, isDraftOnlyComposeAllowedDuringRebase } from "../src/ui/composePolicy";
+import { isDraftOnlyAiGenerationAllowedDuringRebase, isDraftOnlyComposeAllowedDuringRebase, nativeWorkingAiComposeRequest, workingAiComposeDecision } from "../src/ui/composePolicy";
 
 test("only draft-only staged or working compose can open during a rebase", () => {
   assert.equal(isDraftOnlyComposeAllowedDuringRebase("staged", true), true);
@@ -17,4 +17,15 @@ test("AI generation at a rebase stop remains draft-only and rejects conflicts", 
   assert.equal(isDraftOnlyAiGenerationAllowedDuringRebase("staged", false, false), false);
   assert.equal(isDraftOnlyAiGenerationAllowedDuringRebase("commit", true, false), false);
   assert.equal(isDraftOnlyAiGenerationAllowedDuringRebase("staged", true, true), false);
+});
+
+test("native working AI compose keeps normal, unconfigured and paused-rebase policies distinct", () => {
+  assert.deepEqual(workingAiComposeDecision(false, false), { kind: "unconfigured" });
+  assert.deepEqual(nativeWorkingAiComposeRequest(false, false), undefined);
+  assert.deepEqual(nativeWorkingAiComposeRequest(true, false), {
+    type: "openCompose", mode: "working", ai: true, thenEdit: false, messageOnly: false,
+  });
+  assert.deepEqual(nativeWorkingAiComposeRequest(true, true), {
+    type: "openCompose", mode: "working", ai: true, thenEdit: false, messageOnly: true,
+  });
 });

@@ -43,6 +43,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("gitRebaseVisual.worktree.discardAll", (element) => provider.nativeCommand("discardAllFiles", element)),
     vscode.commands.registerCommand("gitRebaseVisual.worktree.unstageAll", (element) => provider.nativeCommand("unstageAllFiles", element)),
     vscode.commands.registerCommand("gitRebaseVisual.worktree.stagedAiMessage", (element) => provider.nativeCommand("stagedAiMessage", element)),
+    vscode.commands.registerCommand("gitRebaseVisual.worktree.workingAiMessage", (element) => provider.nativeCommand("workingAiMessage", element)),
     vscode.commands.registerCommand("gitRebaseVisual.rebase.continue", (element) => provider.nativeCommand("continueRebase", element)),
     vscode.commands.registerCommand("gitRebaseVisual.rebase.abort", (element) => provider.nativeCommand("abortRebase", element)),
     vscode.commands.registerCommand("gitRebaseVisual.rebase.skip", (element) => provider.nativeCommand("skipRebase", element)),

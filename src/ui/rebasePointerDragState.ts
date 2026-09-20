@@ -36,18 +36,36 @@ export function pointerDropIntent(
 }
 
 /**
- * Native TreeView DnD always inserts before the dropped commit. The controller
- * never mutates provider rows while dragging, so there is no normal-flow hint
- * row or list shift; it only sends this immutable canonical intent on drop.
+ * The native controller never mutates provider rows while dragging, so there
+ * is no normal-flow hint row or list shift; it only sends an immutable canonical
+ * intent on drop.
  */
 export function nativeTreeDropIntent(
   sourceHash: string,
   targetHash: string,
   canonicalOrder: readonly string[],
-  revision: number
-): { sourceHash: string; anchorHash: string; placement: "before"; revision: number; order: string[] } | undefined {
-  const order = reorderAround(canonicalOrder, sourceHash, targetHash, "before");
-  return order ? { sourceHash, anchorHash: targetHash, placement: "before", revision, order } : undefined;
+  revision: number,
+  placement: ReorderPlacement = "before"
+): { sourceHash: string; anchorHash: string; placement: ReorderPlacement; revision: number; order: string[] } | undefined {
+  const order = reorderAround(canonicalOrder, sourceHash, targetHash, placement);
+  return order ? { sourceHash, anchorHash: targetHash, placement, revision, order } : undefined;
+}
+
+/**
+ * Native TreeView has no item below the final row to receive a drop. Model that
+ * boundary explicitly as "after newest" while retaining the normal validated
+ * source/anchor/revision payload rather than inventing a synthetic hash.
+ */
+export function nativeTreeDropAtEndIntent(
+  sourceHash: string,
+  canonicalOrder: readonly string[],
+  revision: number,
+  lockedHashes: ReadonlySet<string> = new Set<string>()
+): { sourceHash: string; anchorHash: string; placement: "after"; revision: number; order: string[] } | undefined {
+  const newest = canonicalOrder.at(-1);
+  if (!newest || lockedHashes.has(newest)) return undefined;
+  const order = reorderAround(canonicalOrder, sourceHash, newest, "after");
+  return order ? { sourceHash, anchorHash: newest, placement: "after", revision, order } : undefined;
 }
 
 /** Returns the canonical one-step keyboard move, including its complete order. */

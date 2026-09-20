@@ -28,6 +28,7 @@ import "./webviewDom.test";
 import "./nativeCommitTree.test";
 import "./commitDetailCache.test";
 import "./nativeCommandIntent.test";
+import "./nativeManifest.test";
 import "./gitRunner.integration.test";
 import "./llmClient.test";
 import "./message.test";

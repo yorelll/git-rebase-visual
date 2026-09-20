@@ -195,6 +195,11 @@
         "category": "Git Rebase"
       },
       {
+        "command": "gitRebaseVisual.worktree.workingAiMessage",
+        "title": "Generate Commit Message for Working Changes…",
+        "category": "Git Rebase"
+      },
+      {
         "command": "gitRebaseVisual.rebase.continue",
         "title": "Continue Rebase",
         "category": "Git Rebase"
@@ -266,22 +271,22 @@
       "view/item/context": [
         {
           "command": "gitRebaseVisual.commit.copyHash",
-          "when": "view == gitRebaseVisual.commits && (viewItem == gitRebaseVisual.commit || viewItem == gitRebaseVisual.commit.locked)",
+          "when": "view == gitRebaseVisual.commits && (viewItem == gitRebaseVisual.commit || viewItem == gitRebaseVisual.commit.locked || viewItem == gitRebaseVisual.commit.batch || viewItem == gitRebaseVisual.commit.batch.contiguous || viewItem == gitRebaseVisual.commit.locked.batch || viewItem == gitRebaseVisual.commit.locked.batch.contiguous)",
           "group": "navigation@1"
         },
         {
           "command": "gitRebaseVisual.commit.copyMessage",
-          "when": "view == gitRebaseVisual.commits && (viewItem == gitRebaseVisual.commit || viewItem == gitRebaseVisual.commit.locked)",
+          "when": "view == gitRebaseVisual.commits && (viewItem == gitRebaseVisual.commit || viewItem == gitRebaseVisual.commit.locked || viewItem == gitRebaseVisual.commit.batch || viewItem == gitRebaseVisual.commit.batch.contiguous || viewItem == gitRebaseVisual.commit.locked.batch || viewItem == gitRebaseVisual.commit.locked.batch.contiguous)",
           "group": "navigation@2"
         },
         {
           "command": "gitRebaseVisual.commit.openDiff",
-          "when": "view == gitRebaseVisual.commits && (viewItem == gitRebaseVisual.commit || viewItem == gitRebaseVisual.commit.locked)",
+          "when": "view == gitRebaseVisual.commits && (viewItem == gitRebaseVisual.commit || viewItem == gitRebaseVisual.commit.locked || viewItem == gitRebaseVisual.commit.batch || viewItem == gitRebaseVisual.commit.batch.contiguous || viewItem == gitRebaseVisual.commit.locked.batch || viewItem == gitRebaseVisual.commit.locked.batch.contiguous)",
           "group": "navigation@3"
         },
         {
           "command": "gitRebaseVisual.commit.generateDiff",
-          "when": "view == gitRebaseVisual.commits && (viewItem == gitRebaseVisual.commit || viewItem == gitRebaseVisual.commit.locked)",
+          "when": "view == gitRebaseVisual.commits && (viewItem == gitRebaseVisual.commit || viewItem == gitRebaseVisual.commit.locked || viewItem == gitRebaseVisual.commit.batch || viewItem == gitRebaseVisual.commit.batch.contiguous || viewItem == gitRebaseVisual.commit.locked.batch || viewItem == gitRebaseVisual.commit.locked.batch.contiguous)",
           "group": "navigation@4"
         },
         {
@@ -373,6 +378,11 @@
           "command": "gitRebaseVisual.worktree.discardAll",
           "when": "view == gitRebaseVisual.commits && viewItem == gitRebaseVisual.worktree.workingSection",
           "group": "danger@1"
+        },
+        {
+          "command": "gitRebaseVisual.worktree.workingAiMessage",
+          "when": "view == gitRebaseVisual.commits && viewItem == gitRebaseVisual.worktree.workingSection",
+          "group": "edit@1"
         },
         {
           "command": "gitRebaseVisual.worktree.unstageAll",

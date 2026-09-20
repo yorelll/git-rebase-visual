@@ -32,7 +32,13 @@ export function nativeCommandIntent(
   }
   if (element?.kind === "message" && element.rebase?.stoppedCommit) intent.hash = element.rebase.stoppedCommit.commit.hash;
   if (type === "bulkLock" || type === "bulkDrop" || type === "bulkGenerateDiff") {
-    if (selectedHashes.length < 2) return undefined;
+    // VS Code invokes a context command with the row under the pointer. Never
+    // let that row authorize an unrelated existing multi-selection.
+    if (
+      element?.kind !== "commit" ||
+      selectedHashes.length < 2 ||
+      !selectedHashes.includes(element.commit.hash)
+    ) return undefined;
     delete intent.hash;
     intent.hashes = [...selectedHashes];
     if (type === "bulkGenerateDiff") intent.revision = canonicalRevision;

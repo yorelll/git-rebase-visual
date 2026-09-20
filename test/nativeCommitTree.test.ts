@@ -7,7 +7,16 @@ const hash = "a".repeat(40);
 class FakeMarkdownString {
   value = "";
   isTrusted = false;
-  appendMarkdown(value: string): void { this.value += value; }
+  readonly markdownFragments: string[] = [];
+  readonly textFragments: string[] = [];
+  appendMarkdown(value: string): void {
+    this.markdownFragments.push(value);
+    this.value += value;
+  }
+  appendText(value: string): void {
+    this.textFragments.push(value);
+    this.value += value;
+  }
 }
 
 class FakeTreeItem {
@@ -72,7 +81,39 @@ test("native commit item has a workbench tooltip and context value", () => withN
   assert.ok(item.tooltip instanceof FakeMarkdownString);
   assert.match((item.tooltip as FakeMarkdownString).value, new RegExp(hash));
   assert.match((item.tooltip as FakeMarkdownString).value, /Use native context menu/);
-  assert.equal(item.command?.command, "gitRebaseVisual.commit.openDiff");
+  assert.equal(item.command, undefined, "clicking a commit row must only update TreeView selection");
+}));
+
+test("native commit tooltip appends Git-controlled metadata as literal text", () => withNativeTree((native) => {
+  const injection = "[look](https://attacker.test) ![image](https://attacker.test/pixel) **format**";
+  const item = native.nativeCommitTreeItem({
+    kind: "commit",
+    commit: {
+      hash,
+      shortHash: hash.slice(0, 8),
+      subject: injection,
+      author: injection,
+      authorEmail: injection,
+      date: injection,
+    },
+    locked: false,
+    stopped: false,
+    pending: false,
+    detail: {
+      author: injection,
+      email: injection,
+      relDate: injection,
+      absDate: injection,
+      stat: injection,
+      message: injection,
+    },
+  }) as unknown as FakeTreeItem;
+  const tooltip = item.tooltip as FakeMarkdownString;
+  assert.equal(tooltip.isTrusted, false);
+  assert.ok(tooltip.textFragments.length >= 8);
+  assert.ok(tooltip.textFragments.every((fragment) => fragment === injection || fragment === hash));
+  assert.ok(!tooltip.markdownFragments.some((fragment) => fragment.includes("attacker.test")));
+  assert.ok(!tooltip.markdownFragments.some((fragment) => fragment.includes("**format**")));
 }));
 
 test("native commit contexts keep ordinary menus available for selected, locked, and multi states", () => withNativeTree((native) => {
