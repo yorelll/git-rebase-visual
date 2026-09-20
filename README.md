@@ -79,10 +79,10 @@ commit 的详情由 VS Code 原生 TreeView tooltip 显示，包含 subject、ha
 ### 7. 文件级 SCM、连续生成 Diff 与可靠交互（0.7.0）
 
 - **文件级工作区恢复**：在既有 **Staged Changes / Changes** 的 Git porcelain v2 结构化列表上，支持单文件暂存、working/staged restore 和经确认删除未跟踪文件。文件名或打开按钮继续使用原生 VS Code `vscode.diff` 展示 index ↔ working、HEAD ↔ index 或 commit parent ↔ commit 的左右 Diff；rename、delete、root、nested path、binary 与多文件选择均有受控处理。
-- **连续区间生成 Diff**：右键单个 commit，或 Ctrl/Cmd 多选时间轴中无空洞的连续 commit，可生成扩展私有的只读 Diff snapshot。非连续选择会置灰并说明“仅支持连续 commit”；host 会独立拒绝未知、重复、过期或有空洞的请求，不能通过伪造 webview message 绕过。
-- **选择与右键一致性**：普通单击只更新 active context；Ctrl/Cmd+单击才切换多选。右击未选 commit 会先清除旧集合并以该 commit 作为单项目标，右击已选 commit 才保留批量 lock/drop/Diff 集合。
-- **IME 与重排稳定性**：筛选支持 `author:`、`msg:`、`hash:` 和 `hash:0x...`，中文 IME composition 期间不会重建输入框或触发全局快捷键。pointer/native drag 会保留开始时的 revision 与完整 canonical order；拖拽中收到刷新时，旧手势不会按新列表重新解释。`Alt+↑/↓` 可作为单项一步重排兜底。
-- **暂停 rebase 的文件写入策略**：stage/restore 是受 busy 串行化的 mutation；仅 edit stop 的明确 allow-list 可在暂停期间执行。滚动、选择、IME、刷新和只读 Diff 均为无副作用流量，不会反复显示 paused-rebase 警告。
+- **连续区间生成 Diff**：右键单个 commit，或 Ctrl/Cmd 多选无空洞的连续 commit，可生成扩展私有的只读 Diff snapshot。非连续选择不会暴露批量 Generate Diff 菜单；host 仍会独立拒绝未知、重复、过期或有空洞的请求，不能通过伪造命令参数绕过。
+- **选择与右键一致性**：普通单击只更新选择；Ctrl/Cmd+单击可建立多选。原生 context menu 基于 VS Code 当前的 context target 和 `contextValue` 显示可用操作；批量 lock/drop/Diff 仍由宿主按当前选择、连续性和锁定状态重新验证。
+- **原生拖拽稳定性**：native DnD 会保留开始时的 revision 与完整 canonical order；拖拽中收到 routine 状态刷新时，旧手势不会按新列表重新解释。宿主会在确认前后拒绝过期顺序、锁定项或无效 anchor。
+- **暂停 rebase 的文件写入策略**：stage/restore 是受 busy 串行化的 mutation；仅 edit stop 的明确 allow-list 可在暂停期间执行。选择、刷新和只读 Diff 均为无副作用流量，不会反复显示 paused-rebase 警告。
 
 ### 8. 受控 Undo、步骤进度与编辑器 Compose（0.6.0）
 
@@ -91,7 +91,7 @@ commit 的详情由 VS Code 原生 TreeView tooltip 显示，包含 subject、ha
 - **停靠工作区与 Skip**：edit 停靠提供 Amend 当前 commit、新建 commit、仅生成 message；Skip 仅在冲突暂停时可用，且会确认即将丢弃的 patch。
 - **更完整的操作能力**：支持 squash、fixup、复制 message 和只读 diff；首项、locked 当前/前驱及 rebase 中等不安全场景会禁用并解释。
 - **编辑器区 Compose Panel**：message 编辑迁移到独立编辑器区 Panel，支持 subject/body、50/72 提示、72 列参考、折叠原 message/trailer、AI cancel/replace/append/恢复 draft。
-- **筛选与键盘**：支持搜索、Ctrl/Cmd 多选、连续 locked run 安全折叠；可用 Space、Arrow、Home/End、Alt+Arrow 和 Escape 完成键盘重排，菜单支持方向键导航。
+- **选择与原生菜单**：支持 Ctrl/Cmd 多选和连续 locked run 安全折叠；可用 Shift+F10 或 Menu 键打开当前 commit 的原生操作菜单，菜单本身遵循 VS Code 的键盘导航与焦点行为。
 
 ### 测试与发布校验
 

@@ -44,6 +44,7 @@
 | `67352fc8425082fdf67f0bee16e32051824faf4a` | `fix: retain inspector during panel focus` | [`code-review-0-7-4.md`](code-review-0-7-4.md) | [`review-response-0-7-4.md`](review-response-0-7-4.md) — 0-7-4 回复 | 已评审；v0.7.1 最终整改汇总 | 2026-09-14 | `5e9f399` 的整合等价 cherry-pick；仅真实 TextEditor interaction 关闭 inspector。 |
 | `348e84e5a385cb82b5cea2d7f77226aa46051609` | `fix: keep cross-pane commit preview readable` | [`code-review-0-7-4.md`](code-review-0-7-4.md) | [`review-response-0-7-4.md`](review-response-0-7-4.md) — 0-7-4 回复 | 已评审；v0.7.1 最终整改汇总 | 2026-09-14 | `7c584b4` 的整合等价 cherry-pick；preview 可移至右侧阅读/复制。 |
 | `a7626f652294ab2d46257f3b02feabdfec835f96` | `fix: harden refresh feedback and file deletion` | [`code-review-0-7-4.md`](code-review-0-7-4.md) | [`review-response-0-7-4.md`](review-response-0-7-4.md) — 0-7-4 回复 | 已评审；v0.7.1 最终整改汇总 | 2026-09-14 | `6bec006` 的整合等价 cherry-pick；manual Refresh feedback 与删除确认后 fresh status revalidation。 |
+| `1075328e2c4500df1adfdb1e8d0ab7fc332b2166` | `docs: align 0.7.2 native TreeView documentation` | [`code-review-0-7-2-docs.md`](code-review-0-7-2-docs.md) | — | 已评审；发现 P1，未批准发布 | 2026-09-20 | 复核 V072-F1 文档整改：Inspector 当前路径叙述已更正；仍发现旧 Webview 搜索/键盘交互被作为当前原生能力描述。 |
 
 > `code-review-0-7-1.md`、`code-review-0-7-2.md`、`code-review-0-7-3.md` 及对应回复保留为未发布 0.7.1 开发过程的原始独立审查证据。v0.7.1 的最终发行汇总记录为 [`code-review-0-7-4.md`](code-review-0-7-4.md) 与 [`review-response-0-7-4.md`](review-response-0-7-4.md)；本表以精确实际 SHA 作为覆盖依据。
 
