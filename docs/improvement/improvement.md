@@ -17,6 +17,10 @@
 * \[x] 大仓库性能：patch-id session cache 与 `--numstat` 结构化 hover 统计（P2-3 部分，v0.4.0）。
 * \[x] Stash 恢复可见性：精确 stash@{n} 提示 + `stashList` 命令（P2-1，v0.4.0）。
 * \[x] 安全与可移植（部分）：Git 最低版本检查与 SecretStorage 接入管线（P2-5 部分，v0.4.0）。
+* \[x] **恢复对账不再自动删除 stash（0.8.0）**：恢复全程只用 `git stash apply`，自动路径上不存在任何 `git stash drop` / `git stash pop` / `git stash clear`；`stashDropBySha`、`stashPopBySha`、`dropConfirmed`、`dropListedStash`、`pathEverHeldBlob`、`blobIntroducedInRange` 等只为“是否允许 drop”服务的实现已整体删除。记录只在内容被**正面确认**已在工作区/暂存区/HEAD 中时才清除，确认不了就保留记录、横幅与 stash；误判的最坏结果是“多留一个 stash”。退役原因：任何“内容是否已包含”的推断都存在盲区——blob id 不含文件模式（`chmod +x` 前后同一 blob），revert 形状的 amend 在 `git log --raw` 中不产生该路径的记录，`--find-object` 会把别的文件里的同字节 commit 当成证据；这些盲区在“确认即删除”的前提下会删掉唯一副本，而在“确认才清记录”的前提下只会多留一个可手动处理的 stash。新增的 `stagedSnapshotInHead` 用 `git ls-tree -z` 逐路径比对 mode + object，且其否定结果只影响记录是否清除。
+* \[x] 恢复对账的其余改进（0.8.0）：索引匹配不再单独代表整个快照，残留的未暂存/未跟踪内容（`stash^2..stash` 与 `stash^3`）必须回到工作区或保留记录，冲突路径绝不覆盖；工作区 stash 与 change stash 的结果合并而不是互相抑制。
+* \[x] 残留的已跟踪路径以“工作区内容等于快照 blob 或路径缺失”为唯一写回条件，不再把“工作区等于 HEAD”当作未改动，避免覆盖用户已提交的更新内容（v0.8.0）。
+* \[x] 发布不携带 sourcemap 源码：release 构建默认 `sourcemap: false`，`release.yml` 校验 VSIX 无 `.map`（v0.8.0）。
 
 \---
 
@@ -56,7 +60,9 @@
 * 考虑提供“打开 Git stash 列表”命令，而不是自动替用户丢弃冲突中的安全副本；
 * 覆盖 original index apply 成功、worktree stash pop 冲突、外部 pop 三种组合。
 
-> 裁决（2026-09-03）：✅ 已实施。`popPendingStash`/`restorePendingAppend`/`restoreAppendSnapshot` 冲突提示改为精确 `stash@{n}` 名称 + 短 sha + 可执行的手动恢复命令（`git stash list` / `git stash pop <name>`）；新增 `gitRebaseVisual.stashList` 命令（优先调用 `git.openStash`，降级列出到 Output）。三种组合中“original index apply 成功 / worktree stash pop 冲突 / 外部 pop”已有既有集成测试覆盖（`worktree.integration.test.ts` / `appendStaged.integration.test.ts`），并新增 `stashList` 名称/sha 测试。
+> 裁决（2026-09-03）：✅ 已实施。`popPendingStash`/`restorePendingAppend`/`restoreAppendSnapshot` 冲突提示改为精确 `stash@{n}` 名称 + 短 sha + 可执行的手动恢复命令；新增 `gitRebaseVisual.stashList` 命令（优先调用 `git.openStash`，降级列出到 Output）。三种组合中“original index apply 成功 / worktree stash 冲突 / 外部 pop”已有既有集成测试覆盖（`worktree.integration.test.ts` / `appendStaged.integration.test.ts`），并新增 `stashList` 名称/sha 测试。
+>
+> 0.8.0 修订：恢复命令不再建议 `git stash pop <name>`（pop 会删除条目，冲突时消耗唯一副本），改为 `git stash apply --index <name>` / `git stash apply <name>`，删除单列为需要用户自己确认的 `git stash drop <name>`。另外 `gitRebaseVisual.stashList` 只在 `activate` 里注册，未写入 `contributes.commands`，因此不会出现在命令面板里；README 已改为描述实际可用的入口（冲突提示、待恢复横幅与 reset 报告中的精确槽位）。是否把它补进 `contributes.commands` 属功能决定，未在 0.8.0 改动。
 
 ### P2-2. Commit 历史功能
 
@@ -109,9 +115,26 @@
 * 定义发布产物签名/校验策略后再引入签名；
 * 可选增加手动触发的完整 CI（非 tag）以便提前发现平台差异。
 
-> 裁决（2026-09-03）：❌ 未实施。现有 `.github/workflows/release.yml` 已用 `--generate-notes` 生成提交索引、`RELEASE.md` 人工记录并用门禁校验版本段落存在；release-body 同步脚本会覆盖人工措辞、签名需要先定信任/分发策略、手动触发 CI 需评估 fork/secret 风险。三者均属发布流程决策，非代码缺陷，保留规划。
+> 裁决（2026-09-03）：❌ 未实施。`RELEASE.md` 人工记录并由门禁校验版本段落存在；release-body 同步脚本会覆盖人工措辞、签名需要先定信任/分发策略、手动触发 CI 需评估 fork/secret 风险。三者均属发布流程决策，非代码缺陷，保留规划。
+>
+> 0.8.0 修订：本条原先记录“`release.yml` 已用 `--generate-notes` 生成提交索引”，该描述已过时——自 0.5.1 起 workflow 以版本化 `docs/release-notes/<version>.md` 作为最终 Release body（`gh release create --notes-file`），并校验标题版本、无未替换占位符与 `RELEASE.md` 版本记录；`--generate-notes` 与事后编辑均已不再使用。因此本条剩余范围只有产物签名/校验策略与手动触发完整 CI。编号与范围来源：`review-response-0-4-0.md` 的 P2-7 条目；其中产物签名一项可追溯到 `code-review-0-3-0.md` 的 CI-D。
 
 \---
+
+## P3：低优先级（保留规划）
+
+### P3-1. 恢复流程的 Git 超时与孙进程泄漏
+
+> 来源：0.8.0 实施与自测中记录的两项残留，不是外部评审条目——`code-review-0-8-0.md` / `code-review-0-8-1.md` 只就进程回收的**表述**与用例有效性提出问题，没有提出专用恢复超时，因此这一项没有可引用的 review 编号。
+
+* 恢复轮次在 mutation lock 内执行，内部 `runGit` 若撞上一个挂住的 hook 会一直占用写锁直到默认 120s 超时；考虑给内部对账调用使用更短的专用超时（例如 15–20s），让写锁更快回到用户手里。
+* `taskkill /T /F` 只能沿树根枚举，已经脱离或期间新建的孙进程仍可能存活。这已不再阻塞结算（`exit` 即结算），但会留下进程泄漏；彻底解决需要 Job Object（Windows）或 cgroup（Linux），超出一次修复的范围。
+
+> 裁决（2026-09-03）：⏳ 部分处理。孙进程泄漏的**表述**已修正：`gitRunner.ts` 的 `killProcessTree` 文档、`RELEASE.md` 与 0.8.0 说明不再声称“回收整棵进程树”，而是“尝试回收”；实际行为（`taskkill` 尽力而为 + 直接 kill 兜底）未变，也不再有 EPERM，仅可能残留脱离的孙进程。专用恢复超时仍是待办。
+>
+> 补充（2026-10-26）：回收判活的回归用例本身也曾是空洞的——Git for Windows 的 hook 写出的 `$!` 是 MSYS pid，而断言用 Windows 的 `process.kill(pid, 0)` 探测，两者命名空间不同，用例通过时并不证明任何回收行为。现在 hook 改写 `/proc/$!/winpid`，断言前先确认该 pid 确实存活（正向对照），再要求超时后被回收；把 `killProcessTree` 临时改回“先直接 kill”后该用例会失败（已实测），恢复后通过。另一项实测结论：即使修复生效，hook 用 `&` 自守护时仍可能有一个 `sleep.exe` 在回收窗口之后存活到它自己的 `sleep 30` 结束——这是 P3-1 描述的**真实且未消除**的泄漏，`taskkill /T /F` 沿树根枚举时抓不到已脱离的孙进程，不是用例失败。
+>
+> 补充（2026-10-26，第二项）：另一个用例（`runGit settles on exit…`）自身会泄漏，且与产品行为无关——它的 hook 用 `while [ ! -f marker ]` 无限循环，清理时先写 marker 再 `removeRepo`；一旦删除目录先于 shell 观察到 marker，marker 就不可能再出现，循环会在已删除的临时目录里永远 `sleep 0.1`。现在该 hook 的循环带上 200 次上限，清理时先等孙进程真正退出再删目录（孙进程 pid 同样取自 `/proc/$!/winpid`）。连续三次运行后进程表干净。
 
 ## 验收原则
 

@@ -2,7 +2,7 @@
   "name": "git-rebase-visual",
   "displayName": "Git Rebase Visual",
   "description": "Visual interactive rebase: drag to reorder commits, reword, lock, and AI-generated commit messages.",
-  "version": "0.7.1",
+  "version": "0.8.0",
   "publisher": "local",
   "repository": {
     "type": "git",
@@ -73,6 +73,23 @@
         "command": "gitRebaseVisual.reveal",
         "title": "Show Git Rebase Visual",
         "category": "Git Rebase"
+      },
+      {
+        "command": "gitRebaseVisual.openLogs",
+        "title": "Open Logs",
+        "category": "Git Rebase",
+        "icon": "$(output)"
+      },
+      {
+        "command": "gitRebaseVisual.forceReleaseMutation",
+        "title": "Force Release Stuck Operation",
+        "category": "Git Rebase"
+      },
+      {
+        "command": "gitRebaseVisual.resetState",
+        "title": "Reset Extension State",
+        "category": "Git Rebase",
+        "icon": "$(debug-rerun)"
       }
     ],
     "menus": {
@@ -180,7 +197,7 @@
   "scripts": {
     "compile": "node esbuild.js",
     "watch": "node esbuild.js --watch",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.test.json --noEmit",
     "test": "tsx --test test/index.test.ts",
     "test:coverage": "tsx --test --experimental-test-coverage test/index.test.ts",
     "test:release": "npm run typecheck && npm run test:coverage",

@@ -6,7 +6,7 @@
   const sourceForAction = (type) => {
     if (["reorder"].includes(type)) return "webview:reorder";
     if (["stageFile", "restoreFile", "stageAllFiles", "discardAllFiles", "unstageAllFiles"].includes(type)) return "webview:worktree-mutation";
-    if (["requestDetail", "openCommitInspector", "openBatchInspector", "openDiff", "generateDiff", "bulkGenerateDiff", "openWorktreeDiff", "copyHash", "copyMessage", "copyText"].includes(type)) return "webview:read";
+    if (["requestDetail", "openDiff", "generateDiff", "bulkGenerateDiff", "openWorktreeDiff", "copyHash", "copyMessage", "copyText"].includes(type)) return "webview:read";
     if (["ready", "refresh"].includes(type)) return "webview:lifecycle";
     return "webview:ui";
   };
@@ -106,6 +106,20 @@
     bannerEl.innerHTML = "";
     if (!state.rebaseInProgress) {
       if (state.error) { bannerEl.className = "banner error"; bannerEl.textContent = state.error; bannerEl.classList.remove("hidden"); }
+      else if (state.recoveryNotice) {
+        // Persistent, dismissible recovery banner. The commit list stays usable
+        // underneath: a stale bookkeeping record must never hide history.
+        bannerEl.className = "banner recovery";
+        const titleEl = document.createElement("div"); titleEl.className = "banner-title"; titleEl.textContent = "待恢复的改动";
+        const textEl = document.createElement("div"); textEl.textContent = state.recoveryNotice;
+        const actions = document.createElement("div"); actions.className = "banner-actions";
+        actions.append(
+          button("打开日志", () => vscode.postMessage({ type: "openLogs" })),
+          button("关闭提示", () => vscode.postMessage({ type: "dismissRecoveryNotice" }))
+        );
+        bannerEl.append(titleEl, textEl, actions);
+        bannerEl.classList.remove("hidden");
+      }
       else bannerEl.classList.add("hidden");
       return;
     }
@@ -429,8 +443,7 @@
     row.addEventListener("contextmenu", (event) => {
       event.preventDefault();
       selectContextTarget(c);
-      const hashes = selectedMultiple() ? [...selectedHashes] : undefined;
-      vscode.postMessage(hashes ? { type: "openBatchInspector", hashes } : { type: "openCommitInspector", hash: c.hash });
+      openMenu(event.clientX, event.clientY, c, row);
     });
     row.addEventListener("click", (event) => selectRow(event, c));
     row.addEventListener("keydown", (event) => rowKeydown(event, c));
@@ -468,7 +481,7 @@
     if (selectedHashes.size) { selectedHashes.clear(); selectionAnchor = null; renderList(); }
   }
   function rowKeydown(event, c) {
-    if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) { event.preventDefault(); selectContextTarget(c); const hashes = selectedMultiple() ? [...selectedHashes] : undefined; vscode.postMessage(hashes ? { type: "openBatchInspector", hashes } : { type: "openCommitInspector", hash: c.hash }); return; }
+    if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) { event.preventDefault(); selectContextTarget(c); const r = event.currentTarget.getBoundingClientRect(); openMenu(r.left + 8, r.bottom, c, event.currentTarget); return; }
     if ((event.ctrlKey || event.metaKey) && event.key === " ") { event.preventDefault(); selectRow({ ctrlKey: true, target: event.currentTarget }, c); return; }
     if (event.altKey && (event.key === "ArrowUp" || event.key === "ArrowDown")) {
       event.preventDefault();
@@ -608,23 +621,22 @@
   // postMessage nor persistUi; __grvUiTrace exposes that invariant to tests.
   document.addEventListener("scroll", () => { menuScrollCloseCount++; closeMenu(); }, true); window.addEventListener("resize", closeMenu);
 
-  // Commit detail is deliberately shown in the VS Code editor-area inspector,
-  // never as a fixed sidebar tooltip that can cover other commit rows.
-  function scheduleTooltip(c) {
-    if (tipTimer) clearTimeout(tipTimer);
-    tipHash = c.hash;
-    tipTimer = setTimeout(() => vscode.postMessage({ type: "requestDetail", hash: c.hash }), 400);
+  // Commit detail belongs to the sidebar: a hover opens a floating tooltip over
+  // the adjacent timeline area. It is dismissed as soon as the pointer leaves
+  // the row (with a short grace so moving onto the tooltip keeps it open).
+  function scheduleTooltip(c, row) { if (tipTimer) clearTimeout(tipTimer); if (tipHideTimer) clearTimeout(tipHideTimer); tipHash = c.hash; tipAnchor = row; tipTimer = setTimeout(() => vscode.postMessage({ type: "requestDetail", hash: c.hash }), 400); }
+  function cancelTooltip() { if (tipTimer) clearTimeout(tipTimer); if (tipHideTimer) clearTimeout(tipHideTimer); tipHideTimer = setTimeout(() => { if (!tipOverTip) hideTooltip(); }, 200); }
+  function hideTooltip() { tooltipEl.classList.add("hidden"); tipHash = null; tipAnchor = null; }
+  function compactStat(stat) { const match = (stat || "").match(/(\d+) files? changed(?:, (\d+) insertions?\(\+\))?(?:, (\d+) deletions?\(-\))?/); return match ? `${match[1]} file${match[1] === "1" ? "" : "s"}${match[2] ? ` · +${match[2]}` : ""}${match[3] ? ` −${match[3]}` : ""}` : stat; }
+  function showDetail(d) {
+    if (d.hash !== tipHash || !tipAnchor) return; tooltipEl.innerHTML = "";
+    const top = document.createElement("div"); top.className = "tip-top"; const meta = document.createElement("div"); meta.className = "tip-meta"; meta.textContent = `${d.author} · ${d.relDate} · ${d.absDate}`;
+    const actions = document.createElement("div"); actions.className = "tip-actions"; actions.append(button("⧉", () => vscode.postMessage({ type: "copyText", text: d.message }), { title: "复制完整 message" }), button("◫", () => vscode.postMessage({ type: "openDiff", hash: d.hash }), { title: "打开变更" })); top.append(meta, actions);
+    const stat = document.createElement("div"); stat.className = "tip-stat"; stat.textContent = `${short(d.hash)} · ${compactStat(d.stat)}`;
+    const msg = document.createElement("pre"); msg.className = "tip-msg"; msg.textContent = d.message; tooltipEl.append(top, stat, msg); tooltipEl.classList.remove("hidden");
+    const r = tipAnchor.getBoundingClientRect(); const tw = tooltipEl.offsetWidth; const th = tooltipEl.offsetHeight; let topPos = r.bottom + 4; if (topPos + th > window.innerHeight - 4) topPos = Math.max(4, r.top - th - 4); tooltipEl.style.left = Math.max(4, Math.min(r.left, window.innerWidth - tw - 4)) + "px"; tooltipEl.style.top = topPos + "px";
   }
-  function cancelTooltip() {
-    if (tipTimer) clearTimeout(tipTimer);
-    // The detail lives in a separate editor group. Unlike an in-sidebar hover,
-    // it must remain readable/copyable after the pointer leaves this commit.
-    // A later preview, explicit action, or genuine external TextEditor event
-    // replaces/closes it through the host ownership coordinator.
-  }
-  function hideTooltip() { tipHash = null; tipAnchor = null; }
-  function showDetail() { /* Inspector panel owns detail presentation. */ }
-  tooltipEl.classList.add("hidden");
+  tooltipEl.addEventListener("mouseenter", () => { tipOverTip = true; }); tooltipEl.addEventListener("mouseleave", () => { tipOverTip = false; hideTooltip(); });
 
   function persistUi() { vscode.setState({ filterText, changesMoreOpen, expandedLockedRuns: [...expandedLockedRuns] }); }
   function restoreUi() { const saved = vscode.getState(); if (!saved) return; filterText = typeof saved.filterText === "string" ? saved.filterText : ""; changesMoreOpen = !!saved.changesMoreOpen; (saved.expandedLockedRuns || []).forEach((key) => expandedLockedRuns.add(key)); }
@@ -645,6 +657,11 @@
       // applied after the shared session ends, preserving its revision guard.
       if (drag) { deferredState = m; return; }
       state = m; render();
+    } else if (m.type === "recoveryNotice") {
+      // Dismissal applied without a full refresh, so a drag session in progress
+      // is never disturbed by hiding the banner.
+      state = { ...state, recoveryNotice: m.recoveryNotice };
+      renderBanner();
     } else if (m.type === "detail") showDetail(m);
     else if (m.type === "inlineToast") showInlineToast(m.message, m.duration);
     else if (m.type === "closeMenu") closeMenu();

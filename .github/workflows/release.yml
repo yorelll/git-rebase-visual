@@ -55,6 +55,9 @@ jobs:
           ! unzip -l "git-rebase-visual-$version.vsix" | grep -q 'extension/test/'
           ! unzip -l "git-rebase-visual-$version.vsix" | grep -q 'extension/docs/'
           ! unzip -l "git-rebase-visual-$version.vsix" | grep -q 'extension/node_modules/'
+          # Sourcemaps embed `sourcesContent` (the full TypeScript sources), so
+          # a shipped .map is both a source leak and dead weight at runtime.
+          ! unzip -Z1 "git-rebase-visual-$version.vsix" | grep -q '\.map$'
 
       - name: Verify final release body
         shell: bash

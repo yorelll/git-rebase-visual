@@ -200,15 +200,24 @@ test("streamChat mid-stream cancellation stops draining the response", async () 
 
 test("streamChat honours the deadline mid-stream", async () => {
   const chunks: string[] = [];
+  const started = Date.now();
   await withServer((_req, res) => {
     res.writeHead(200, { "Content-Type": "text/event-stream" });
     res.write('data: {"choices":[{"delta":{"content":"partial"}}]}\n\n');
     // The stream stays open, forcing the client deadline to fire mid-read.
   }, async (cfg) => {
+    // The budget must comfortably exceed a loopback round-trip: a 20 ms deadline
+    // raced it, so on a loaded host the timer could fire before the first delta
+    // was read and `chunks` would be empty through no fault of the client. The
+    // stream never closes, so any working deadline still ends the read.
     await assert.rejects(
-      () => streamChat(cfg, messages, (c) => chunks.push(c), { timeout: 20 }),
+      () => streamChat(cfg, messages, (c) => chunks.push(c), { timeout: 1000 }),
       /timed out/
     );
   });
   assert.deepEqual(chunks, ["partial"]);
+  assert.ok(
+    Date.now() - started >= 900,
+    "the deadline, not an earlier rejection, ended the stream"
+  );
 });

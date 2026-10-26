@@ -41,9 +41,7 @@ import { splitTrailers, applyTrailers } from "../git/message";
 import {
   stashPush,
   stashPushKeepIndex,
-  stashPopBySha,
   stashApplyIndexBySha,
-  stashDropBySha,
   stashPopManual,
   commitIndex,
   commitAll,
@@ -92,29 +90,44 @@ import { validateReorderRequest } from "./rebaseReorderState";
 import { nextCanonicalSnapshotRevision } from "./canonicalSnapshot";
 import { isDraftOnlyAiGenerationAllowedDuringRebase, isDraftOnlyComposeAllowedDuringRebase } from "./composePolicy";
 import { ComposePanel } from "./composePanel";
-import { CommitInspectorPanel } from "./commitInspectorPanel";
-import { InspectorPreviewCoordinator, InspectorSession } from "./inspectorPreviewState";
-import { shouldDismissInspectorForActiveTextEditor, shouldDismissInspectorForTextEditorSelection } from "./inspectorDismissPolicy";
 import { refreshFeedback } from "./refreshFeedbackPolicy";
+import {
+  MutationLock,
+  MutationOwner,
+  busyRejectionMessage,
+  mutationActionLabel,
+  staleLockDiagnostic,
+  staleLockMessage,
+} from "./mutationLock";
 import { UndoJournal, UndoRecord, undoPreflight } from "../git/undo";
+import { redactLogLine } from "../diagnostics/fileLogger";
+import { errorDiagnostic, logDiagnostic } from "../diagnostics/diagnostics";
+import {
+  PendingAppendRecord,
+  PendingReconcile,
+  reconcilePendingAppend,
+  reconcilePendingStash,
+  recoveryCommands,
+  resetDecision,
+  stashNameForSha,
+  stashPresence,
+} from "../git/pendingRecovery";
+import {
+  EMPTY_PENDING_WARNINGS,
+  PendingWarningState,
+  RecoveryCoordinator,
+  clearPendingWarnings,
+  currentBannerText,
+  dismissPendingWarning,
+  observePendingWarning,
+  runPendingRecovery,
+} from "./pendingRecoveryPolicy";
 
 const PENDING_STASH_KEY = "gitRebaseVisual.pendingStash";
 const PENDING_APPEND_KEY = "gitRebaseVisual.pendingAppend";
 let inlineToastSink: ((message: string, duration?: number) => void) | undefined;
 
-interface PendingAppend {
-  /** Full pre-append snapshot, including the original index and worktree. */
-  changeStash: string;
-  /** Recovery copy for worktree-only changes left after the amend. */
-  unstagedStash?: string;
-  /** Original target SHA; distinguishes an external abort from a completed replay. */
-  targetHash?: string;
-  /**
-   * True only after the staged snapshot has been committed into the edited
-   * target. Old persisted records default to false, the conservative choice.
-   */
-  amended?: boolean;
-}
+type PendingAppend = PendingAppendRecord;
 
 interface FromWebview {
   type: string;
@@ -127,7 +140,28 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
   private view?: vscode.WebviewView;
   private commits: Commit[] = [];
   private root?: string;
-  private busy = false;
+  /** Owner-identified write lock; replaces the old naked `busy` boolean. */
+  private readonly mutations = new MutationLock();
+  private watchdog?: NodeJS.Timeout;
+  /** Owner the armed watchdog belongs to; guards late cleanup from older work. */
+  private watchdogOwnerId?: number;
+  /** Last observed rebase progress, used to log state transitions once each. */
+  private lastRebaseState?: string;
+  /**
+   * Recovery performs Git writes, so it is single-flight per persisted record:
+   * overlapping poll/event refreshes await the same promise instead of queueing
+   * concurrent `stash apply` runs.
+   */
+  private readonly recovery = new RecoveryCoordinator();
+  /** Warnings are emitted once per (stash sha, reason), never once per poll. */
+  private pendingWarnings: PendingWarningState = EMPTY_PENDING_WARNINGS;
+  /** Recovery banner text shown alongside the normal commit list. */
+  private recoveryNotice?: string;
+  /** Pending/aborted recovery pass; coalesces overlapping refreshes. */
+  private recoveryPass?: Promise<void>;
+  /** Backoff state so a record that cannot resolve stops re-probing every poll. */
+  private recoveryFailures = 0;
+  private recoveryNotBefore = 0;
   private refreshQueued = false;
   private refreshGeneration = 0;
   /** Revision of the last fully published actionable commit snapshot. */
@@ -153,8 +187,6 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
   private readonly undo: UndoJournal;
   private readonly statusBar: vscode.StatusBarItem;
   private readonly compose: ComposePanel;
-  private readonly inspector: CommitInspectorPanel;
-  private readonly inspectorPreview = new InspectorPreviewCoordinator();
   private generationCancel?: AbortController;
   private readonly commitDiffCache = new Map<string, ReturnType<typeof commitDiffPlan>>();
 
@@ -165,16 +197,19 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     private readonly generatedDiffSnapshots: GeneratedDiffSnapshotStore
   ) {
     this.output = vscode.window.createOutputChannel("Git Rebase Visual");
+    // First line identifies the running build. Users can install a stale VSIX
+    // from a repo checkout, so the version must be visible without scrolling.
+    const buildVersion = String(ctx.extension?.packageJSON?.version ?? "0.0.0");
+    this.output.appendLine(
+      `Git Rebase Visual ${buildVersion} · ${ctx.extension?.extensionPath ?? "unknown"} · vscode ${vscode.version} · pid ${process.pid}`
+    );
     this.undo = new UndoJournal(ctx.workspaceState, ctx.globalState);
     this.statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
     this.statusBar.command = "gitRebaseVisual.reveal";
     this.statusBar.tooltip = "显示 Git Rebase Visual";
     this.compose = new ComposePanel(ctx.extensionUri, (message) => this.onMessage(message));
-    this.inspector = new CommitInspectorPanel(ctx.extensionUri, (message) => this.onMessage(message), () => {
-      this.inspectorPreview.invalidate();
-    });
     inlineToastSink = (message, duration) => this.postInlineToast(message, duration);
-    ctx.subscriptions.push(this.output, this.statusBar, this.compose, this.inspector, new vscode.Disposable(() => {
+    ctx.subscriptions.push(this.output, this.statusBar, this.compose, new vscode.Disposable(() => {
       if (inlineToastSink) inlineToastSink = undefined;
       this.commitDiffCache.clear();
       this.generatedDiffSnapshots.clear();
@@ -188,21 +223,10 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
       vscode.workspace.onDidDeleteFiles(() => this.scheduleRefresh()),
       vscode.workspace.onDidRenameFiles(() => this.scheduleRefresh()),
       vscode.workspace.onDidSaveTextDocument(() => this.scheduleRefresh()),
-      // A normal editor click lives outside the sidebar webview. WebviewPanel
-      // focus, however, may report no active TextEditor; treating that as an
-      // external editor click would self-close inspector action buttons.
-      vscode.window.onDidChangeActiveTextEditor((editor) => {
-        this.post({ type: "closeMenu", source: "host:activeEditor" });
-        if (!shouldDismissInspectorForActiveTextEditor(editor)) return;
-        this.cancelInspectorPreview(true);
-        this.inspector.close();
-      }),
-      vscode.window.onDidChangeTextEditorSelection((event) => {
-        this.post({ type: "closeMenu", source: "host:editorSelection" });
-        if (!shouldDismissInspectorForTextEditorSelection(event)) return;
-        this.cancelInspectorPreview(true);
-        this.inspector.close();
-      }),
+      // An editor click lives outside the webview document. Public window/editor
+      // events are the only reliable bridge for dismissing an open webview menu.
+      vscode.window.onDidChangeActiveTextEditor(() => this.post({ type: "closeMenu", source: "host:activeEditor" })),
+      vscode.window.onDidChangeTextEditorSelection(() => this.post({ type: "closeMenu", source: "host:editorSelection" })),
       vscode.window.onDidChangeWindowState(() => this.post({ type: "closeMenu", source: "host:windowState" })),
       new vscode.Disposable(() => {
         if (this.refreshTimer) {
@@ -210,6 +234,9 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
         }
         if (this.statusPoller) {
           clearInterval(this.statusPoller);
+        }
+        if (this.watchdog) {
+          clearTimeout(this.watchdog);
         }
       })
     );
@@ -272,7 +299,13 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     }
     this.refreshTimer = setTimeout(() => {
       this.refreshTimer = undefined;
-      if (this.busy) {
+      // The poll is also a self-heal point: a lock whose task settled but whose
+      // release was lost must not block background refreshes forever.
+      if (this.mutations.reapSettled()) {
+        this.disarmWatchdog();
+        this.refreshQueued = false;
+      }
+      if (this.mutations.isBusy()) {
         this.refreshQueued = true;
       } else if (this.view) {
         void this.refresh();
@@ -281,10 +314,10 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
   }
 
   private log(operation: string, message: string): void {
-    const safe = message
-      .replace(/(https?:\/\/)[^\s/@]+@/gi, "$1***@")
-      .replace(/(authorization:\s*bearer\s+)\S+/gi, "$1***");
+    // The OutputChannel and the session file receive the same redacted line.
+    const safe = redactLogLine(message);
     this.output.appendLine(`[${new Date().toISOString()}] ${operation}: ${safe}`);
+    logDiagnostic(operation, safe);
   }
 
   /** User-initiated title/command refresh with quiet polling kept separate. */
@@ -339,33 +372,20 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     const rebaseInProgress = await isRebaseInProgress(root);
 
     // Desync recovery: if we auto-stashed for a rebase that has since finished
-    // (possibly continued/aborted outside this UI, e.g. in a terminal), restore
-    // the stash now. A stash the user already popped is detected and cleared.
-    if (!rebaseInProgress && this.getPendingStash(root)) {
-      await this.popPendingStash(root, root);
-    }
-    if (!rebaseInProgress && this.getPendingAppend(root)) {
-      const pending = this.getPendingAppend(root)!;
-      const targetRewritten = pending.targetHash
-        ? (await runGit(["merge-base", "--is-ancestor", pending.targetHash, "HEAD"], { cwd: root })).code !== 0
-        : true;
-      const restored = await this.restorePendingAppend(root, root, !targetRewritten);
-      // A stale transaction that never amended must not become a silent loss
-      // when a rebase was continued outside the webview. Keep its recovery
-      // stash and surface an actionable warning instead.
-      if (!restored && !targetRewritten && !pending.amended) {
-        const name = await this.stashNameBySha(root, pending.changeStash);
-        toast("warn", `追加事务未完成，原始改动仍保存在 ${name}（stash: ${pending.changeStash.slice(0, 7)}）。请手动 apply --index 恢复。`);
-      }
-      // Do not render a normal actionable state while restoration itself has a
-      // conflict or an unfinished append needs manual recovery. A subsequent
-      // refresh may retry safely after the user resolves it.
-      if (!restored) {
-        return;
-      }
-    }
-    if (!isCurrent()) {
-      return;
+    // (possibly continued/aborted outside this UI, e.g. in a terminal), reconcile
+    // the persisted record with real Git state. Reconciliation never suppresses
+    // rendering: a record is bookkeeping, and a stale one must not hide the
+    // commit list. It is also single-flight, so the 1.5 s poll cannot start a
+    // second `stash apply` while one is still running.
+    // The banner reflects the persisted warning state, so a dismissal survives
+    // the next poll instead of being re-derived from the record.
+    this.recoveryNotice = currentBannerText(this.pendingWarnings);
+
+    // Recovery performs Git writes; it must not sit in front of the commit list
+    // (six to fourteen sequential Git calls, every 1.5 s, while a record stays
+    // pending). The list renders first and the pass runs afterwards.
+    if (!rebaseInProgress) {
+      void this.scheduleRecovery(root);
     }
 
     // During a rebase HEAD is detached; resolve the range against the branch
@@ -421,6 +441,16 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
       todoLines: todoFiles.todoLines,
       stoppedHash: stoppedAt,
     });
+    // Rebase transitions are logged once each, not on every 1.5s status poll.
+    const rebaseState = rebaseInProgress
+      ? `rebase ${progress.totalSteps !== undefined && progress.completedSteps !== undefined
+        ? `${Math.min(progress.completedSteps + 1, progress.totalSteps)}/${progress.totalSteps}`
+        : "unknown"} ${progress.pausedReason ?? "running"}`
+      : "idle";
+    if (rebaseState !== this.lastRebaseState) {
+      this.lastRebaseState = rebaseState;
+      this.log("rebase", `状态 ${rebaseState}${conflictPaths.length ? ` conflicts=${conflictPaths.length}` : ""}`);
+    }
     if (rebaseInProgress) {
       const position = progress.totalSteps !== undefined && progress.completedSteps !== undefined
         ? `${Math.min(progress.completedSteps + 1, progress.totalSteps)}/${progress.totalSteps}`
@@ -500,6 +530,7 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
       })),
       canonicalRevision: this.canonicalRevision,
       canonicalOrder: ordered.map((commit) => commit.hash),
+      recoveryNotice: this.recoveryNotice,
       commits: ordered.map((c) => ({
         hash: c.hash,
         shortHash: c.shortHash,
@@ -547,21 +578,46 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
 
   private async onMessage(m: FromWebview): Promise<void> {
     const source = typeof m.source === "string" ? m.source : "webview:unknown";
-    const intent = webviewMessageIntent(m.type);
     // Source/action diagnostics make accidental webview traffic traceable while
     // preserving a quiet host for scroll, pointer, focus, IME and toast events.
-    this.log("webview", `${source} action=${m.type} intent=${intent}`);
-    const gate = mutationGateDecision(m.type, { busy: this.busy, pausedRebase: false });
+    this.log("webview", `${source} action=${m.type} intent=${webviewMessageIntent(m.type)}`);
+    // Self-healing: if a previous owner's promise settled but its release was
+    // lost (e.g. the awaited call threw outside the try), free the lock here
+    // instead of reporting a phantom busy state forever.
+    const reaped = this.mutations.reapSettled();
+    if (reaped) {
+      this.log("mutation", `回收已结束但未释放的锁 id=${reaped.id} action=${reaped.action}`);
+      this.refreshQueued = false;
+    }
+    const intent = webviewMessageIntent(m.type);
+    const gate = mutationGateDecision(m.type, { busy: this.mutations.isBusy(), pausedRebase: false });
     if (gate.kind === "busy") {
-      toast("warn", "上一个操作尚未完成，请稍候。");
+      const rejection = this.mutations.rejection(this.mutations.current());
+      if (rejection) {
+        // Keep the message actionable but short: name the owner, not the queue.
+        toast("warn", busyRejectionMessage(rejection));
+      }
       return;
     }
     if (intent === "mutation") {
-      this.busy = true;
+      const acquired = this.mutations.tryAcquire({
+        action: m.type,
+        label: mutationActionLabel(m.type),
+        source,
+      });
+      if (!acquired.ok) {
+        // A concurrent message raced us between the gate and acquisition.
+        const rejection = this.mutations.rejection(acquired.owner);
+        if (rejection) toast("warn", busyRejectionMessage(rejection));
+        return;
+      }
+      this.armWatchdog(acquired.owner);
       try {
         await this.handleMessage(m);
       } finally {
-        this.busy = false;
+        this.mutations.markSettled(acquired.owner);
+        this.mutations.release(acquired.owner);
+        this.disarmWatchdog(acquired.owner);
         if (this.refreshQueued) {
           this.refreshQueued = false;
           void this.refresh();
@@ -570,6 +626,153 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
       return;
     }
     await this.handleMessage(m);
+  }
+
+  /**
+   * Bounded watchdog for a mutation whose awaited work never settles. It never
+   * force-releases on its own; it surfaces an actionable warning so the user (or
+   * the recovery command) can re-sync with Git before releasing.
+   */
+  private armWatchdog(owner: MutationOwner): void {
+    this.disarmWatchdog();
+    this.watchdogOwnerId = owner.id;
+    const deadline = this.mutations.staleAfterMs;
+    this.watchdog = setTimeout(() => {
+      this.watchdog = undefined;
+      this.watchdogOwnerId = undefined;
+      const current = this.mutations.current();
+      if (!current || current.id !== owner.id) return;
+      const rejection = this.mutations.rejection(current);
+      if (!rejection) return;
+      const diagnostic = staleLockDiagnostic(rejection, this.mutations.elapsedMs());
+      this.log("mutation", diagnostic);
+      void vscode.window
+        .showWarningMessage(staleLockMessage(rejection, this.mutations.elapsedMs()), "强制解除并刷新", "查看日志")
+        .then((choice) => {
+          if (choice === "强制解除并刷新") {
+            void this.forceReleaseMutationLock();
+          } else if (choice === "查看日志") {
+            void vscode.commands.executeCommand("gitRebaseVisual.openLogs");
+          }
+        });
+    }, deadline + 100);
+    this.watchdog.unref?.();
+  }
+
+  /** Disarms the watchdog only for its own owner, so a late cleanup is harmless. */
+  private disarmWatchdog(owner?: MutationOwner): void {
+    if (owner && this.watchdogOwnerId !== owner.id) return;
+    if (this.watchdog) {
+      clearTimeout(this.watchdog);
+      this.watchdog = undefined;
+    }
+    this.watchdogOwnerId = undefined;
+  }
+
+  /**
+   * Recovery path for a stuck lock. It never assumes in-memory state is true:
+   * the current Git state is re-read (rebase marker, conflicts, commit list) and
+   * the view is refreshed, so finishing an interrupted operation by hand in a
+   * terminal is safe and immediately reflected here.
+   */
+  public async forceReleaseMutationLock(): Promise<void> {
+    const released = this.mutations.forceRelease();
+    this.disarmWatchdog();
+    if (released) {
+      this.log(
+        "mutation",
+        `强制解除 id=${released.id} action=${released.action} source=${released.source} elapsedMs=${Math.max(0, Date.now() - released.startedAt)}`
+      );
+    }
+    const cwd = this.cwd();
+    let rebaseInProgress = false;
+    let conflicts: string[] = [];
+    if (cwd) {
+      try {
+        [rebaseInProgress, conflicts] = await Promise.all([isRebaseInProgress(cwd), conflictedFiles(cwd)]);
+      } catch (error) {
+        this.log("mutation", `强制解除后读取 Git 状态失败：${String((error as any)?.message ?? error)}`);
+      }
+    }
+    await this.refresh();
+    const detail = rebaseInProgress
+      ? `变基仍在进行中${conflicts.length ? `（${conflicts.length} 个冲突文件）` : ""}；请在面板 Continue 或 Abort。`
+      : "当前没有进行中的变基。";
+    this.log("mutation", `强制解除完成；${detail}`);
+    toast("info", `已解除操作锁并刷新。${detail}`);
+  }
+
+  /**
+   * Recovery command for orphaned bookkeeping.
+   *
+   * It reconciles against Git first and only then clears records that no longer
+   * hold anything. It **never** deletes a stash: `resetDecision` only decides
+   * whether a piece of bookkeeping is orphaned, and every stash it reports as
+   * still present is left untouched, with the exact manual commands shown so
+   * the user can act deliberately.
+   */
+  public async resetExtensionState(): Promise<void> {
+    const folder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    const root = folder ? await repoRoot(folder) : undefined;
+    if (!root) {
+      toast("warn", "未打开 Git 仓库，没有需要清理的状态。");
+      return;
+    }
+    const owner = this.mutations.current();
+    if (owner) {
+      // Never rewrite bookkeeping while a Git write is mid-flight: it may be the
+      // very operation that still owns this record.
+      const rejection = this.mutations.rejection(owner);
+      toast("warn", rejection ? busyRejectionMessage(rejection) : "有操作正在进行，请稍后再重置状态。");
+      return;
+    }
+    await this.reconcilePendingState(root);
+    const kept: string[] = [];
+    const cleared: string[] = [];
+    const stashSha = this.getPendingStash(root);
+    if (stashSha) {
+      const decision = resetDecision(await stashPresence(root, stashSha));
+      if (decision.action === "clear") {
+        await this.clearPendingStash(root);
+        cleared.push(`自动 stash 记录 ${stashSha.slice(0, 7)}（${decision.reason}）`);
+      } else {
+        // No fabricated `stash:<sha>` placeholder: Git has no such ref, so it
+        // would turn every printed command into one that cannot run.
+        const name = await stashNameForSha(root, stashSha);
+        const label = name ?? `sha ${stashSha.slice(0, 7)}（当前无法解析 stash@{n}）`;
+        kept.push(
+          `自动 stash ${label} ${decision.reason}；可手动执行 ${recoveryCommands(name, stashSha)[0].command}`
+        );
+      }
+    }
+    const append = this.getPendingAppend(root);
+    if (append) {
+      const decision = resetDecision(await stashPresence(root, append.changeStash));
+      if (decision.action === "clear") {
+        await this.clearPendingAppend(root);
+        cleared.push(`追加事务记录 ${append.changeStash.slice(0, 7)}（${decision.reason}）`);
+      } else {
+        const name = await stashNameForSha(root, append.changeStash);
+        const label = name ?? `sha ${append.changeStash.slice(0, 7)}（当前无法解析 stash@{n}）`;
+        kept.push(
+          `追加快照 ${label} ${decision.reason}；可手动执行 ${recoveryCommands(name, append.changeStash)[0].command}`
+        );
+      }
+    }
+    if (!this.getPendingStash(root) && !this.getPendingAppend(root)) {
+      this.pendingWarnings = clearPendingWarnings(this.pendingWarnings);
+    }
+    this.recoveryNotice = currentBannerText(this.pendingWarnings);
+    this.log(
+      "recovery",
+      `resetState cleared=[${cleared.join("; ")}] kept=[${kept.join("; ")}]`
+    );
+    await this.refresh();
+    const detail = [
+      cleared.length ? `已清除：${cleared.join("、")}` : "没有可清除的过期记录",
+      kept.length ? `已保留：${kept.join("、")}` : "",
+    ].filter(Boolean).join("；");
+    toast("info", `已重置扩展状态。${detail}。日志目录可通过 “Git Rebase: Open Logs” 打开。`, 6000);
   }
 
   private async handleMessage(m: FromWebview): Promise<void> {
@@ -687,19 +890,19 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
             "gitRebaseVisual.llm"
           );
           break;
+        case "openLogs":
+          await vscode.commands.executeCommand("gitRebaseVisual.openLogs");
+          break;
+        case "dismissRecoveryNotice":
+          // Dismissal hides the banner only; the record stays until its content
+          // is genuinely back, so the underlying warning cannot be lost. The
+          // key remains in `seen`, so a later pass cannot re-arm the same banner.
+          this.pendingWarnings = dismissPendingWarning(this.pendingWarnings);
+          this.recoveryNotice = undefined;
+          this.post({ type: "recoveryNotice", recoveryNotice: undefined });
+          break;
         case "requestDetail":
-          await this.openCommitInspector(cwd!, m.hash, "preview");
-          break;
-        case "dismissCommitPreview":
-          // Cross-pane preview remains available for reading/copying after the
-          // sidebar pointer leaves; explicit actions or real editor interaction
-          // replace/close it through InspectorPreviewCoordinator ownership.
-          break;
-        case "openCommitInspector":
-          await this.openCommitInspector(cwd!, m.hash, "single");
-          break;
-        case "openBatchInspector":
-          await this.openBatchInspector(m.hashes);
+          await this.sendDetail(cwd!, m.hash);
           break;
         case "reorder":
           await this.handleReorder(cwd!, m);
@@ -840,7 +1043,16 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
           const pendingAppend = this.getPendingAppend(this.root!);
           if (pendingAppend && !pendingAppend.amended) {
             const name = await this.stashNameBySha(cwd!, pendingAppend.changeStash);
-            toast("warn", `追加尚未到达 amend 步骤，原始改动仍保存在 ${name}（stash: ${pendingAppend.changeStash.slice(0, 7)}）。请 Abort 以自动恢复，不能 Continue。`);
+            const observed = observePendingWarning(
+              this.pendingWarnings,
+              pendingAppend.changeStash,
+              "追加尚未到达 amend 步骤",
+              `追加事务未完成：原始改动仍保存在 ${name}（sha ${pendingAppend.changeStash.slice(0, 7)}）。请 Abort 以自动恢复，不能 Continue。`
+            );
+            this.pendingWarnings = observed.state;
+            if (observed.shouldNotify) {
+              toast("warn", `追加尚未到达 amend 步骤，原始改动仍保存在 ${name}（sha ${pendingAppend.changeStash.slice(0, 7)}）。请 Abort 以自动恢复，不能 Continue。`);
+            }
             return;
           }
           const r = await continueRebase(cwd!);
@@ -849,7 +1061,7 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
           }
           // Restore the auto-stash once the rebase is fully done.
           if (!(await isRebaseInProgress(cwd!))) {
-            await this.popPendingStash(cwd!, this.root!);
+            await this.recoverPendingStash(cwd!, this.root!);
             const appendRestored = await this.restorePendingAppend(cwd!, this.root!);
             if (!appendRestored) {
               await this.refresh();
@@ -888,7 +1100,7 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
           await abortRebase(cwd!);
           if (this.pendingRewrite?.undoRecord) await this.undo.mark(this.pendingRewrite.undoRecord, "aborted");
           this.pendingRewrite = undefined;
-          await this.popPendingStash(cwd!, this.root!);
+          await this.recoverPendingStash(cwd!, this.root!);
           await this.restorePendingAppend(cwd!, this.root!, true);
           toast("info", "已 Abort 变基并请求恢复变基前历史。", 5000);
           await this.refresh();
@@ -897,7 +1109,9 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
       }
     } catch (e: any) {
       const message = String(e.message ?? e);
+      // The file log keeps the stack; the toast and OutputChannel stay concise.
       this.log(m.type, `失败 ${message}`);
+      errorDiagnostic(m.type, `失败 ${message}`, e);
       if (m.type === "apply") {
         this.compose.post({ type: "applyFailed", message });
       }
@@ -1229,44 +1443,223 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
   }
 
   /**
+   * Reconciles both persisted recovery records with authoritative Git state.
+   *
+   * Runs single-flight per record: a poll, a workspace event and a read action
+   * may all call this while one recovery is in flight, so the second caller
+   * awaits the same promise instead of queueing a second Git write. Nothing here
+   * trusts the persisted flag alone — the stash list, the index/worktree content
+   * and the `targetHash` ancestry decide what is actually true.
+   */
+  /**
+   * Starts a recovery pass without blocking the render path. Overlapping calls
+   * share one promise, and a pass that keeps ending in `pending` is retried with
+   * exponential backoff: probing an unresolvable record costs 6-14 Git calls,
+   * and repeating that every 1.5 s poll is pure waste.
+   */
+  private scheduleRecovery(root: string): Promise<void> {
+    if (this.recoveryPass) {
+      return this.recoveryPass;
+    }
+    if (Date.now() < this.recoveryNotBefore) {
+      return Promise.resolve();
+    }
+    const pass = this.reconcilePendingState(root)
+      .catch((error) => {
+        this.log("recovery", `恢复失败：${String((error as any)?.message ?? error)}`);
+      })
+      .finally(() => {
+        this.recoveryPass = undefined;
+        if (this.getPendingStash(root) || this.getPendingAppend(root)) {
+          this.recoveryFailures += 1;
+          const delay = Math.min(30_000, 1_500 * 2 ** Math.min(this.recoveryFailures, 4));
+          this.recoveryNotBefore = Date.now() + delay;
+        } else {
+          this.recoveryFailures = 0;
+          this.recoveryNotBefore = 0;
+        }
+      });
+    this.recoveryPass = pass;
+    return pass;
+  }
+
+  private async reconcilePendingState(root: string): Promise<void> {
+    const { stash, append } = await runPendingRecovery(this.recovery, {
+      pendingStash: () => this.getPendingStash(root),
+      pendingAppend: () => this.getPendingAppend(root),
+      reconcileStash: (sha) => reconcilePendingStash(root, sha),
+      reconcileAppend: (record) => reconcilePendingAppend(root, record),
+      settleStash: async (outcome) => {
+        await this.applyPendingOutcome(root, outcome, "autostash", async () => this.clearPendingStash(root));
+      },
+      settleAppend: async (outcome) => {
+        await this.applyPendingOutcome(root, outcome, "append", async () => this.clearPendingAppend(root));
+      },
+      // Recovery writes the index and worktree, so it must own the same lock a
+      // user-initiated mutation would. Acquisition is non-blocking: a busy lock
+      // means "skip this tick", never "wait in line behind a rebase".
+      locked: (work) => this.withMutationLock("recoverPendingState", "恢复待处理改动", "host:recovery", work),
+    });
+    if (stash) {
+      this.log("recovery", `autostash ${describeOutcome(stash)}`);
+    }
+    if (append) {
+      this.log("recovery", `append ${describeOutcome(append)}`);
+    }
+
+    if (!this.getPendingStash(root) && !this.getPendingAppend(root)) {
+      this.pendingWarnings = clearPendingWarnings(this.pendingWarnings);
+      this.recoveryNotice = currentBannerText(this.pendingWarnings);
+    }
+  }
+
+  /**
+   * Runs Git-writing work only when the mutation lock is free. Returns undefined
+   * when it is not: recovery is opportunistic and retried on the next quiet
+   * refresh, so queueing behind a rebase would only risk overlapping writes.
+   */
+  private async withMutationLock<T>(
+    action: string,
+    label: string,
+    source: string,
+    work: () => Promise<T>
+  ): Promise<T | undefined> {
+    const acquired = this.mutations.tryAcquire({ action, label, source });
+    if (!acquired.ok) {
+      this.log("recovery", `跳过恢复：${this.mutations.current()?.action ?? "mutation"} 正在执行`);
+      return undefined;
+    }
+    this.armWatchdog(acquired.owner);
+    try {
+      return await work();
+    } finally {
+      this.mutations.markSettled(acquired.owner);
+      this.mutations.release(acquired.owner);
+      this.disarmWatchdog(acquired.owner);
+    }
+  }
+
+  /**
+   * Applies a reconcile outcome. A resolved/restored record is cleared (because
+   * its content is verifiably back) and a still-pending record is kept with one
+   * warning. Returns a short user-facing summary, or undefined when the outcome
+   * needs no message (resolved, nothing restored).
+   */
+  private async applyPendingOutcome(
+    root: string,
+    outcome: PendingReconcile,
+    kind: "autostash" | "append",
+    clear: () => Promise<void>
+  ): Promise<string | undefined> {
+    if (outcome.kind === "none") {
+      return undefined;
+    }
+    this.log(
+      "recovery",
+      `${kind} ${outcome.kind} ${outcome.detail ?? ""}`
+    );
+    if (outcome.kind === "pending") {
+      this.log("recovery", `${kind} 保持待恢复：${outcome.reason} ${outcome.detail}`);
+      // Re-resolved on every pass: `stash@{n}` is a position, so a concurrent
+      // `stash push` moves this stash and freezes a stale name into the banner.
+      const name = await stashNameForSha(root, outcome.stashSha);
+      const text = this.pendingWarningText(kind, name, outcome);
+      const observed = observePendingWarning(this.pendingWarnings, outcome.stashSha, outcome.reason, text);
+      this.pendingWarnings = observed.state;
+      // Render from the persisted banner state, not from this record: a
+      // dismissed banner must not reappear on the next poll.
+      this.recoveryNotice = currentBannerText(this.pendingWarnings);
+      if (observed.shouldNotify) {
+        const label = name ?? `sha ${outcome.stashSha.slice(0, 7)}`;
+        const first = recoveryCommands(name, outcome.stashSha)[0];
+        toast(
+          "warn",
+          `未完成的${kind === "append" ? "追加" : "自动 stash"}恢复：原始改动仍保存在 ${label}（sha ${outcome.stashSha.slice(0, 7)}）。${outcome.reason}。可手动执行 “${first.command}” 恢复；插件不会自动删除 stash。`
+        );
+      }
+      return this.recoveryNotice;
+    }
+
+    if (outcome.stashKept) {
+      // The extension never drops a stash. A settled record whose recovery copy
+      // is still listed is the normal outcome of an apply-based recovery; the
+      // log records it, and the banner offered the user the manual cleanup.
+      this.log(
+        "recovery",
+        `保留 stash name=${outcome.stashKept.name ?? "(none)"} sha=${outcome.stashKept.sha}（不自动删除）`
+      );
+    }
+    await clear();
+    if (!this.getPendingStash(root) && !this.getPendingAppend(root)) {
+      this.pendingWarnings = clearPendingWarnings(this.pendingWarnings);
+      this.recoveryNotice = currentBannerText(this.pendingWarnings);
+    }
+    return outcome.kind === "restored" ? outcome.detail : undefined;
+  }
+
+  /**
+   * Banner text for a record that is still pending. It always carries the exact
+   * manual commands: the extension never deletes a stash, so the banner is the
+   * user's recovery surface, not a notice about something already handled.
+   */
+  private pendingWarningText(
+    kind: "autostash" | "append",
+    name: string | undefined,
+    outcome: Extract<PendingReconcile, { kind: "pending" }>
+  ): string {
+    const steps = recoveryCommands(name, outcome.stashSha);
+    // The sha is the stable identity and is always printed; the slot is a hint.
+    const label = name
+      ? `${name}（sha ${outcome.stashSha.slice(0, 7)}）`
+      : `sha ${outcome.stashSha.slice(0, 7)}（当前无法解析 stash@{n}，请先执行 git stash list 并用 sha 或当前槽位恢复）`;
+    const headline = kind === "append"
+      ? `追加事务未完成：原始改动仍保存在 ${label}。${outcome.reason}。`
+      : `自动 stash 尚未恢复：改动仍保存在 ${label}。${outcome.reason}。`;
+    return `${headline}可手动执行：${steps.map((step) => `${step.label} → ${step.command}`).join("；")}。插件不会自动删除任何 stash。`;
+  }
+
+  /**
    * Restores a previously auto-stashed change set (identified by sha), called
    * after a rebase fully finishes or the user Continues/Aborts. Robust to the
    * user having already popped it manually elsewhere (gone => clear silently).
    */
-  private async popPendingStash(cwd: string, root: string): Promise<void> {
+  private async recoverPendingStash(cwd: string, root: string): Promise<void> {
     const sha = this.getPendingStash(root);
     if (!sha) {
       return;
     }
-    const res = await stashPopBySha(cwd, sha);
-    await this.clearPendingStash(root);
-    if (res.gone) {
-      return; // user already restored it — nothing to do
-    }
-    if (!res.ok) {
-      // Show the exact stash name (stash@{n}) so the "manual restore" hint is
-      // actionable: identify it from the stable sha.
-      const name = await this.stashNameBySha(cwd, sha);
-      toast(
-        "warn",
-        `恢复自动 stash 时有冲突：${res.message}。安全副本 ${name}（stash: ${sha.slice(0, 7)}）仍保留，请使用 “git stash list” / “git stash pop ${name}” 手动恢复。`
-      );
-    } else {
-      toast("info", "已恢复自动 stash 的改动（已弹出 stash@{0}/原 stash）。");
+    // Apply-then-verify instead of pop: a conflicting pop used to clear the
+    // record before the failure was examined, stranding the stash with no
+    // warning on the next refresh. `apply --index` keeps the recovery copy
+    // until the content is confirmed present.
+    const outcome = await reconcilePendingStash(cwd, sha);
+    const summary = await this.applyPendingOutcome(root, outcome, "autostash", async () =>
+      this.clearPendingStash(root)
+    );
+    if (outcome.kind === "restored") {
+      toast("info", "已恢复自动 stash 的改动。");
+    } else if (summary) {
+      this.log("recovery", `autostash 保持待恢复：${summary}`);
     }
   }
 
-  /** Resolves the human-readable stash name (stash@{n}) for a stash commit sha. */
+  /**
+   * Human-readable label for a stash commit sha: the current `stash@{n}` when it
+   * resolves, otherwise the sha itself. The old `"对应 stash"` fallback named
+   * nothing a user could type.
+   */
   private async stashNameBySha(cwd: string, sha: string): Promise<string> {
-    const list = await runGit(["stash", "list", "--format=%H"], { cwd });
-    if (list.code !== 0) {
-      return "对应 stash";
-    }
-    const idx = list.stdout.split("\n").map((l) => l.trim()).filter(Boolean).indexOf(sha);
-    return idx >= 0 ? `stash@{${idx}}` : "对应 stash";
+    return (await stashNameForSha(cwd, sha)) ?? `sha ${sha.slice(0, 7)}`;
   }
 
-  /** Restores stashes recorded while appending staged changes to a commit. */
+  /**
+   * Restores stashes recorded while appending staged changes to a commit.
+   *
+   * Every branch is decided by reconciliation against Git state rather than by
+   * the persisted `amended` flag: content that is already back in the index or
+   * the amended commit is resolved without re-applying, and no stash is dropped
+   * until its content is confirmed present.
+   */
   private async restorePendingAppend(
     cwd: string,
     root: string,
@@ -1276,85 +1669,67 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     if (!pending) {
       return true;
     }
-    if (restoreOriginalIndex) {
-      const restore = await stashApplyIndexBySha(cwd, pending.changeStash);
-      if (restore.gone) {
-        // A user may have restored/dropped the recovery stash manually. It is
-        // safe to clear the transaction only if there is no additional
-        // worktree-only stash still to restore.
-        if (!pending.unstagedStash) {
-          await this.clearPendingAppend(root);
-          return true;
-        }
-        return false;
+    if (!restoreOriginalIndex && !pending.amended) {
+      // A paused append failed before --amend. Continue must not silently
+      // discard the original staged snapshot; tell the user to Abort or restore
+      // it manually before proceeding. The record stays for reconciliation.
+      const name = await this.stashNameBySha(cwd, pending.changeStash);
+      const observed = observePendingWarning(
+        this.pendingWarnings,
+        pending.changeStash,
+        "追加尚未到达 amend 步骤",
+        `追加事务未完成：原始改动仍保存在 ${name}（sha ${pending.changeStash.slice(0, 7)}）。请 Abort 以自动恢复，或手动 apply --index 后再 Continue。`
+      );
+      this.pendingWarnings = observed.state;
+      if (observed.shouldNotify) {
+        toast("warn", `追加尚未完成，原始改动仍保存在 ${name}（sha ${pending.changeStash.slice(0, 7)}）。请 Abort 以自动恢复，或手动 apply --index 后再 Continue。`);
       }
-      if (!restore.ok) {
-        const name = await this.stashNameBySha(cwd, pending.changeStash);
-        toast("warn", `恢复原始暂存区时有冲突：${restore.message}。安全副本 ${name}（stash: ${pending.changeStash.slice(0, 7)}）仍保留，请用 “git stash list” / “git stash apply --index ${name}” 手动恢复。`);
-        return false;
-      }
-      // The full snapshot already includes the worktree-only changes. Popping
-      // the later keep-index snapshot here would apply those same changes a
-      // second time and can manufacture a conflict during Abort.
-      if (pending.unstagedStash) {
-        await stashDropBySha(cwd, pending.unstagedStash);
-      }
-      await stashDropBySha(cwd, pending.changeStash);
-      await this.clearPendingAppend(root);
-      return true;
+      return false;
     }
-    if (!pending.amended) {
-      if (!restoreOriginalIndex) {
-        // A paused append failed before --amend. Continue must not silently
-        // discard the original staged snapshot; tell the user to Abort or
-        // restore it manually before proceeding.
-        const name = await this.stashNameBySha(cwd, pending.changeStash);
-        toast("warn", `追加尚未完成，原始改动仍保存在 ${name}（stash: ${pending.changeStash.slice(0, 7)}）。请 Abort 以自动恢复，或手动 apply --index 后再 Continue。`);
-        return false;
-      }
-      // Abort applied the original index successfully; now remove the recovery
-      // copy and complete the transaction.
-      await stashDropBySha(cwd, pending.changeStash);
-      await this.clearPendingAppend(root);
-      return true;
+    // The stored target decides whether the amend landed, but reconciliation
+    // also verifies the content, so a completed append with a manually restored
+    // worktree resolves silently instead of re-applying or warning.
+    const outcome = await reconcilePendingAppend(cwd, pending);
+    const summary = await this.applyPendingOutcome(root, outcome, "append", async () =>
+      this.clearPendingAppend(root)
+    );
+    if (summary && outcome.kind !== "restored") {
+      this.log("recovery", `append 保持待恢复：${summary}`);
     }
-    if (pending.unstagedStash) {
-      const restore = await stashPopBySha(cwd, pending.unstagedStash);
-      if (restore.gone) {
-        // It was restored/dropped manually. The staged snapshot is already
-        // represented in the amended commit on a successful append, so remove
-        // only its recovery copy and finish this transaction.
-        await stashDropBySha(cwd, pending.changeStash);
-        await this.clearPendingAppend(root);
-        return true;
-      }
-      if (!restore.ok) {
-        const name = await this.stashNameBySha(cwd, pending.unstagedStash);
-        toast("warn", `恢复未暂存改动时有冲突：${restore.message}。安全副本 ${name}（stash: ${pending.unstagedStash.slice(0, 7)}）仍保留，请用 “git stash list” / “git stash pop ${name}” 手动恢复。`);
-        return false;
-      }
-    }
-    await stashDropBySha(cwd, pending.changeStash);
-    await this.clearPendingAppend(root);
-    return true;
+    return outcome.kind !== "pending";
   }
 
-  /** Restores the original snapshot when setup failed before a pending record. */
+  /**
+   * Restores the original snapshot when setup failed before a pending record.
+   * Uses the same apply-only reconciliation as recovery: the stash is never
+   * dropped here, and a conflict keeps both the copy and the instructions.
+   */
   private async restoreAppendSnapshot(cwd: string, sha: string): Promise<void> {
-    const restore = await stashApplyIndexBySha(cwd, sha);
-    if (!restore.gone && !restore.ok) {
-      const name = await this.stashNameBySha(cwd, sha);
-      toast("warn", `恢复原始改动时有冲突：${restore.message}。安全副本 ${name}（stash: ${sha.slice(0, 7)}）仍保留，请用 “git stash list” / “git stash apply --index ${name}” 手动恢复。`);
+    const outcome = await reconcilePendingStash(cwd, sha);
+    if (outcome.kind === "pending") {
+      const name = await stashNameForSha(cwd, sha);
+      // The sha is the stable identity; the slot is a hint that may move.
+      const steps = recoveryCommands(name, sha);
+      toast(
+        "warn",
+        `恢复原始改动时有冲突：${outcome.reason}。安全副本 ${name ?? "（当前槽位无法解析）"}（sha ${sha.slice(0, 7)}）仍保留，可手动执行：${steps[0].command}`
+      );
       return;
     }
-    await stashDropBySha(cwd, sha);
+    if (outcome.kind !== "none" && outcome.stashKept) {
+      this.log(
+        "recovery",
+        `保留 stash name=${outcome.stashKept.name ?? "(none)"} sha=${outcome.stashKept.sha}（不自动删除）`
+      );
+    }
   }
 
   /**
    * Ensures a clean tree for a rebase. Returns true if the operation may
    * proceed. In auto-stash mode a dirty tree is stashed (recorded as pending so
-   * it is popped on completion / Continue / Abort). In manual mode a dirty tree
-   * blocks the operation with a warning.
+   * it is applied on completion / Continue / Abort — applied, never popped, so
+   * the recovery copy survives). In manual mode a dirty tree blocks the
+   * operation with a warning.
    */
   private async prepareCleanTree(
     cwd: string,
@@ -1573,7 +1948,7 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
       toast("error", `变基失败：${outcome.message}`);
       // Rebase did not apply; restore the stash immediately (silent if none).
       if (prep.stashed) {
-        await this.popPendingStash(cwd, root);
+        await this.recoverPendingStash(cwd, root);
       }
       await this.undo.mark(undoRecord, "aborted");
     } else if (outcome.stopped) {
@@ -1583,8 +1958,9 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
         affectedCount: plan.affectedCount ?? plan.items.length,
         undoRecord,
       };
-      // Keep the pending stash; it is popped on Continue/Abort. Only mention
-      // the stash when we actually created one.
+      // Keep the pending stash; it is applied on Continue/Abort, never popped,
+      // so the recovery copy outlives the restore. Only mention the stash when
+      // we actually created one.
       const conflicts = await conflictedFiles(cwd);
       const conflictHint = conflicts.length
         ? `冲突文件：${conflicts.join("、")}。`
@@ -1605,7 +1981,7 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     } else {
       if (prep.stashed) {
         // Completed cleanly — restore now.
-        await this.popPendingStash(cwd, root);
+        await this.recoverPendingStash(cwd, root);
       }
       const newTip = await this.headTip(cwd);
       if (oldTip !== newTip) {
@@ -2238,80 +2614,15 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     toast("info", snapshot.truncated ? "已生成只读 Diff 文档（输出已截断）。" : "已生成只读 Diff 文档。");
   }
 
-  private cancelInspectorPreview(invalidate = false): void {
-    if (invalidate) this.inspectorPreview.invalidate();
-  }
-
-  /** Opens detail/actions beside the editor instead of obscuring timeline rows. */
-  private async openCommitInspector(
-    cwd: string,
-    hash: unknown,
-    kind: "preview" | "single"
-  ): Promise<void> {
-    if (!this.isCurrentCommitHash(hash)) {
-      throw new Error("commit 列表已更新，请刷新后重试。 ");
+  /** Hover detail rendered by the sidebar's own floating tooltip. */
+  private async sendDetail(cwd: string, hash: string): Promise<void> {
+    try {
+      const d = await commitDetail(cwd, hash);
+      // The webview ignores a detail whose hash is no longer the hovered row.
+      this.post({ type: "detail", hash, ...d });
+    } catch {
+      // Hover detail is best-effort; a vanished commit must not toast.
     }
-    const commit = this.commits.find((item) => item.hash === hash)!;
-    const previewSession = kind === "preview" ? this.inspectorPreview.beginPreview(commit.hash) : undefined;
-    if (kind === "preview" && !previewSession) return;
-    const session: InspectorSession = previewSession ?? this.inspectorPreview.beginAction("single");
-    const detail = await commitDetail(cwd, hash);
-    // A slow Git detail query must never overwrite an action inspector opened
-    // after the hover began. Preview and action sessions have separate tokens.
-    const canShow = kind === "preview"
-      ? this.inspectorPreview.showPreview(session)
-      : this.inspectorPreview.canShowAction(session);
-    if (!canShow) return;
-    // A hover preview uses the same editor-area companion (with no actions), so
-    // message detail remains visible without covering nearby timeline rows.
-    this.cancelInspectorPreview();
-    this.inspector.open({
-      kind,
-      revision: this.canonicalRevision,
-      commit: {
-        hash: commit.hash,
-        shortHash: commit.shortHash,
-        subject: commit.subject,
-        author: commit.author,
-        date: commit.date,
-        locked: this.lockedHashes.has(commit.hash),
-      },
-      detail,
-      llmConfigured: isLlmConfigured(),
-      rebaseInProgress: await isRebaseInProgress(cwd),
-      hasStaged: (await workingStatus(cwd)).hasStaged,
-    });
-  }
-
-  /** Opens batch actions in the same non-obscuring companion editor. */
-  private async openBatchInspector(value: unknown): Promise<void> {
-    const session = this.inspectorPreview.beginAction("batch");
-    this.cancelInspectorPreview();
-    const hashes = this.selectedHashes(value);
-    if (!hashes || hashes.length < 2) throw new Error("批量选择已过期；请刷新后重试。 ");
-    const byHash = new Map(this.commits.map((commit) => [commit.hash, commit]));
-    const generated = generatedDiffCommits(this.commits, hashes);
-    if (!this.inspectorPreview.canShowAction(session)) return;
-    this.inspector.open({
-      kind: "batch",
-      revision: this.canonicalRevision,
-      commits: hashes.map((hash) => {
-        const commit = byHash.get(hash)!;
-        return {
-          hash: commit.hash,
-          shortHash: commit.shortHash,
-          subject: commit.subject,
-          author: commit.author,
-          date: commit.date,
-          locked: this.lockedHashes.has(commit.hash),
-        };
-      }),
-      llmConfigured: isLlmConfigured(),
-      rebaseInProgress: false,
-      hasStaged: false,
-      generatedDiffEnabled: !!generated,
-      generatedDiffReason: generated ? undefined : "仅支持连续 commit；请取消未连续选择或使用单项 Diff。",
-    });
   }
 
   /** Command-palette/title entry point for the latest private-ref undo record. */
@@ -2369,19 +2680,40 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     toast("info", "stash 列表已写入 Output 面板 (Git Rebase Visual)。");
   }
 
-  /** Manual pop of the most recent stash. */
+  /**
+   * Manual pop of the most recent stash.
+   *
+   * The only stash-removing action in the extension. It is reached solely from
+   * the explicit "Pop Stash" command, and only after a modal confirmation: on
+   * success `pop` deletes the entry, which is the user's decision to make, never
+   * a heuristic's. (On conflict Git keeps the entry itself; the warning says so.)
+   */
   public async popChanges(): Promise<void> {
     const cwd = this.cwd();
     if (!cwd) {
+      return;
+    }
+    const stash = await runGit(["stash", "list", "--format=%gd %s", "--max-count=1"], { cwd });
+    const newest = stash.code === 0 ? stash.stdout.trim() : "";
+    if (!newest) {
+      toast("info", "没有可恢复的 stash。");
+      return;
+    }
+    const confirmed = await vscode.window.showWarningMessage(
+      `Pop 会恢复最近一次 stash（${newest}）并从 stash 列表中删除该条目；冲突时 Git 会保留它。继续？`,
+      { modal: true },
+      "Pop 并删除该条目"
+    );
+    if (confirmed !== "Pop 并删除该条目") {
       return;
     }
     const res = await stashPopManual(cwd);
     if (res.empty) {
       toast("info", "没有可恢复的 stash。");
     } else if (!res.ok) {
-      toast("warn", `git stash pop 有冲突：${res.message}`);
+      toast("warn", `git stash pop 有冲突，stash 条目已保留：${res.message}`);
     } else {
-      toast("info", "已恢复最近一次 stash。");
+      toast("info", "已恢复并删除最近一次 stash。");
     }
     await this.refresh();
   }
@@ -2394,15 +2726,23 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
    * and supports a normal or review (refs/for/*) refspec.
    */
   public async pushBranch(): Promise<void> {
-    if (this.busy) {
-      toast("warn", "上一个操作尚未完成，请稍候。");
+    const acquired = this.mutations.tryAcquire({
+      action: "push",
+      label: mutationActionLabel("push"),
+      source: "command",
+    });
+    if (!acquired.ok) {
+      const rejection = this.mutations.rejection(acquired.owner);
+      if (rejection) toast("warn", busyRejectionMessage(rejection));
       return;
     }
-    this.busy = true;
+    this.armWatchdog(acquired.owner);
     try {
       await this.pushBranchInternal();
     } finally {
-      this.busy = false;
+      this.mutations.markSettled(acquired.owner);
+      this.mutations.release(acquired.owner);
+      this.disarmWatchdog(acquired.owner);
       if (this.refreshQueued) {
         this.refreshQueued = false;
         void this.refresh();
@@ -2577,6 +2917,13 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
 </body>
 </html>`;
   }
+}
+
+/** One-line summary of a reconcile outcome for the session log. */
+function describeOutcome(outcome: PendingReconcile): string {
+  if (outcome.kind === "none") return "none";
+  if (outcome.kind === "pending") return `pending reason=${outcome.reason} ${outcome.detail}`;
+  return `${outcome.kind} ${outcome.detail}${outcome.stashKept ? ` kept=${outcome.stashKept.name ?? outcome.stashKept.sha.slice(0, 7)}` : ""}`;
 }
 
 /**

@@ -4,7 +4,7 @@ import * as fs from "fs";
 import * as path from "path";
 import { isRebaseInProgress, rebaseStoppedSha } from "../src/git/commitLog";
 import { continueRebase, executeRebase, resolveBase } from "../src/git/rebaseEngine";
-import { stashApplyIndexBySha, stashDropBySha, stashPopBySha, stashPush, stashPushKeepIndex } from "../src/git/worktree";
+import { stashApplyIndexBySha, stashPush, stashPushKeepIndex } from "../src/git/worktree";
 import { createRepo, commitFile, git, removeRepo } from "./helpers/gitTestRepo";
 
 test("append transaction amends only the original index and restores worktree changes", async (t) => {
@@ -47,9 +47,10 @@ test("append transaction amends only the original index and restores worktree ch
   const completed = await continueRebase(cwd);
   assert.equal(completed.ok, true);
   assert.equal(await isRebaseInProgress(cwd), false);
-  const restored = await stashPopBySha(cwd, worktreeStash);
-  assert.equal(restored.ok, true);
-  await stashDropBySha(cwd, snapshot);
+  git(cwd, ["stash", "pop"]);
+  // The extension's recovery never drops a stash, so clearing the snapshot here
+  // is the explicit user action the test is standing in for.
+  git(cwd, ["stash", "drop", "stash@{0}"]);
 
   const targetAfter = git(cwd, ["rev-parse", "HEAD~1"]);
   assert.notEqual(targetAfter, target);

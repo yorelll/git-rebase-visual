@@ -87,6 +87,18 @@ button, .grip, .dot, .lock-icon, .stopped-badge {
   margin-top: 0;
 }
 
+.banner.recovery {
+  background: var(--vscode-inputValidation-warningBackground);
+  color: var(--vscode-inputValidation-warningForeground, var(--vscode-foreground));
+  border-bottom-color: var(--vscode-inputValidation-warningBorder);
+}
+
+.banner.recovery .banner-actions {
+  margin-top: 6px;
+  display: flex;
+  gap: 6px;
+}
+
 .banner.rebase.conflict {
   background: var(--vscode-inputValidation-errorBackground, var(--vscode-inputValidation-warningBackground));
   border-bottom-color: var(--vscode-inputValidation-errorBorder, var(--vscode-inputValidation-warningBorder));

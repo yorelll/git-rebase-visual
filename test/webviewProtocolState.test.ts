@@ -62,6 +62,17 @@ test("single and section-level worktree writes are serialized mutations explicit
   assert.equal(trace.warningCount, 0);
 });
 
+test("hover detail and in-webview menus stay read-only traffic", () => {
+  // Restoring the sidebar tooltip/menu must not reintroduce an editor-area panel
+  // protocol: these are the only messages the reverted interactions may post.
+  for (const type of ["requestDetail", "copyText", "openDiff", "generateDiff", "bulkGenerateDiff"]) {
+    assert.equal(webviewMessageIntent(type), "read", type);
+  }
+  for (const type of ["openCommitInspector", "openBatchInspector", "dismissCommitPreview"]) {
+    assert.equal(webviewMessageIntent(type), "ui", `${type} no longer exists in the protocol`);
+  }
+});
+
 test("paused-rebase unsafe writes alone count as warning candidates", () => {
   const view = new WebviewProtocolState();
   view.observe("reorder", "keyboard", true);

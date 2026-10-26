@@ -4,9 +4,7 @@ import * as fs from "fs";
 import * as path from "path";
 import {
   stashApplyIndexBySha,
-  stashDropBySha,
   stashList,
-  stashPopBySha,
   stashPush,
   stashPushKeepIndex,
 } from "../src/git/worktree";
@@ -32,7 +30,7 @@ test("stash apply --index restores staged and unstaged changes before explicit c
   assert.match(status, /^M  tracked\.txt/m);
   assert.match(status, /^\?\? untracked\.txt/m);
 
-  await stashDropBySha(cwd, sha);
+  git(cwd, ["stash", "drop", "stash@{0}"]);
   assert.equal(git(cwd, ["stash", "list"]), "");
 });
 
@@ -50,9 +48,7 @@ test("keep-index stash moves worktree-only changes without losing the index", as
   assert.match(git(cwd, ["status", "--porcelain"]), /^M  tracked\.txt/m);
   assert.equal(fs.existsSync(path.join(cwd, "untracked.txt")), false);
 
-  const popped = await stashPopBySha(cwd, sha);
-  assert.equal(popped.ok, true);
-  assert.equal(popped.gone, false);
+  git(cwd, ["stash", "pop"]);
   assert.match(git(cwd, ["status", "--porcelain"]), /^\?\? untracked\.txt/m);
 });
 
@@ -75,12 +71,12 @@ test("stashList reports exact stash names and stable shas", async (t) => {
   assert.match(entries[0].name, /^stash@\{\d+\}$/);
   assert.notEqual(entries[0].name, entries[1].name);
   // Empty list when no stashes remain.
-  await stashDropBySha(cwd, second);
-  await stashDropBySha(cwd, first);
+  git(cwd, ["stash", "drop", "stash@{0}"]);
+  git(cwd, ["stash", "drop", "stash@{0}"]);
   assert.deepEqual(await stashList(cwd), []);
 });
 
-test("stash helpers identify a manually removed stash without failing", async (t) => {
+test("a stash removed behind Git's back is simply absent from the list", async (t) => {
   const cwd = createRepo();
   t.after(() => removeRepo(cwd));
   commitFile(cwd, "tracked.txt", "base\n", "initial");
@@ -89,9 +85,7 @@ test("stash helpers identify a manually removed stash without failing", async (t
   const sha = await stashPush(cwd);
   assert.ok(sha);
   git(cwd, ["stash", "drop", "stash@{0}"]);
-  assert.deepEqual(await stashPopBySha(cwd, sha), {
-    ok: false,
-    gone: true,
-    message: "stash no longer present",
-  });
+  // The extension exposes no pop/drop-by-sha helper any more; recovery only
+  // applies, and absence is observed through the list.
+  assert.deepEqual(await stashList(cwd), []);
 });

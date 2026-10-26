@@ -33,11 +33,11 @@
 
 ### 功能总览
 
-- 交互式 rebase：拖拽重排、edit/reword/drop、冲突 Continue/Abort；
-- 提交保护：patch-id 锁定、Push guard、`--force-with-lease`；
-- 工作区辅助：auto-stash、stash list、将暂存区追加到已有 commit；
+- 交互式 rebase：拖拽重排、Alt+Arrow 重排、edit/reword/squash/fixup/drop、冲突 Continue/Abort；
+- 提交保护：patch-id 锁定、Push guard、`--force-with-lease` 与受控 Undo；
+- 工作区辅助：Staged/Changes 文件列表、单文件与批量 stage/restore/unstage、VS Code 左右 Diff、auto-stash 与 stash list；
 - AI message：流式生成、deadline、取消、trailer 保留；
-- 诊断与质量：OutputChannel、真实 Git 集成测试、VSIX 内容门禁。
+- 诊断与质量：OutputChannel、带轮转与脱敏的会话日志、可解释的写锁与看门狗恢复、真实 Git 集成测试、webview DOM 回归、VSIX 内容门禁。
 
 ### 文件
 

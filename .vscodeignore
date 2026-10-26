@@ -11,7 +11,9 @@ test/
 src/
 node_modules/
 *.ts
+**/*.ts
 esbuild.js
 tsconfig.json
+tsconfig.test.json
 RELEASE.md
 docs/

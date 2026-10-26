@@ -12,8 +12,8 @@ export interface StashEntry {
  * Stashes all changes (including untracked) so a rebase can run on a clean
  * tree. Returns the stash commit sha when something was stashed, or undefined
  * when there was nothing to stash. The sha is a stable identity for the stash
- * that we later use to pop exactly our stash (unaffected by rebase rewriting
- * other commit hashes, and robust if the user creates other stashes).
+ * that recovery later applies exactly that stash (unaffected by rebase
+ * rewriting other commit hashes, and robust if the user creates other stashes).
  */
 export async function stashPush(
   cwd: string,
@@ -50,23 +50,6 @@ async function stashIndexBySha(cwd: string, sha: string): Promise<number> {
   return shas.indexOf(sha);
 }
 
-/**
- * Pops the stash identified by sha. If the stash is no longer present (e.g. the
- * user already popped it elsewhere), reports gone=true instead of erroring, so
- * callers can silently clear their pending-stash marker.
- */
-export async function stashPopBySha(
-  cwd: string,
-  sha: string
-): Promise<{ ok: boolean; gone: boolean; message: string }> {
-  const idx = await stashIndexBySha(cwd, sha);
-  if (idx < 0) {
-    return { ok: false, gone: true, message: "stash no longer present" };
-  }
-  const res = await runGit(["stash", "pop", `stash@{${idx}}`], { cwd });
-  return { ok: res.code === 0, gone: false, message: (res.stderr || res.stdout).trim() };
-}
-
 /** Applies a stash's original index without dropping its recovery copy. */
 export async function stashApplyIndexBySha(
   cwd: string,
@@ -101,15 +84,13 @@ export async function stashList(cwd: string): Promise<StashEntry[]> {
     });
 }
 
-/** Removes a stash by its stable commit sha. */
-export async function stashDropBySha(cwd: string, sha: string): Promise<void> {
-  const idx = await stashIndexBySha(cwd, sha);
-  if (idx >= 0) {
-    await git(["stash", "drop", `stash@{${idx}}`], { cwd });
-  }
-}
-
-/** Pops the most recent stash (stash@{0}). Reports empty when none exist. */
+/**
+ * Pops the most recent stash (stash@{0}). Reports empty when none exist.
+ *
+ * This is the only stash-removing call in the extension and it is reachable
+ * solely from the explicit "Pop Stash" command the user invokes; no automatic
+ * recovery path may call it.
+ */
 export async function stashPopManual(
   cwd: string
 ): Promise<{ ok: boolean; empty: boolean; message: string }> {
