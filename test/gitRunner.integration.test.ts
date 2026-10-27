@@ -216,7 +216,16 @@ async function waitForRemoval(cwd: string): Promise<void> {
 test("an abort settles exactly once and does not resolve twice", async (t) => {
   const cwd = createRepo();
   const hook = path.join(cwd, ".git", "hooks", "pre-commit");
-  fs.writeFileSync(hook, "#!/bin/sh\ncat > /dev/null\n", "utf8");
+  // The abort fires 400 ms in, so the hook must still be running at that point.
+  // A fast hook (`cat > /dev/null`) can finish first on a quick CI runner, which
+  // made this test resolve with code 0 and assert a cancellation that never
+  // happened. A bounded sleep loop keeps the child alive deterministically and
+  // still exits on its own if the kill does not arrive.
+  fs.writeFileSync(
+    hook,
+    "#!/bin/sh\n# Bounded so a failed kill cannot leave a permanent orphan.\ni=0\nwhile [ $i -lt 300 ]; do sleep 0.1; i=$((i+1)); done\n",
+    "utf8"
+  );
   fs.chmodSync(hook, 0o755);
   fs.writeFileSync(path.join(cwd, "hooked.txt"), "x", "utf8");
   git(cwd, ["add", "hooked.txt"]);
