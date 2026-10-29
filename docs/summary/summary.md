@@ -1,6 +1,6 @@
 # Git Rebase Visual — 功能、架构与测试总结
 
-> 当前基线：v0.8.0——侧栏内 hover tooltip 与右键菜单、owner 可解释的写锁与看门狗恢复、确定性结算的 Git 进程回收、带轮转/脱敏的会话文件日志、与真实 Git 状态对账的待恢复改动处理。
+> 当前基线：v0.8.1——侧栏内 hover tooltip 与右键菜单、owner 可解释的写锁与看门狗恢复、确定性结算的 Git 进程回收、位于用户主目录下的带轮转/脱敏会话文件日志、与真实 Git 状态对账的待恢复改动处理，以及 keep-index 残留快照的误报冲突修复。
 
 ## 1. 项目定位
 
@@ -36,7 +36,7 @@ Webview (media/main.js)
 | 写入与交互协议 | stage/restore/bulk stage-discard-unstage 作为 mutation 经 busy 串行化，paused edit-stop 由明确 allow-list 控制；pointer/native drag 使用 immutable canonical session，routine worktree refresh 不会使其 stale，而真正 timeline/lock/rebase 变化仍会拒绝旧手势；无副作用 UI 流量不触发暂停告警。 |
 | 详情与菜单 | 悬停 400ms 由 `requestDetail` 取 `commitDetail`，host 回发 `detail`，webview 在侧栏行旁渲染浮动 tooltip（复制 message / 打开变更，指针移入不消失）；右键与 `Shift+F10`/Menu 在侧栏内打开 `#menu`，多选 ≥2 时提供批量锁定、批量删除与连续区间生成 Diff。不创建编辑器区面板，编辑器/窗口事件只下发 `closeMenu`。 |
 | 写锁与恢复 | `MutationLock` 持有 `{id, action, label, source, startedAt}`，提供 owner 身份校验的 `release`、`forceRelease`、`markSettled`/`reapSettled` 与 stale 判定；拒绝消息命名 owner、来源与耗时，90s 看门狗写入 `mutation-stuck` 诊断并提供“强制解除并刷新”（先重读 rebase 标记/冲突文件/commit 列表）。 |
-| 进程与日志 | `runGit` 以 `exit`（输出排空或 50ms 宽限）结算，超时/取消在固定宽限后只结算一次并**尝试**回收进程树（已脱离的孙进程可能存活，属进程泄漏，不阻塞结算）；`FileLogger` 每次会话一个 `<tmp>/log/git-rebase-visual-<version>/session-*.log`，按大小轮转、保留最近 10 个、脱敏凭据，失败即静默禁用；日志与 Output 首行为会话头（版本、扩展路径、VS Code 版本、宿主 pid、平台）。 |
+| 进程与日志 | `runGit` 以 `exit`（输出排空或 50ms 宽限）结算，超时/取消在固定宽限后只结算一次并**尝试**回收进程树（已脱离的孙进程可能存活，属进程泄漏，不阻塞结算）；`FileLogger` 每次会话一个 `<home>/tmp/log/git-rebase-visual-<version>/session-*.log`（0.8.1 起在用户主目录下，0.8.0 及更早为 `<tmp>/log/...`），按大小轮转、保留最近 10 个、脱敏凭据，失败即静默禁用；日志与 Output 首行为会话头（版本、扩展路径、VS Code 版本、宿主 pid、平台）。 |
 | 待恢复改动对账 | `pendingRecovery.ts` 以真实 Git 状态判定遗留记录：rebase 是否进行、stash 是否仍列出、stash 内容是否已在 index/worktree（`diff --quiet` / `--cached --quiet` / `hash-object` vs `stash^3`）、`targetHash` 是否仍是 HEAD 祖先，追加落地则用 `git ls-tree -z` 逐路径比较快照 `^2` 与 HEAD 的 **mode + object**。内容已在即 resolved（静默清记录、不重复 apply）；未落地则 `apply --index`，冲突保持 pending。**整轮恢复不执行任何 `stash drop/pop/clear`**：任何结论都只决定记录是否清除，stash 一律保留，`recoveryCommands()` 给出 `apply --index` / `apply` / 用户自己执行的 `drop` 三条命令（槽位无法解析时回退到 sha，且只给两条 apply——Git 没有按 sha 的 `stash drop`）。`pendingRecoveryPolicy.ts` 提供 `(sha, reason)` 告警去重、可关闭横幅与按记录单飞的 `RecoveryCoordinator`；`refresh()` 不再因记录存在而跳过渲染，也不在写锁持有时插队执行恢复。 |
 
 ## 3. 「追加暂存区」事务
@@ -125,20 +125,20 @@ media/style.css                    主题语义、pending/status/高对比度 fa
 | 逻辑 | `test/pushGuard.test.ts` | 默认/refspec 模板/空白模板 |
 | 边界 | `test/gitRunner.integration.test.ts` | 非零 Git 结果、输出上限、取消信号；hook 留下继承 stdio 的孙进程时仍在 `exit` 结算；超时/取消只结算一次并尝试回收孙进程 |
 | 逻辑 | `test/mutationLock.test.ts` | 获取/拒绝命名 owner、owner 身份校验的释放、`forceRelease`、settled 自愈、stale 判定与 busy/stuck 文案 |
-| 逻辑 | `test/fileLogger.test.ts` | `<tmp>/log/git-rebase-visual-<version>` 路径、会话文件名、凭据脱敏、大小轮转、保留策略、只读/写入失败容忍 |
+| 逻辑 | `test/fileLogger.test.ts` | `<home>/tmp/log/git-rebase-visual-<version>` 路径（注入 home，POSIX/Windows 均不依赖运行机器）、旧临时目录路径、会话文件名、凭据脱敏、大小轮转、保留策略、只读/写入失败容忍 |
 | Git 集成 | `test/commitLog.integration.test.ts` | staged/unstaged 文件数、commit 顺序、absolute git-path、edit stop/rebase-apply 分支 |
 | Git 集成 | `test/worktree.integration.test.ts` | stash apply、keep-index、外部删除 stash（stash 列表如实反映外部删除） |
 | 功能集成 | `test/appendStaged.integration.test.ts` | staged append、amend、后续重放、未暂存恢复 |
 | Git 安全 | `test/rebaseSafety.integration.test.ts` | locked Drop conflict/Abort、冲突 Continue、edit-stop Abort 恢复 |
 | 暂停状态 | `test/rebasePauseState.test.ts` | conflict / explicit edit / paused 状态派生 |
-| LLM HTTP mock | `test/llmClient.test.ts` | SSE delta、畸形事件、deadline、预取消、流读取途中取消/超时、错误正文脱敏，以及 Fetch Standard 全量 bad-port policy、真实 listener close/retry 生命周期 |
+| LLM HTTP mock | `test/llmClient.test.ts` | SSE delta、畸形事件、deadline、预取消、流读取途中取消/超时（取消由首个 delta 送达触发，不依赖定时器；服务端有上限地继续推送，取消失效即断言失败）、错误正文脱敏，以及 Fetch Standard 全量 bad-port policy、真实 listener close/retry 生命周期 |
 | Git 集成（推送/守卫） | `test/pushGuard.integration.test.ts` | bare-remote：force-with-lease 并发拒绝、lockedInPush 拦截/解锁 |
 | Git 集成（append 守卫） | `test/appendGuard.integration.test.ts` | 已推 upstream 守卫、锁定 commit patch-id 跨重写稳定 |
 | 注入桩 | `test/secretsAccess.test.ts` | SecretStorage 访问器安全降级与委托 |
 | 恢复策略 | `test/pendingRecoveryPolicy.test.ts` | 同一 `(stash sha, 原因)` 只警告一次、已装填横幅在槽位漂移后**只更新文本、不重复弹窗**、横幅关闭后保持关闭（槽位漂移也不复活）、记录清空后重置、恢复单飞与失败后释放槽位、恢复在锁内运行且锁忙时整轮跳过、同步抛出不污染单飞键 |
-| 恢复集成 | `test/pendingRecovery.integration.test.ts` | **不变量：整轮恢复不出现任何 `stash drop/pop/clear`**（Git 调用观察器断言）。已应用快照静默清除且 stash 仍在、手动 `stash apply --index` 后静默清除、stash 已消失的空记录静默清除、fresh snapshot 只恢复一次且 stash 保留、冲突的工作区恢复保留两份 stash、amend 落地后按 `ls-tree` mode+object 结算并保留 stash、未完成追加保持 pending、reset 只清孤儿记录而保留有内容的 stash；失败探测（`^1`/`^2`/`^3` 对象或 `^3` 树缺失、`git diff` 非零、stash reflog 损坏）一律保留记录与 stash；`targetHash` 被改写但 HEAD 不含快照时保持 pending；仅改文件模式且已落地可结算、chmod 未落地则保留；revert 形状的 amend + 后续编辑保留（旧 raw-log 扫描看不见）、目录重命名保留、同字节巧合保留；stash 上方压入新条目时按 sha 解析到自身槽位且不动其它条目；索引匹配但未跟踪/未暂存内容仍只存在于 stash 时补回工作区；残留的已跟踪路径只在与快照内容一致或路径缺失时才写回，已提交的更新内容不会被覆盖；`recoveryCommands` 给出 `apply --index` / `apply` / 用户自己执行的 `drop` 三条命令，且**每条打印出来的命令都会在独立临时仓库里真正执行并断言退出码为 0**（槽位可解析时三条；无法解析时只给两条 apply，不提供 Git 无法执行的 `stash drop <sha>`） |
+| 恢复集成 | `test/pendingRecovery.integration.test.ts` | **不变量：整轮恢复不出现任何 `stash drop/pop/clear`**（Git 调用观察器断言）。已应用快照静默清除且 stash 仍在、手动 `stash apply --index` 后静默清除、stash 已消失的空记录静默清除、fresh snapshot 只恢复一次且 stash 保留、冲突的工作区恢复保留两份 stash、amend 落地后按 `ls-tree` mode+object 结算并保留 stash、未完成追加保持 pending、reset 只清孤儿记录而保留有内容的 stash；失败探测（`^1`/`^2`/`^3` 对象或 `^3` 树缺失、`git diff` 非零、stash reflog 损坏）一律保留记录与 stash；`targetHash` 被改写但 HEAD 不含快照时保持 pending；仅改文件模式且已落地可结算、chmod 未落地则保留；revert 形状的 amend + 后续编辑保留（旧 raw-log 扫描看不见）、目录重命名保留、同字节巧合保留；stash 上方压入新条目时按 sha 解析到自身槽位且不动其它条目；索引匹配但未跟踪/未暂存内容仍只存在于 stash 时补回工作区；残留的已跟踪路径只在与快照内容一致或路径缺失时才写回，已提交的更新内容不会被覆盖；keep-index 残留快照在 `amend` 之后被 `rebase --continue` 还原成 `stash^2` 内容时视为本次事务自己的内容并真实写回（结论 `restored`，不再报误冲突），两份 stash 均保留；`recoveryCommands` 给出 `apply --index` / `apply` / 用户自己执行的 `drop` 三条命令，且**每条打印出来的命令都会在独立临时仓库里真正执行并断言退出码为 0**（槽位可解析时三条；无法解析时只给两条 apply，不提供 Git 无法执行的 `stash drop <sha>`） |
 | 恢复（provider 级） | `test/recoveryProvider.test.ts` | 真实 provider + 真实 Git：`dismissRecoveryNotice` 写入去重状态后跨 refresh（及推送的 state）不再出现横幅、并发 `stash push` 把记录压到 `stash@{1}` 后横幅改述新槽位且不重复弹窗、关闭后槽位漂移也不复活、`resetExtensionState` 保留不可验证/未恢复的 stash 并清除真正孤儿记录、`forceReleaseMutationLock` 重读 Git 状态、恢复在 mutation 持锁期间整轮跳过、settled 未释放的 owner 被 reap、看门狗对同一 owner 只告警一次且忽略外部 disarm、显式 **Pop** 只有确认后才执行（拒绝则 stash 完好，确认后条目被删且改动已恢复） |
-当前测试套件在 v0.8.0 候选中扩展至 214 项测试；v0.7.1 的 UI/交互与安全裁决见 [`../ui-reivew/ui-review-0-7-1.md`](../ui-reivew/ui-review-0-7-1.md)，最终发布评审见 [`../review/code-review-0-7-4.md`](../review/code-review-0-7-4.md)。
+当前测试套件在 v0.8.1 中扩展至 217 项测试；v0.7.1 的 UI/交互与安全裁决见 [`../ui-reivew/ui-review-0-7-1.md`](../ui-reivew/ui-review-0-7-1.md)，最终发布评审见 [`../review/code-review-0-7-4.md`](../review/code-review-0-7-4.md)。
 
 命令：
 

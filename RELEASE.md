@@ -105,6 +105,12 @@ code --install-extension git-rebase-visual-<version>.vsix
 
 ### 更新记录
 
+- **0.8.1** — 修复追加到 commit 时的误报冲突，日志移入用户主目录：
+  - **追加误报“工作区冲突”**：edit 停靠 rebase 中的追加有时会报 `快照中未提交的部分与当前工作区冲突：<文件>`，并建议 `git stash apply --index`。这是**误判**——被判冲突的路径当时存放的正是本次追加已提交的内容（`rebase --continue` 会把该 commit 拥有的路径还原成 `stash^2` 的内容），不是用户的新改动。**没有丢失任何用户数据**：完整快照与 keep-index 残留快照都仍在 `git stash list` 中，追加本身也已成功，被跳过的只是“把未提交部分放回工作区”。旧建议是个死循环（`apply --index` 会重跑同一段比对、得到同一个“冲突”），对这类形状**不再出现**。现在 `restoreResidualSnapshot` 把“工作区 blob == `stash^2:path`”视为本次事务自己的内容并放回快照的工作区版本；判定只看 Git 状态（`ls-tree`/`hash-object`），不看持久化的 `amended` 标志，任何与 `stash^2` 不同的内容（更新的用户改动、快照中的删除）仍然拒绝覆盖。**插件依然永不自动删除 stash，永不覆盖更新内容。**
+  - **日志目录移入用户主目录**：从 `<os.tmpdir()>/log/...` 改为 `<用户主目录>/tmp/log/git-rebase-visual-<version>/`（Linux/macOS 为 `~/tmp/log/...`，Windows 为 `C:\Users\<用户>\tmp\log\...`）。轮转、保留 10 个会话、脱敏与写入失败容错不变；旧临时目录中的历史日志**不迁移、不删除**，每次扩展会话首次执行 **Git Rebase: Open Logs** 时在 Output 中追加一行说明旧位置（不弹通知、不重复打扰）。
+  - **残留探测误报审计**：用真实 Git 复核了 keep-index 快照的 `worktree=missing unstaged=missing` 结论——后续 commit 不触碰该路径时确实缺失且会被真实写回、报 `restored`；拥有该路径时为 `present` 不重复写；改写该路径时 `rebase --continue` 先冲突，对账走不到。不存在假 `pending`/假 `resolved`，理由已写入代码注释。
+  - **测试**：新增上述形状的集成回归（复现 edit 停靠 → `apply --index` → `amend` → `keep-index` 暂存 → `rebase --continue` → 对账，断言残留回到工作区、结论非 `pending`、两份 stash 均在），文件日志路径用例改为注入 `home`/`tmpdir` 以保证可移植。另修掉 `streamChat` 中途取消用例的时序竞态：原先固定 5 ms 定时器与“首个 delta 已收到”竞速，全量套件高负载下会先取消、`chunks` 为空而失败；现在改为首个 delta 送达后立即取消，服务端有上限地继续发数据——取消失效时断言失败而不是挂住套件（已实测 sabotage 后变红）。全量 **217 项**，两个类型检查零输出。
+
 - **0.8.0** — 详情回到侧栏、可解释的写锁与文件日志：
   - **详情与操作回到侧栏**：撤销 0.7.1 的 editor-area Commit Inspector。悬停详情重新使用侧栏内的浮动 tooltip（含复制 message、打开变更），右键/`Shift+F10` 重新使用侧栏内菜单；多选 ≥2 时的右键菜单直接提供批量锁定、批量删除与连续区间生成 Diff，不再新开编辑器面板。相关 panel/lifecycle/preview/dismiss 模块与其测试一并删除，v0.7.1 的拖拽稳定性、Refresh feedback、文件级批量 SCM 与紧凑锁定摘要全部保留。
   - **根治“上一个操作尚未完成，请稍候。”**：`runGit` 不再等待 `close` 事件——子进程 `exit` 后立即在输出排空或 50ms 宽限期结算，因此 Git hook / rebase editor 留下的、继承 stdio 的孙进程无法再永久挂住调用；超时与 Abort 只在固定宽限后结算一次，并用 `taskkill /T /F`（Windows）或进程组信号（POSIX）**尝试**回收进程树；`taskkill` 只能沿树根向下枚举，已脱离或期间新建的孙进程可能存活——那只是进程泄漏，不再阻塞结算或占用调用方 deadline。

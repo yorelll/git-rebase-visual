@@ -6,19 +6,36 @@ import * as path from "path";
 export const DEFAULT_LOG_RETENTION = 10;
 /** A single session file rotates once it exceeds this size. */
 export const DEFAULT_LOG_MAX_BYTES = 4 * 1024 * 1024;
-/** Folder-name prefix inside the temp log root. */
+/** Folder-name prefix inside the per-user log root. */
 export const LOG_FOLDER_PREFIX = "git-rebase-visual";
 
 /**
  * Absolute log directory for this extension version:
- * `<tmp>/log/git-rebase-visual-<version>`.
+ * `<home>/tmp/log/git-rebase-visual-<version>`.
  *
- * The version segment keeps diagnostics from different builds apart, which is
- * what a user needs when attaching logs to a bug report.
+ * It lives **under the user's home**, not the system temp directory: logs are
+ * something the user asks for and attaches to a bug report, so they must be
+ * findable at a predictable path (`~/tmp/log/...` on Linux and macOS,
+ * `C:\Users\<user>\tmp\log\...` on Windows). 0.8.0 wrote to `os.tmpdir()`,
+ * which is `/tmp` on Linux — a location users do not browse.
+ *
+ * The version segment keeps diagnostics from different builds apart. `home` is
+ * injectable so tests never depend on the machine they run on.
  */
-export function logDirectory(version: string, tmpdir: string = os.tmpdir()): string {
+export function logDirectory(version: string, home: string = os.homedir()): string {
   const safeVersion = String(version || "0.0.0").replace(/[^0-9A-Za-z._-]/g, "_");
-  return path.join(tmpdir, "log", `${LOG_FOLDER_PREFIX}-${safeVersion}`);
+  return path.join(home, "tmp", "log", `${LOG_FOLDER_PREFIX}-${safeVersion}`);
+}
+
+/**
+ * Root that pre-0.8.1 builds wrote their log folders under (`os.tmpdir()/log`).
+ * Only ever read, to tell the user once where their older logs are; nothing
+ * writes here any more. The note names this *root* rather than a versioned
+ * subfolder: old folders carry the version that wrote them, so a 0.8.1 install
+ * has no matching folder there and naming one would invent a directory.
+ */
+export function legacyLogRoot(tmpdir: string = os.tmpdir()): string {
+  return path.join(tmpdir, "log");
 }
 
 /** Session file name. Timestamped so multiple hosts can coexist. */

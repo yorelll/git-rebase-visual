@@ -320,6 +320,15 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     logDiagnostic(operation, safe);
   }
 
+  /**
+   * One-line note in the shared OutputChannel. Used for the log-location move:
+   * users who look for logs where 0.8.0 put them need to be told once, in the
+   * place they are already looking, and never by a notification.
+   */
+  public noteLogLocation(message: string): void {
+    this.log("logs", message);
+  }
+
   /** User-initiated title/command refresh with quiet polling kept separate. */
   public async refreshFromCommand(): Promise<void> {
     await this.refresh();

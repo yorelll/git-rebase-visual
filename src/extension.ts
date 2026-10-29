@@ -6,8 +6,11 @@ import { createGitContentRequestStore } from "./ui/gitDiffRequestState";
 import { createGeneratedDiffSnapshotStore } from "./ui/generatedDiffDocument";
 import { GeneratedDiffProvider, generatedDiffScheme } from "./ui/generatedDiffProvider";
 import { setGitInvocationObserver } from "./git/gitRunner";
-import { FileLogger, logDirectory } from "./diagnostics/fileLogger";
+import { FileLogger, legacyLogRoot, logDirectory } from "./diagnostics/fileLogger";
 import { setDiagnosticsLogger, warnDiagnostic } from "./diagnostics/diagnostics";
+
+/** The log-location note is said once per extension-host session, not per click. */
+let legacyLogHintShown = false;
 
 export function activate(context: vscode.ExtensionContext): void {
   const version = String(context.extension?.packageJSON?.version ?? "0.0.0");
@@ -74,6 +77,17 @@ export function activate(context: vscode.ExtensionContext): void {
       vscode.commands.executeCommand("workbench.view.extension.gitRebaseVisual")
     ),
     vscode.commands.registerCommand("gitRebaseVisual.openLogs", async () => {
+      // 0.8.0 and earlier wrote to the OS temp directory. Say so once per
+      // session: those files are still on disk, but they will never be pruned
+      // or rotated again, so a user attaching logs should know both places. The
+      // note names the legacy *root*: old folders there are suffixed with the
+      // version that wrote them, so no 0.8.1 folder exists under it.
+      if (!legacyLogHintShown) {
+        legacyLogHintShown = true;
+        provider.noteLogLocation(
+          `日志目录自 0.8.1 起位于 ${logDirectory(version)}；0.8.1 之前的日志在 ${legacyLogRoot()} 下（按当时的版本分子目录），旧文件仍保留在那里。`
+        );
+      }
       // The folder is created lazily, so make sure it exists before revealing.
       const folder = logger.ensureDirectory();
       const uri = vscode.Uri.file(folder);

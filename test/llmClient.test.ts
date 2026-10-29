@@ -164,37 +164,66 @@ test("LLM requests honor caller cancellation", async () => {
 test("streamChat mid-stream cancellation stops draining the response", async () => {
   const chunks: string[] = [];
   const controller = new AbortController();
-  // Stream one delta then hold the connection open. The hardening races each
-  // `reader.read()` against the abort signal, so the loop must stop promptly
-  // (no further deltas) and surface the caller's abort reason.
+  // Stream one delta, then keep emitting more so a client that failed to stop
+  // would visibly over-collect. The hardening races each `reader.read()`
+  // against the abort signal, so the loop must stop promptly after the abort
+  // and surface the caller's abort reason.
   //
-  // The abort fires from within the server handler, so the abort dispatch runs
-  // in the streamChat flow (not from a detached timer that could surface the
-  // rejection after the test body completes).
+  // The abort is triggered from `onDelta` — i.e. only once the client has
+  // *actually* received the first delta — instead of from a fixed timer. A
+  // timer races the first read: under a loaded machine the abort could fire
+  // before the client parsed anything, leaving `chunks` empty and failing the
+  // assertion for a reason unrelated to cancellation. Aborting from the
+  // callback keeps the same coverage (cancel while draining a live stream)
+  // while making the "one delta was received" precondition deterministic.
   await withServer((_req, res) => {
     res.writeHead(200, { "Content-Type": "text/event-stream" });
     res.write('data: {"choices":[{"delta":{"content":"partial"}}]}\n\n');
-    setTimeout(() => {
-      res.end();
-      // Abort listeners have already run by the time this returns; the abort
-      // dispatch may rethrow one of their rejections, so seal it — the test
-      // only asserts the stream rejects with the reason.
-      try {
-        controller.abort(new Error("user cancelled"));
-      } catch {
-        // ignore — the abort was already delivered to all listeners
+    // Bounded so a client that ignored the abort would fail the assertion
+    // below instead of hanging the suite: at most 20 late deltas, then the
+    // stream ends on its own.
+    let late = 0;
+    const pump = setInterval(() => {
+      if (res.writableEnded) {
+        clearInterval(pump);
+        return;
       }
+      if (late++ >= 20) {
+        clearInterval(pump);
+        res.end();
+        return;
+      }
+      res.write('data: {"choices":[{"delta":{"content":"late"}}]}\n\n');
     }, 5);
+    res.on("close", () => clearInterval(pump));
   }, async (cfg) => {
     await assert.rejects(
-      () => streamChat(cfg, messages, (c) => chunks.push(c), { signal: controller.signal }),
+      () =>
+        streamChat(
+          cfg,
+          messages,
+          (c) => {
+            chunks.push(c);
+            // Abort listeners have already run by the time this returns; the
+            // abort dispatch may rethrow one of their rejections, so seal it —
+            // the test only asserts the stream rejects with the reason.
+            if (chunks.length === 1) {
+              try {
+                controller.abort(new Error("user cancelled"));
+              } catch {
+                // ignore — the abort was already delivered to all listeners
+              }
+            }
+          },
+          { signal: controller.signal }
+        ),
       /user cancelled/
     );
     // Let undici's response-body teardown settle inside the test so no async
     // activity outlives it (node:test reports it as post-test activity).
     await new Promise((r) => setTimeout(r, 20));
   });
-  // Only the first delta arrived before cancellation.
+  // Only the first delta was delivered; the stream was not drained afterwards.
   assert.deepEqual(chunks, ["partial"]);
 });
 

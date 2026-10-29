@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import * as fs from "fs";
 import * as path from "path";
-import { resolveBase, executeRebase } from "../src/git/rebaseEngine";
+import { continueRebase, resolveBase, executeRebase } from "../src/git/rebaseEngine";
+import { isRebaseInProgress } from "../src/git/commitLog";
 import {
   reconcilePendingAppend,
   reconcilePendingStash,
@@ -1001,6 +1002,62 @@ test("a full recovery pass invokes no stash-removing Git command", async (t) => 
     "keep WORKTREE\n",
     "the worktree-only content was restored"
   );
+});
+
+test("a keep-index stash rebased after the amend restores its residual instead of reporting a false conflict", async (t) => {
+  const cwd = createRepo();
+  cleanup(t, cwd);
+  const first = commitFile(cwd, "first.txt", "first\n", "first");
+  const target = commitFile(cwd, "target.txt", "target\n", "target");
+  commitFile(cwd, "later.txt", "later\n", "later");
+
+  // The user's shape: a staged append plus worktree-only edits on a tracked file
+  // the edit-stop commit owns. That is the shape that rebases cleanly and then
+  // leaves the worktree at the committed content.
+  fs.writeFileSync(path.join(cwd, "append.txt"), "append\n", "utf8");
+  git(cwd, ["add", "append.txt"]);
+  fs.writeFileSync(path.join(cwd, "first.txt"), "first WORKTREE\n", "utf8");
+  fs.writeFileSync(path.join(cwd, "residual.txt"), "residual\n", "utf8");
+  const changeStash = await stashPush(cwd);
+  assert.ok(changeStash, "the pre-append snapshot was created");
+
+  const stopped = await executeRebase(cwd, {
+    onto: await resolveBase(cwd, first),
+    items: [
+      { hash: first, action: "pick", subject: "first" },
+      { hash: target, action: "edit", subject: "target" },
+    ],
+  });
+  assert.equal(stopped.stopped, true);
+  assert.equal((await stashApplyIndexBySha(cwd, changeStash)).ok, true);
+  git(cwd, ["commit", "--amend", "--no-edit"]);
+  const unstagedStash = await stashPushKeepIndex(cwd);
+  assert.ok(unstagedStash, "the keep-index worktree stash was created");
+
+  // `rebase --continue` replays the commit that follows the edited target. That
+  // replay rewrites the index and puts the follow-up commit's files in the
+  // worktree, so after it the pre-rebase residual paths no longer match the
+  // snapshot even though the residual itself was never in the amended commit.
+  const continued = await continueRebase(cwd);
+  assert.equal(continued.ok, true, `rebase --continue failed: ${continued.message}`);
+  assert.equal(await isRebaseInProgress(cwd), false);
+
+  const outcome = await reconcilePendingAppend(cwd, {
+    changeStash,
+    unstagedStash,
+    targetHash: target,
+    amended: true,
+  });
+
+  assert.notEqual(outcome.kind, "pending", "the residual was restorable, so no warning is warranted");
+  assert.equal(
+    fs.readFileSync(path.join(cwd, "first.txt"), "utf8").replace(/\r\n/g, "\n"),
+    "first WORKTREE\n",
+    "the worktree-only edit is back"
+  );
+  assert.equal(fs.readFileSync(path.join(cwd, "residual.txt"), "utf8").replace(/\r\n/g, "\n"), "residual\n");
+  const remaining = git(cwd, ["stash", "list", "--format=%H"]).split("\n").map((line) => line.trim()).filter(Boolean);
+  assert.deepEqual(remaining.sort(), [changeStash, unstagedStash].sort(), "both recovery copies survive");
 });
 
 test("a conflicting worktree restore never removes the stash it failed to apply", async (t) => {

@@ -311,13 +311,46 @@ async function restoreResidualSnapshot(cwd: string, sha: string): Promise<Residu
     if (exists === (snapshotBlob !== undefined) && current === snapshotBlob) {
       continue;
     }
+    // A keep-index stash is pushed *after* `commit --amend`, so `stash^2` is the
+    // exact tree that amend committed. `rebase --continue` then leaves every
+    // path that commit owns at precisely that content, so a worktree blob equal
+    // to `stash^2:path` means the path holds the transaction's own committed
+    // bytes rather than something the user typed since: putting the snapshot's
+    // worktree version back is exactly what the user needs.
+    //
+    // This is byte equality with the committed tree, not proof that nobody ever
+    // wrote to the path. The 0.8.0 advice (`git stash apply --index <name>`)
+    // could itself leave the worktree holding those same bytes, so a user who
+    // followed it and then came back here may have the snapshot reinstated over
+    // identical content. That is recoverable and never destructive: the bytes
+    // being overwritten are the ones the amended commit still holds, so
+    // `git checkout <amended> -- <path>` restores them.
+    //
+    // Before this, such a path fell through to the "carries newer edits" branch
+    // and was reported as a conflict. The user was then told to run
+    // `git stash apply --index`, which re-runs this comparison and produces the
+    // same false conflict — a loop with no exit. The check is on Git state (not
+    // the persisted `amended` flag) and only ever writes when the current blob
+    // is the transaction's own committed blob, so newer user content — anything
+    // that differs from `stash^2` — is still refused below.
+    //
+    // A snapshot *deletion* is deliberately excluded: restoring it would remove
+    // a file as a side effect, which stays a conflict.
+    if (snapshotBlob !== undefined && exists && current !== undefined) {
+      const committedBlob = await revBlob(cwd, `${sha}^2`, filePath);
+      if (committedBlob !== undefined && current === committedBlob) {
+        unstagedPaths.push(filePath);
+        continue;
+      }
+    }
     // "Untouched" must be measured against the snapshot, never against HEAD:
     // once the user commits newer content, worktree == HEAD again and a
     // HEAD-relative check calls the path clean, overwrites that newer committed
     // content with the stale snapshot, and drops the recovery copy. The snapshot
-    // blob itself is the only valid baseline — anything else at the path is a
-    // conflict. (The case worktree == snapshot blob returned above; so only an
-    // absent path is safe to write.)
+    // blob itself is the only write baseline — anything else at the path is a
+    // conflict. (Two safe cases returned above: worktree == snapshot blob, and
+    // worktree == `stash^2` with the snapshot having content; so a path is only
+    // written below when it is absent and the snapshot has content.)
     if (!snapshotBlob || exists) {
       // Either the snapshot itself deleted the path (restoring would delete a
       // file as a side effect) or the path carries newer edits.
@@ -363,7 +396,26 @@ async function restoreResidualSnapshot(cwd: string, sha: string): Promise<Residu
   return { ok: true, restored, conflicts };
 }
 
-/** Whether the parts of a snapshot that live only in the worktree are back. */
+/**
+ * Whether the parts of a snapshot that live only in the worktree are back.
+ *
+ * Audit note for the `worktree=missing unstaged=missing` shape seen in 0.8.0
+ * logs: that signal is real, not a probe artefact. It was measured with real
+ * Git — after `rebase --continue` the worktree no longer holds the snapshot's
+ * unstaged bytes, so the probe reports `missing` and
+ * `reconcilePendingAppend` restores through `restoreResidualSnapshot` before
+ * reporting `restored`.
+ *
+ * Note what this probe does *not* tell you: it reports `missing` whether or not
+ * the replayed commit owns the path, so it cannot be read as "the commit does
+ * not have this content". What keeps that shape safe is the `stash^2`
+ * committed-blob guard in `restoreResidualSnapshot`, not this comparison.
+ * A later commit that rewrites the path instead conflicts during the rebase or
+ * during the re-apply that follows it, so reconciliation is never reached for
+ * that shape. No shape was found in which this signal alone yields a false
+ * `pending` or a false `resolved`; the probes below only ever promote a part on
+ * a successful positive comparison.
+ */
 function residualPresent(presence: StashPresence): boolean {
   return presence.untracked === "present" && presence.unstaged === "present";
 }

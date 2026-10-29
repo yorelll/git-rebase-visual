@@ -8,6 +8,7 @@ import {
   LOG_FOLDER_PREFIX,
   FileLogger,
   formatLogLine,
+  legacyLogRoot,
   logDirectory,
   redactLogLine,
   rotatedLogFileName,
@@ -18,19 +19,34 @@ function tempRoot(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "grv-log-test-"));
 }
 
-test("log directory lives under the temp dir and is version-scoped", () => {
-  const dir = logDirectory("0.8.0", "C:\\tmp");
-  assert.equal(dir, path.join("C:\\tmp", "log", `${LOG_FOLDER_PREFIX}-0.8.0`));
+test("log directory lives under the user's home, not the OS temp dir", () => {
+  // The home is injected so the assertion never depends on this machine's user.
+  const home = path.join("C:", "Users", "someone");
+  const dir = logDirectory("0.8.1", home);
+  assert.equal(dir, path.join(home, "tmp", "log", `${LOG_FOLDER_PREFIX}-0.8.1`));
+});
+
+test("log directory is under home/tmp/log on POSIX too", () => {
+  const dir = logDirectory("0.8.1", "/home/someone");
+  assert.equal(dir, path.join("/home/someone", "tmp", "log", `${LOG_FOLDER_PREFIX}-0.8.1`));
 });
 
 test("log directory sanitizes an unsafe version segment", () => {
-  const dir = logDirectory("0.8.0-beta/../evil", "/tmp");
-  assert.equal(path.basename(dir), `${LOG_FOLDER_PREFIX}-0.8.0-beta_.._evil`);
-  assert.equal(path.dirname(dir), path.join("/tmp", "log"));
+  const dir = logDirectory("0.8.1-beta/../evil", "/home/someone");
+  assert.equal(path.basename(dir), `${LOG_FOLDER_PREFIX}-0.8.1-beta_.._evil`);
+  assert.equal(path.dirname(dir), path.join("/home/someone", "tmp", "log"));
 });
 
 test("an empty version falls back to 0.0.0 instead of an empty folder name", () => {
-  assert.equal(path.basename(logDirectory("", "/tmp")), `${LOG_FOLDER_PREFIX}-0.0.0`);
+  assert.equal(path.basename(logDirectory("", "/home/someone")), `${LOG_FOLDER_PREFIX}-0.0.0`);
+});
+
+test("the legacy root is the OS temp dir's log folder, separate from the new one", () => {
+  const root = legacyLogRoot("/tmp");
+  assert.equal(root, path.join("/tmp", "log"));
+  assert.notEqual(root, logDirectory("0.8.1", "/home/someone"));
+  // 0.8.0 put versioned folders inside this root; nothing writes there any more.
+  assert.equal(path.join(root, `${LOG_FOLDER_PREFIX}-0.8.0`), path.join("/tmp", "log", `${LOG_FOLDER_PREFIX}-0.8.0`));
 });
 
 test("session file names are timestamped and unique per host/rotation", () => {
