@@ -103,7 +103,7 @@
 
 ### 测试与发布校验
 
-- 本地执行 `npm run test`：运行逻辑、边界和真实 Git 临时仓库集成测试。
+- 本地执行 `npm run test`：运行逻辑、边界和真实 Git 临时仓库集成测试（`scripts/run-tests.js` 枚举全部 `test/*.test.ts`，由 Node 按文件并发 3 调度）。
 - 本地执行 `npm run test:coverage`：在上述测试基础上输出 Node 测试覆盖率报告。
 - 推送版本标签触发 Release 时，GitHub Actions 会依次执行类型检查、覆盖率测试、VSIX 打包、VSIX 内容检查以及 RELEASE.md 版本记录检查；任一步失败都不会创建 Release。
 

@@ -115,7 +115,7 @@ code --install-extension dist-vsix/git-rebase-visual-<version>.vsix
 | Git 集成测试 | 临时仓库中的 staged/unstaged 状态、stash apply/pop/drop、keep-index、提交范围、rebase edit 停靠与绝对 git-path |
 | 发布测试 | TypeScript 类型检查、VSIX 内容必须与显式白名单**逐项完全一致**（多一条、少一条都失败）、Release 版本记录检查 |
 
-测试文件位于 `test/`，运行 `npm run test` 或 `npm run test:coverage`。
+测试文件位于 `test/`，运行 `npm run test` 或 `npm run test:coverage`。两者都经 `scripts/run-tests.js` 枚举全部 `test/*.test.ts` 并交给 Node 按文件调度（并发 3），不再有汇总入口文件；`npm run test:release` 仍是全量门禁，不会分成子集。
 
 ### 更新记录
 

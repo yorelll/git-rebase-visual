@@ -198,8 +198,8 @@
     "compile": "node esbuild.js",
     "watch": "node esbuild.js --watch",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.test.json --noEmit",
-    "test": "tsx --test test/index.test.ts",
-    "test:coverage": "tsx --test --experimental-test-coverage test/index.test.ts",
+    "test": "node scripts/run-tests.js",
+    "test:coverage": "node scripts/run-tests.js -- --experimental-test-coverage",
     "test:release": "npm run typecheck && npm run test:coverage",
     "vscode:prepublish": "npm run compile",
     "package": "node scripts/package-vsix.js"

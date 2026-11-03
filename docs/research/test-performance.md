@@ -1,5 +1,10 @@
 # 测试性能分析（2026-10-30）
 
+> **⚠️ 已被取代（superseded，2026-11-03）。** 本报告是实施**之前**的只读分析，其中的方案**不要照抄**。
+> 实际实施的是：`package.json` 的 `test` / `test:coverage` 指向 `scripts/run-tests.js`，由该脚本在 Node 内**枚举** `test/*.test.ts` 后交给 `node:test` 按文件调度（`--test-concurrency=3`），**没有**采用本文 §候选 B 的 `tsx --test "test/**/*.test.ts"` glob 形式。原因：CI 固定 `node-version: 20`（`.github/workflows/release.yml`），而 `node --test` 接受 glob 参数是 Node 22 起才有的能力（Node 20 的 `doc/api/test.md` 完全没有 glob 语义，会把 `test/**/*.test.ts` 当字面路径）；另外 shell 对 `*`/`**` 的展开规则在 bash、cmd.exe 之间不一致。改回 glob 会让发布门禁在 CI 上失败。
+> 另有两处数字已过时：本文的 217 个测试是旧树，当前为 **275 个测试 / 43 个文件**；`pendingRecovery.integration.test.ts` 已拆为 **3 个文件共 60 个测试**。
+> 本文的**测量方法和结论**（进程启动是主要成本、拆分收益、并发取 3 而非 6）仍然有效，值得保留。
+
 本文件记录一次只读的性能排查：为什么 `npm test`（`tsx --test test/index.test.ts`）在本机 Windows + MSYS Git 环境下需要约 21 分钟，以及哪些优化值得做、分别有多大风险。所有数字都来自本 worktree 内的实测，估算值已标注依据。
 
 **结论先说：这不是 CPU 慢，也不是测试写得复杂，而是进程启动开销。** 217 个测试里 100 个需要真实 Git，合计产生 2,574 次子进程启动；在每次 Git 启动约 220–470 ms 的机器上，这部分就是墙钟时间的主体。测试本身的计算量（非子进程时间）只有 11.9 秒。
@@ -283,6 +288,8 @@ single process (--test-isolation=none)           wall=7.4s  pass=117 fail=0
 **风险**：低。唯一需要注意的是 `setGitInvocationObserver` 是进程级全局（`pendingRecovery` 里有用到），但每个测试自己 `t.after(() => setGitInvocationObserver(undefined))`，跨进程反而更隔离。
 
 ### 候选 B：去掉聚合器，让 Node 按文件调度
+
+> **已实施，但命令不是下面这条。** 实际实现见 `scripts/run-tests.js`：枚举文件后调用 `node:test`，不向 `tsx`/`node` 传 glob。**不要**把 `package.json` 改回 `tsx --test "test/**/*.test.ts"`——CI 是 Node 20，不把 glob 参数当模式，发布门禁会失败。详见文首横幅。
 
 **依据**：见 §3.4 的对照表，700.4 s（并发 3，全绿）。当前 1,269.7 s。
 
