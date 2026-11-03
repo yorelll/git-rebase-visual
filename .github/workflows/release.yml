@@ -46,18 +46,18 @@ jobs:
         shell: bash
         run: |
           version="${GITHUB_REF_NAME#v}"
-          test -f "git-rebase-visual-$version.vsix"
-          unzip -l "git-rebase-visual-$version.vsix" | grep -q 'extension/dist/extension.js'
-          unzip -l "git-rebase-visual-$version.vsix" | grep -q 'extension/dist/seq-editor.js'
-          unzip -l "git-rebase-visual-$version.vsix" | grep -q 'extension/media/main.js'
-          unzip -l "git-rebase-visual-$version.vsix" | grep -q 'extension/package.json'
-          ! unzip -l "git-rebase-visual-$version.vsix" | grep -q 'extension/src/'
-          ! unzip -l "git-rebase-visual-$version.vsix" | grep -q 'extension/test/'
-          ! unzip -l "git-rebase-visual-$version.vsix" | grep -q 'extension/docs/'
-          ! unzip -l "git-rebase-visual-$version.vsix" | grep -q 'extension/node_modules/'
-          # Sourcemaps embed `sourcesContent` (the full TypeScript sources), so
-          # a shipped .map is both a source leak and dead weight at runtime.
-          ! unzip -Z1 "git-rebase-visual-$version.vsix" | grep -q '\.map$'
+          # `npm run package` writes into dist-vsix/ so build output never litters
+          # the repository root.
+          vsix="dist-vsix/git-rebase-visual-$version.vsix"
+          test -f "$vsix"
+
+          # The allowlist lives in exactly one place: `expectedEntries` in
+          # scripts/package-vsix.js. An earlier version of this step repeated the
+          # 12-entry list in a heredoc, so shipping a file meant editing the same
+          # list twice and a half-edit failed here rather than at the source.
+          # `--verify-only` re-runs that single check against the artifact the
+          # previous step produced, without rebuilding it.
+          node scripts/package-vsix.js --verify-only
 
       - name: Verify final release body
         shell: bash
@@ -78,4 +78,4 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --title "Git Rebase Visual v$version" \
             --notes-file "docs/release-notes/$version.md" \
-            "git-rebase-visual-$version.vsix#Git Rebase Visual v$version"
+            "dist-vsix/git-rebase-visual-$version.vsix#Git Rebase Visual v$version"

@@ -156,3 +156,57 @@ test("single-file stage updates an RM record through only its working-side path"
   assert.equal(git(cwd, ["show", ":new.txt"]), "renamed and modified");
   assert.equal(changes.find((change) => change.path === "unrelated.txt")?.unstaged, true, "does not stage unrelated changes");
 });
+
+/**
+ * `GIT_LITERAL_PATHSPECS` on the single-file stage/restore calls.
+ *
+ * Every path these functions receive comes *from* Git status, so it must be
+ * passed back as a literal. Without the env a name like `br[1].txt` is read as a
+ * character-class pattern and matches `br1.txt` instead: `git add -A -- br[1].txt`
+ * stages the decoy's newer bytes, silently putting an unrelated file into the
+ * index while the file the user clicked stays untracked.
+ *
+ * The decoy gets *different* content at each step than the file being staged, so
+ * a wrong-glob write shows up as a changed blob. A decoy whose bytes already
+ * equalled the target's would let the bug pass unnoticed.
+ */
+test("a glob-named path is staged and restored literally, never touching its decoy", async (t) => {
+  const cwd = createRepo();
+  t.after(() => removeRepo(cwd));
+  commitFile(cwd, "br1.txt", "DECOY-COMMITTED\n", "decoy");
+  commitFile(cwd, "br[1].txt", "ORIGINAL\n", "glob file");
+
+  // Both files carry a working-tree edit. The decoy's edit is what makes a glob
+  // match observable: staging a *clean* decoy writes the same bytes it already
+  // has, which is indistinguishable from never touching it. Only a decoy with
+  // pending changes turns "the pattern matched it too" into a visible change.
+  fs.writeFileSync(path.join(cwd, "br[1].txt"), "USER-EDIT\n", "utf8");
+  fs.writeFileSync(path.join(cwd, "br1.txt"), "DECOY-EDIT\n", "utf8");
+
+  let changes = await getWorktreeChanges(cwd);
+  const glob = changes.find((change) => change.path === "br[1].txt")!;
+  assert.ok(glob, "status reports the glob-named path");
+
+  // 1. Single-file stage of the glob-named path. A glob match would stage the
+  //    decoy's edit as well, so the decoy would gain a staged entry.
+  await stageWorktreeChange(cwd, glob);
+  assert.equal(git(cwd, ["show", ":br[1].txt"]), "USER-EDIT", "the glob-named path is staged literally");
+  assert.equal(git(cwd, ["show", ":br1.txt"]), "DECOY-COMMITTED", "the decoy is not staged over");
+  const decoyAfterStage = (await getWorktreeChanges(cwd)).find((change) => change.path === "br1.txt");
+  assert.ok(decoyAfterStage?.unstaged, "the decoy still has its edit only in the worktree");
+  assert.ok(!decoyAfterStage?.staged, "and nothing was staged for it");
+
+  // 2. Staged-side restore of the glob-named path. The decoy now has a staged
+  //    entry too (staged above via `git add`), so a glob match would discard it.
+  git(cwd, ["add", "br1.txt"]);
+  assert.equal(git(cwd, ["show", ":br1.txt"]), "DECOY-EDIT", "the decoy's edit is staged for this step");
+  changes = await getWorktreeChanges(cwd);
+  await restoreWorktreeChange(cwd, changes.find((change) => change.path === "br[1].txt")!, "staged");
+  assert.equal(git(cwd, ["show", ":br1.txt"]), "DECOY-EDIT", "the decoy's index entry is not rewritten by a glob match");
+  assert.equal(git(cwd, ["show", ":br[1].txt"]), "ORIGINAL", "the targeted path really was unstaged");
+  assert.equal(
+    fs.readFileSync(path.join(cwd, "br1.txt"), "utf8").replace(/\r\n/g, "\n"),
+    "DECOY-EDIT\n",
+    "and the decoy's working content is never touched by a staged-side restore"
+  );
+});

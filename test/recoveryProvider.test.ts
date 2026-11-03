@@ -418,3 +418,328 @@ test("a conflicted restore names the recovery stash by slot and by sha", async (
   assert.match(message!.text, /git stash apply/, "with an actionable command");
   assert.equal(git(cwd, ["rev-parse", "refs/stash"]), sha, "the copy is never removed");
 });
+
+/**
+ * The 0.8.1 report was that a successful recovery left the plugin's auto-stash
+ * listed, so a bare `git stash pop` targeted the plugin's entry instead of the
+ * user's own and failed with `could not restore untracked files from stash`.
+ *
+ * Autostash means stash → rebase → pop, and a pop removes the entry. The fix is
+ * to remove our own entry, not to announce it: after a successful recovery
+ * `git stash list` must hold exactly what the user had before the plugin acted.
+ */
+test("a completed auto-stash recovery removes the plugin's own entry", async (t) => {
+  const harness = createHarness(t);
+  const cwd = harness.cwd;
+  commitFile(cwd, "base.txt", "base\n", "base");
+  // The auto-stash shape from the report: a worktree edit plus an untracked file.
+  fs.writeFileSync(path.join(cwd, "base.txt"), "work\n", "utf8");
+  fs.writeFileSync(path.join(cwd, "rtsispd.patch"), "my patch\n", "utf8");
+  git(cwd, ["stash", "push", "-u", "-q"]);
+  const sha = git(cwd, ["rev-parse", "stash@{0}"]);
+  await setPendingStash(harness, sha);
+  stub.messages.length = 0;
+
+  await (harness.provider as any).recoverPendingStash(cwd, await recordRoot(cwd));
+
+  const message = stub.messages.at(-1);
+  assert.ok(message, "a successful recovery is announced");
+  assert.match(message!.text, /已恢复/, "it says the recovery finished");
+  assert.match(message!.text, /已删除/, "and that the plugin's temporary entry is gone");
+  assert.doesNotMatch(message!.text, /git stash drop/, "there is nothing left for the user to clean up");
+  assert.equal(git(cwd, ["stash", "list"]), "", "the plugin's entry is really gone");
+  // `core.autocrlf` rewrites the line ending on checkout, so compare the text.
+  assert.equal(
+    fs.readFileSync(path.join(cwd, "rtsispd.patch"), "utf8").replace(/\r\n/g, "\n"),
+    "my patch\n",
+    "the untracked file came back"
+  );
+  assert.equal(await pendingStashOf(harness), undefined, "the record is settled");
+});
+
+test("an already-present auto-stash (resolved) also removes the plugin's own entry", async (t) => {
+  const harness = createHarness(t);
+  const cwd = harness.cwd;
+  commitFile(cwd, "base.txt", "base\n", "base");
+  const sha = stashWork(cwd);
+  // Restore the content by hand, so reconciliation takes the `resolved` branch
+  // (no apply needed). This was the fully silent case; it is now also the case
+  // that must not strand the entry.
+  git(cwd, ["stash", "apply", "-q"]);
+  await setPendingStash(harness, sha);
+  stub.messages.length = 0;
+
+  await (harness.provider as any).recoverPendingStash(cwd, await recordRoot(cwd));
+
+  assert.equal(git(cwd, ["stash", "list"]), "", "the entry is removed once its content is verified back");
+  assert.equal(await pendingStashOf(harness), undefined, "the record is settled");
+});
+
+/**
+ * Announcing must not turn into a poll-loop notification. The record is cleared
+ * by the same pass, so the second pass finds nothing to settle and says nothing.
+ */
+test("the settled notice is not repeated on every poll", async (t) => {
+  const harness = createHarness(t);
+  const cwd = harness.cwd;
+  commitFile(cwd, "base.txt", "base\n", "base");
+  const sha = stashWork(cwd);
+  git(cwd, ["stash", "apply", "-q"]);
+  await setPendingStash(harness, sha);
+
+  await (harness.provider as any).recoverPendingStash(cwd, await recordRoot(cwd));
+  const afterFirst = stub.messages.length;
+
+  // Two more reconciles with the record gone: neither may add a message.
+  await (harness.provider as any).recoverPendingStash(cwd, await recordRoot(cwd));
+  await (harness.provider as any).recoverPendingStash(cwd, await recordRoot(cwd));
+  assert.equal(stub.messages.length, afterFirst, "nothing is repeated once the record is settled");
+});
+
+/**
+ * The append path shares `applyPendingOutcome`, so it has the same obligation:
+ * a settled append must not leave the transaction's change stash behind.
+ */
+test("a completed append recovery removes its change stash", async (t) => {
+  const harness = createHarness(t);
+  const cwd = harness.cwd;
+  commitFile(cwd, "base.txt", "base\n", "base");
+  fs.writeFileSync(path.join(cwd, "base.txt"), "work\n", "utf8");
+  git(cwd, ["stash", "push", "-q"]);
+  const sha = git(cwd, ["rev-parse", "stash@{0}"]);
+  git(cwd, ["stash", "apply", "-q"]);
+  const pendingAppend = {
+    changeStash: sha,
+    targetHash: git(cwd, ["rev-parse", "HEAD"]),
+    amended: true,
+  };
+  const map: Record<string, any> = {};
+  map[await recordRoot(cwd)] = pendingAppend;
+  await harness.ctx.workspaceState.update(PENDING_APPEND_KEY, map);
+  stub.messages.length = 0;
+
+  await (harness.provider as any).restorePendingAppend(cwd, await recordRoot(cwd), true);
+
+  assert.equal(git(cwd, ["stash", "list"]), "", "the transaction's change stash is removed");
+});
+
+/**
+ * The other half of the same promise. When our own entry cannot be removed —
+ * the slot moved out from under the removal, so the helper refuses — the user
+ * must be told which entry it is and how to clean it up, and must not be led to
+ * believe the user's own stashes are at risk. A settled record also stays
+ * settled: the entry is bookkeeping, not the record.
+ */
+test("a kept entry is reported by slot and sha, and says the user's stashes are untouched", async (t) => {
+  const harness = createHarness(t);
+  const cwd = harness.cwd;
+  commitFile(cwd, "base.txt", "base\n", "base");
+  // A staged change, so the snapshot has an index half of its own.
+  fs.writeFileSync(path.join(cwd, "base.txt"), "work\n", "utf8");
+  git(cwd, ["add", "base.txt"]);
+  git(cwd, ["stash", "push", "-q"]);
+  const sha = git(cwd, ["rev-parse", "stash@{0}"]);
+  // Put only the *worktree* half back by hand. `contentPresent` then holds but
+  // `complete` does not: the index no longer reproduces the staged half, so the
+  // entry is still the only record of the staged/unstaged split.
+  fs.writeFileSync(path.join(cwd, "base.txt"), "work\n", "utf8");
+  await setPendingStash(harness, sha);
+  stub.messages.length = 0;
+
+  await (harness.provider as any).recoverPendingStash(cwd, await recordRoot(cwd));
+
+  const message = stub.messages.at(-1);
+  assert.ok(message, "the kept entry is reported");
+  assert.match(message!.text, /没有删除/, "it says the entry was not removed");
+  assert.match(message!.text, /stash@\{0\}/, "and names the slot the user can act on");
+  assert.match(message!.text, new RegExp(sha.slice(0, 7)), "and the stable sha");
+  assert.match(message!.text, /git stash drop stash@\{0\}/, "with a command that can actually run");
+  assert.match(message!.text, /请先核对/, "and asks the user to check before deleting, instead of promising it is free");
+  assert.match(message!.text, /你自己压入的 stash 从头到尾没有被改动/, "and no fear about the user's own entries");
+  assert.equal(git(cwd, ["rev-parse", "stash@{0}"]), sha, "the entry really is still listed");
+  assert.equal(await pendingStashOf(harness), undefined, "the bookkeeping still settles: the content is back");
+});
+
+/**
+ * The wrong-drop path reports its result as a `kept` removal whose message
+ * explains that *another* entry was dropped and has been put back. Announcing
+ * that through the ordinary leftover message would name the user's entry and
+ * tell them to verify it and delete it — an instruction to delete their own
+ * stash, produced by the very code path that exists to stop that happening.
+ * The two shapes are therefore reported separately.
+ */
+test("an undone wrong drop is announced as the user's entry being restored, never as our leftover", async (t) => {
+  const harness = createHarness(t);
+  const cwd = harness.cwd;
+  commitFile(cwd, "base.txt", "base\n", "base");
+  const sha = stashWork(cwd);
+  git(cwd, ["stash", "apply", "-q"]);
+  const committed = git(cwd, ["rev-parse", "HEAD"]);
+  await setPendingStash(harness, sha);
+  stub.messages.length = 0;
+
+  const undoMessage =
+    "stash@{0} 在删除瞬间已变成 1111111（不是本扩展的条目）；已用 git stash store 原样恢复该条目，未丢失任何内容。" +
+    "注意：该条目现在位于列表最上方，它的 reflog 说明（git stash list 显示的 %gs）会变成 `git-rebase-visual restored 1111111`";
+  (harness.provider as any).announceSettled("autostash", {
+    kind: "resolved",
+    detail: "内容已在工作区",
+    stashRemoved: [
+      { status: "kept", kind: "undo-restored", sha: "2".repeat(40), name: undefined, victim: "1".repeat(40), message: undoMessage },
+    ],
+  });
+
+  const message = stub.messages.at(-1);
+  assert.ok(message, "the undo is reported");
+  assert.match(message!.text, /删到了别的条目/, "it says what actually went wrong");
+  assert.match(message!.text, /已用 git stash store 原样恢复/, "and that the entry is back");
+  assert.doesNotMatch(message!.text, /没有删除/, "it is not reported as our own unremoved leftover");
+  assert.doesNotMatch(message!.text, /git stash drop/, "and it never offers to drop the restored entry");
+  assert.doesNotMatch(message!.text, /请先核对/, "no instruction to check and delete the user's entry");
+  assert.equal(committed.length > 0, true);
+});
+
+test("a mixed result reports the leftover and the undo without confusing the two", async (t) => {
+  const harness = createHarness(t);
+  const cwd = harness.cwd;
+  commitFile(cwd, "base.txt", "base\n", "base");
+  const sha = stashWork(cwd);
+  git(cwd, ["stash", "apply", "-q"]);
+  await setPendingStash(harness, sha);
+  stub.messages.length = 0;
+
+  (harness.provider as any).announceSettled("autostash", {
+    kind: "resolved",
+    detail: "内容已在工作区",
+    stashRemoved: [
+      { status: "kept", kind: "leftover", sha: "3".repeat(40), name: "stash@{1}", message: "未能完整确认快照已回到索引与工作区" },
+      {
+        status: "kept",
+        kind: "undo-restored",
+        sha: "4".repeat(40),
+        name: undefined,
+        victim: "5".repeat(40),
+        message: "已用 git stash store 原样恢复该条目，未丢失任何内容",
+      },
+    ],
+  });
+
+  const message = stub.messages.at(-1);
+  assert.ok(message);
+  assert.match(message!.text, /stash@\{1\}/, "the real leftover is named with its slot");
+  assert.match(message!.text, /git stash drop stash@\{1\}/, "and offered as a cleanup command");
+  assert.match(message!.text, /未能完整确认/, "with its own reason");
+});
+
+/**
+ * The three refusals that are NOT "our leftover was kept" and NOT "a victim was
+ * restored". The announcer used to tell them apart by searching `message` for
+ * `"git stash store"`, which classified both of the following wrongly: the
+ * `ambiguous-refusal` text contains that phrase (inside a "you can run this
+ * manually" hint), so a refusal that restored nothing was announced as a
+ * successful restore; and an unreadable post-drop listing contains no such
+ * phrase, so it fell into the leftover branch and printed a `git stash drop
+ * <slot>` command for a slot whose occupant was unknown.
+ */
+test("an ambiguous refusal is not announced as a restore", async (t) => {
+  const harness = createHarness(t);
+  commitFile(harness.cwd, "base.txt", "base\n", "base");
+  stub.messages.length = 0;
+
+  // The exact wording the ambiguous branch produces, phrase included.
+  const ambiguous =
+    "删除 stash@{0} 时列表中有 2 个其他条目同时消失（1111111、2222222），无法确定删除的是哪一条；" +
+    "未尝试恢复，可用 git stash store <sha> 逐个恢复";
+  (harness.provider as any).announceSettled("autostash", {
+    kind: "resolved",
+    detail: "内容已在工作区",
+    stashRemoved: [
+      { status: "kept", kind: "ambiguous-refusal", sha: "9".repeat(40), name: undefined, message: ambiguous },
+    ],
+  });
+
+  const message = stub.messages.at(-1);
+  assert.ok(message, "the refusal is reported");
+  assert.doesNotMatch(message!.text, /已用 git stash store 原样恢复/, "nothing was restored");
+  assert.doesNotMatch(message!.text, /删到了别的条目/, "and no victim is claimed");
+  assert.doesNotMatch(message!.text, /git stash drop/, "no slot is offered for dropping either");
+  assert.match(message!.text, /未尝试恢复/, "the user is told what did not happen");
+  assert.match(message!.text, /git stash list/, "and how to check by hand");
+});
+
+test("an unreadable post-drop listing never offers a drop command", async (t) => {
+  const harness = createHarness(t);
+  commitFile(harness.cwd, "base.txt", "base\n", "base");
+  stub.messages.length = 0;
+
+  (harness.provider as any).announceSettled("autostash", {
+    kind: "resolved",
+    detail: "内容已在工作区",
+    stashRemoved: [
+      {
+        status: "kept",
+        kind: "undo-unknown",
+        sha: "9".repeat(40),
+        name: "stash@{0}",
+        message: "删除瞬间 stash@{0} 已是 7777777，已尝试恢复但失败：boom",
+      },
+    ],
+  });
+
+  const message = stub.messages.at(-1);
+  assert.ok(message);
+  assert.doesNotMatch(message!.text, /git stash drop/, "a slot whose occupant is unknown must not be offered");
+  assert.match(message!.text, /没有恢复任何条目/, "the announcement says nothing was restored");
+  assert.match(message!.text, /已尝试恢复但失败/, "and carries the failure reason");
+});
+
+test("a genuine leftover still offers the drop command", async (t) => {
+  const harness = createHarness(t);
+  commitFile(harness.cwd, "base.txt", "base\n", "base");
+  stub.messages.length = 0;
+
+  (harness.provider as any).announceSettled("autostash", {
+    kind: "resolved",
+    detail: "内容已在工作区",
+    stashRemoved: [
+      { status: "kept", kind: "leftover", sha: "3".repeat(40), name: "stash@{0}", message: "未能完整确认快照已回到索引与工作区" },
+    ],
+  });
+
+  const message = stub.messages.at(-1);
+  assert.ok(message);
+  assert.match(message!.text, /git stash drop stash@\{0\}/, "the cleanup command is offered for a known leftover");
+  assert.match(message!.text, /没有删除/, "and it is named as ours, not as a victim");
+});
+
+test("the no-witness caveat reaches the log and the user, not just the Git module", async (t) => {
+  const harness = createHarness(t);
+  commitFile(harness.cwd, "base.txt", "base\n", "base");
+  stub.messages.length = 0;
+
+  // The entry was removed, but the pre-drop listing could not be read, so a
+  // second loss cannot be ruled out. That caveat used to be built inside
+  // `res.message` and dropped by `removeOwnStash` before anyone saw it.
+  (harness.provider as any).announceSettled("autostash", {
+    kind: "resolved",
+    detail: "内容已在工作区",
+    stashRemoved: [
+      {
+        status: "removed",
+        kind: "removed",
+        sha: "6".repeat(40),
+        name: "stash@{0}",
+        uncrosschecked: true,
+        message: "该条目已确认从 stash 列表消失，但删除前的列表未能读取，无法交叉核对是否有其他条目一起消失",
+      },
+    ],
+  });
+
+  const message = stub.messages.at(-1);
+  assert.ok(message, "the user is told");
+  assert.match(message!.text, /无法交叉核对/, "the caveat reaches the user-facing toast");
+  assert.match(message!.text, /git stash list/, "with the command to check");
+  const line = stub.outputLines.find((text) => text.includes("uncrosschecked="));
+  assert.ok(line, "and it is written to the log with the sha");
+  assert.match(line!, /6666666/, "naming the entry it applies to");
+});

@@ -2,7 +2,7 @@
   "name": "git-rebase-visual",
   "displayName": "Git Rebase Visual",
   "description": "Visual interactive rebase: drag to reorder commits, reword, lock, and AI-generated commit messages.",
-  "version": "0.8.1",
+  "version": "0.8.2",
   "publisher": "local",
   "repository": {
     "type": "git",
@@ -202,7 +202,7 @@
     "test:coverage": "tsx --test --experimental-test-coverage test/index.test.ts",
     "test:release": "npm run typecheck && npm run test:coverage",
     "vscode:prepublish": "npm run compile",
-    "package": "vsce package --no-dependencies"
+    "package": "node scripts/package-vsix.js"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",

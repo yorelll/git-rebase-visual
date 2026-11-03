@@ -17,3 +17,11 @@ tsconfig.json
 tsconfig.test.json
 RELEASE.md
 docs/
+# Local build tooling; not needed at runtime.
+scripts/
+# Packaged output lives here; excluding it keeps a rebuild from walking its own
+# previous artifacts into the bundle. No trailing slash: a slash matches only a
+# directory, and the bug this guards against wrote a *regular file* named
+# `dist-vsix` instead.
+dist-vsix
+*.vsix

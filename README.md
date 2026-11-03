@@ -67,9 +67,11 @@
 - 插件会用原 message 执行 `git commit --amend --no-edit`，随后自动重放目标 commit 之后的提交；因此目标 commit 和其后的 hash 会变化。
 - 被锁定的 commit 不允许追加，须先明确解除锁定，避免修改依赖提交后绕过推送保护。
 - 若目标 commit 已包含在 upstream 中，确认弹窗会明确提示：操作会改写已推送历史，完成后需要用插件的 Push（`--force-with-lease`）更新远端。
-- 若有未暂存改动，插件会临时 stash 并在完成后恢复；只有操作开始时已暂存的内容会被追加。
+- 若有未暂存改动，插件会临时 stash 并在完成后恢复；只有操作开始时已暂存的内容会被追加。**追加到任何早于 tip 的 commit 都支持**：插件把快照拆成“工作区 / 暂存区 / 未跟踪”三部分、各自从自己的树恢复，因此后续 commit 才引入的文件不会被牵扯进本次追加。
 - 发生冲突或无法自动重放时，Git 保持可恢复状态并提示错误；请在 VSCode/终端解决后执行 `git rebase --continue` 或 `git rebase --abort`。
-- 若追加过程中插件退出（重载窗口、崩溃、卸载重装），下一次启动会以**真实 Git 状态**对账，而不是相信上次保存的标记：rebase 是否仍在进行、stash 是否仍在 `git stash list`、stash 的内容是否**已经存在于** index/worktree。内容已在 = 视为已恢复，静默清掉记录，不重复 apply、不弹警告；stash 内容尚未落地则自动 `apply --index` 恢复。**插件永远不会自动删除 stash**：恢复全程只用 `git stash apply`（绝不用 `pop`，自动路径上没有任何 `git stash drop`）。只有当内容被**明确确认**已在工作区/暂存区/HEAD 中时才清除记录；确认不了（模式位不同、revert 形状的 amend、重命名、字节巧合、探测失败等）就保留记录、横幅和 stash 三样东西，并在横幅里给出可一键复制的恢复命令。因此误判的最坏结果是**多留一个 stash**，而不是“唯一的副本被删掉”。对账**失败即保守**：任何一项探测（读 `^1`/`^2`/`^3` 对象、`git ls-tree`、`git diff`、`git stash list`）出错时都判定为“未知”而不是“已恢复”。
+- 若失败发生在“写入目标 commit”之前，提示会明确说明**此时不能 Continue**（暂存内容尚未写入目标 commit），请用 **Abort** 自动恢复原始改动。
+- 判断“这次 stash 是否真的创建了条目”只看**前后 sha 集合差**，不看 `git stash push` 的提示文案（`No local changes to save` 是会被翻译的 gettext 文案；依赖它会在非英语环境下把用户已有的 `stash@{0}` 记成插件创建的条目）：恰好新增一个才是自己的，没有新增（没东西可存）或有多个新增（并发 push）都不认领。
+- 若追加过程中插件退出（重载窗口、崩溃、卸载重装），下一次启动会以**真实 Git 状态**对账，而不是相信上次保存的标记：rebase 是否仍在进行、stash 是否仍在 `git stash list`、stash 的内容是否**已经存在于** index/worktree。内容已在 = 视为已恢复，静默清掉记录、不重复恢复、不弹警告；stash 内容尚未落地则按“工作区 / 暂存区 / 未跟踪”三段各自从自己的树恢复。注意“暂存区与快照一致”**不等于**追加已完成：若目标仍是 HEAD 祖先且变基仍在进行中，记录会保持 `pending` 并提示追加未完成，只有内容被确认进入 `HEAD`（或记录标记已 amend）才算落地。**插件只删除自己创建的 stash 条目，从不碰你自己压入的条目**。恢复本身始终只写内容（`git stash apply` / `git restore` / `git checkout`，绝不用 `pop`），只有在内容被**完整确认**（列表仍在、索引复现暂存那一半、worktree 复现改动、未跟踪文件逐字节一致，四处均为正面探测，`stashPresence().complete`）之后，才把插件自己那条临时条目删掉——此时它的内容已存在于条目之外，删除只是记账，不会丢失任何字节。结算后 `git stash list` 与你让插件动手之前**完全一致**（按 sha 集合比较），你压入的条目在整个过程中不会被删除或移动。确认不了（模式位不同、revert 形状的 amend、重命名、字节巧合、探测失败等）就保留记录、横幅和条目三样东西，并在横幅里给出可一键复制的恢复命令；这一类条目**只会在你明确要求时**由你删除——提示里会点名当前 `stash@{n}`（附稳定 sha）并给出可直接复制的 `git stash drop stash@{n}`，插件自己不会在未确认的情况下动手。对账**失败即保守**：任何一项探测（读 `^1`/`^2`/`^3` 对象、`git ls-tree`、`git diff`、`git stash list`）出错时都判定为“未知”而不是“已恢复”。
 
 ### 6. 流式 AI message、Push 诊断与实时状态
 
@@ -77,8 +79,8 @@
 - **安全错误提示**：LLM 认证失败、限流和服务端错误会显示分类提示，不会把服务端响应正文展示到界面中。
 - **可取消 Push**：Push 显示可取消进度；Push 或其他 provider 操作失败时，可在 VS Code 的 **Output → Git Rebase Visual** 查看诊断摘要。
 - **操作互斥提示与恢复**：同一时间只允许一个写操作。被拒绝时会说明**正在执行什么**、来自哪里、已耗时多久，例如 `正在执行 “变基重排” (reorder, webview, 12s)；请等待完成，或点击“强制解除”。`；若操作超过 90 秒仍未结束，会弹出带 **强制解除并刷新** 的警告。强制解除不会盲信内存状态，而是重新读取 Git 的 rebase 标记、冲突文件和 commit 列表后再刷新，因此在终端里已经结束或手动恢复的仓库是安全的。
-- **日志**：一次扩展会话一个日志文件，位于 `<用户主目录>/tmp/log/git-rebase-visual-<版本>/session-<时间>-<pid>.log`（Linux/macOS 即 `~/tmp/log/git-rebase-visual-0.8.1/`，Windows 为 `C:\Users\<用户>\tmp\log\git-rebase-visual-0.8.1\`）。可用命令 **Git Rebase: Open Logs**（`gitRebaseVisual.openLogs`）直接打开该目录。0.8.1 之前的日志写在系统临时目录（Linux/macOS 的 `/tmp/log/...`、Windows 的 `%TEMP%\log\...`），这些旧文件**没有迁移也没有删除**；每个扩展会话首次打开日志目录时，**Output → Git Rebase Visual** 会追加一行说明旧日志的位置。日志包含 Output 中的诊断、写锁获取/释放、webview 操作、每次 Git 调用的参数/退出码/耗时、rebase 状态变化与异常堆栈，并对 URL userinfo、Authorization、token/password 等凭据做脱敏；写入失败（只读目录、磁盘满）只会关闭文件日志，不影响插件功能。每个日志文件与 **Output → Git Rebase Visual** 的第一行都是会话头，写明扩展版本、扩展安装路径、VS Code 版本、扩展宿主 pid 与操作系统，可用来确认当前运行的是哪一个构建。
-- **待恢复改动与 Reset Extension State**：若遗留的追加/自动 stash 记录在启动对账后仍无法自动恢复，侧栏会显示一条可关闭的“待恢复的改动”横幅（commit 列表照常显示，不会被记录挡住），并提供 **打开日志** / **关闭提示**；同一条警告（同一 stash sha + 原因）只弹一次，后续轮询只写文件日志；关闭横幅后不会在下一次轮询里重新弹出，只有出现**不同**的问题才会再次提示。恢复动作按记录单飞（single-flight），1.5 秒轮询、工作区事件与读取消息重叠时只会执行一次恢复。恢复会**获取同一把写锁**：写操作进行中时整轮跳过、下一次空闲轮询再试，绝不与 rebase 并发写同一个 index。对账本身不在渲染路径上——commit 列表先显示，对账在其后异步进行；持续无法解决时按指数退避重试（最长 30 秒），不会每 1.5 秒重复探测。命令 **Git Rebase: Reset Extension State**（`gitRebaseVisual.resetState`）会先做同样的 Git 对账，只清理已成为孤儿的状态记录，**不会删除仍保存未提交内容的 stash**，并报告清理了什么、保留了什么、日志目录位置。手动 `git stash apply --index` 恢复后，下一次刷新会自动识别并静默清除记录。横幅与 reset 报告都会列出可直接执行的下一步，例如 `git stash apply --index <name>`（恢复暂存区与工作区）、`git stash apply <name>`（只恢复工作区）、以及在你确认不再需要后才执行的 `git stash drop <name>`——删除永远是**你自己的显式操作**，插件只负责显示准确命令。`stash@{n}` 只是**位置**而不是名字：每一轮恢复检查都会重新解析它（不是缓存在首次出现的值上），并始终同时给出稳定的 sha；当槽位无法解析时（例如 stash reflog 损坏），命令回退到 sha（`git stash apply --index <sha>`，Git 接受），并且**不再提供 drop**——Git 没有按 sha 的 `stash drop`，这样的命令只会失败。
+- **日志**：一次扩展会话一个日志文件，位于 `<用户主目录>/tmp/log/git-rebase-visual-<版本>/session-<时间>-<pid>.log`（Linux/macOS 即 `~/tmp/log/git-rebase-visual-0.8.2/`，Windows 为 `C:\Users\<用户>\tmp\log\git-rebase-visual-0.8.2\`）。可用命令 **Git Rebase: Open Logs**（`gitRebaseVisual.openLogs`）直接打开该目录。0.8.1 之前的日志写在系统临时目录（Linux/macOS 的 `/tmp/log/...`、Windows 的 `%TEMP%\log\...`），这些旧文件**没有迁移也没有删除**；每个扩展会话首次打开日志目录时，**Output → Git Rebase Visual** 会追加一行说明旧日志的位置。日志包含 Output 中的诊断、写锁获取/释放、webview 操作、每次 Git 调用的参数/退出码/耗时、rebase 状态变化与异常堆栈，并对 URL userinfo、Authorization、token/password 等凭据做脱敏；写入失败（只读目录、磁盘满）只会关闭文件日志，不影响插件功能。每个日志文件与 **Output → Git Rebase Visual** 的第一行都是会话头，写明扩展版本、扩展安装路径、VS Code 版本、扩展宿主 pid 与操作系统，可用来确认当前运行的是哪一个构建。
+- **待恢复改动与 Reset Extension State**：若遗留的追加/自动 stash 记录在启动对账后仍无法自动恢复，侧栏会显示一条可关闭的“待恢复的改动”横幅（commit 列表照常显示，不会被记录挡住），并提供 **打开日志** / **关闭提示**；同一条警告（同一 stash sha + 原因）只弹一次，后续轮询只写文件日志；关闭横幅后不会在下一次轮询里重新弹出，只有出现**不同**的问题才会再次提示。恢复动作按记录单飞（single-flight），1.5 秒轮询、工作区事件与读取消息重叠时只会执行一次恢复。恢复会**获取同一把写锁**：写操作进行中时整轮跳过、下一次空闲轮询再试，绝不与 rebase 并发写同一个 index。对账本身不在渲染路径上——commit 列表先显示，对账在其后异步进行；持续无法解决时按指数退避重试（最长 30 秒），不会每 1.5 秒重复探测。命令 **Git Rebase: Reset Extension State**（`gitRebaseVisual.resetState`）会先做同样的 Git 对账——内容已确认回来的插件条目会像正常轮询一样被结算删除——之后再清理已成为孤儿的状态记录；**你自己压入的 stash 在任何情况下都不会被它删除**。它会报告清理了什么、保留了什么、日志目录位置。手动 `git stash apply --index` 恢复后，下一次刷新会自动识别、静默清除记录，并删掉插件自己那条临时条目。横幅与 reset 报告都会列出可直接执行的下一步，例如 `git stash apply --index <name>`（恢复暂存区与工作区）、`git stash apply <name>`（只恢复工作区）、以及在你确认不再需要后才执行的 `git stash drop <name>`；这里列出的条目都是**内容尚未被确认恢复**的插件自己的条目，此时自动路径不会删它们，只有你自己动手。`stash@{n}` 只是**位置**而不是名字：每一轮恢复检查都会重新解析它（不是缓存在首次出现的值上），并始终同时给出稳定的 sha；当槽位无法解析时（例如 stash reflog 损坏），命令回退到 sha（`git stash apply --index <sha>`，Git 接受），并且**不再提供 drop**——Git 没有按 sha 的 `stash drop`，这样的命令只会失败。
 - **自动刷新暂存状态**：通过 VS Code 源代码管理或终端 `git add` 暂存文件后，面板会自动更新菜单状态；无需手动点击 Refresh。后台只读状态查询使用 `GIT_OPTIONAL_LOCKS=0`，避免与终端 `git switch` / `git stash` 的 optional `index.lock` 刷新竞争。
 - **危险操作确认**：删除 commit 前会显示目标 commit 与历史重写确认；edit 停靠横幅会明确显示当前目标及 Continue / Abort 下一步。
 
@@ -117,6 +119,7 @@
 - 暂停所在的 commit 行会**高亮**并显示 `⏸ 停在此` 徽章；横幅区分冲突、显式 edit 停靠和其它暂停状态。
 - 有冲突时横幅会显示冲突文件；Continue 会禁用，直到你在编辑器解决冲突并 `git add`。宿主在 Continue 前还会再次检查 Git 冲突状态。
 - 暂停期间无法发起新的历史改写操作，需先 Continue 或 Abort。
+- **Abort 永不删除你的文件**。如果 `git rebase --abort` 因为工作区里有未跟踪文件（或目录）会被回退覆盖而失败，扩展会**中止并列出这些路径**，明确告诉你“没有删除任何文件”，并给出可复制的 `mv` 命令（路径已按 POSIX shell 正确转义，含 `'`、空格、换行、前导 `-`、反引号或 `$` 的文件名也能直接粘进终端——这一点由一条把每个恶意文件名丢进真实 `sh` 往返比对的单测保证）。你把这些路径移出仓库（或改名）后再点一次 Abort 即可完成；变基仍停在暂停状态，停在这里不会有任何损失。至于 stash，消息会**按 `git stash list` 的实测结果**来说：有条目就报条数，为空就明说为空、并说明你的工作区原封未动——不会让你去一条并不存在的 stash 里找东西。即使某个文件看起来像构建产物、你愿意删掉它，这个决定也由你来做——扩展不会替你删。
 
 ### 11. 顶部工具栏（Push / Stash / Pop / Undo / Refresh）
 面板顶部工具栏提供：
@@ -126,20 +129,24 @@
   - **变基过程中也可推送**：例如用「变基到此 commit」停靠后，在该 commit 上改代码并 commit，可直接点 **Push** 推送这个 commit（此时 HEAD 处于 detached，插件会用正在变基的分支解析其 upstream）。锁定检查依然生效——**不允许推送越过被锁定的 commit**。
   - 推送与变基解耦，避免 Gerrit 因「无改动」拒绝合并式推送。
 - **Stash**（archive 图标）：把当前未提交改动 `git stash push --include-untracked`（含未跟踪文件）。
-- **Pop**（inbox 图标）：确认后执行 `git stash pop` 恢复**并删除**最近一次 stash（冲突时 Git 会保留该条目）。这是插件里唯一会删除 stash 的操作，必须由你点击并在弹窗中确认；恢复流程与对账永不调用它。
+- **Pop**（inbox 图标）：确认后执行 `git stash pop` 恢复**并删除**最近一次 stash（冲突时 Git 会保留该条目）。这是插件里唯一会删除**任意** stash（包括你自己的）的操作，必须由你点击并在弹窗中确认；恢复流程与对账永不调用它，它们只按 sha 删除插件自己创建的条目。
 - **Undo**（discard 图标）：撤销最近一次成功的历史改写；会先校验分支、HEAD、工作区、rebase 状态与已推送风险（见第 8 节）。
 - **Refresh**：刷新列表。
 
 stash 槽位提示：恢复冲突提示、待恢复横幅与 reset 报告都会给出精确的 `stash@{n}` 与稳定 sha；需要完整列表时可用 VS Code 源代码管理视图或 `git stash list`。
 
+- `git stash apply` 恢复内容之后仍可能“看起来一致、其实差一半”：`git diff --name-only` 默认会把一次**重命名**折叠成只剩目标路径，于是快照里“暂存了 `a.txt → b.txt`”只被当作 `b.txt` 一件事。插件所有枚举路径的 diff 都带 `--no-renames`，重命名的删除与新增两半都会被逐一核对，因此只还原目标文件不会被误判为“内容已全部回来”。
+
 > Stash / Pop 按钮主要用于**手动 stash 模式**（见下）：你自行 stash 后再执行变基相关操作，完成后再 pop。
 
 ### 12. 脏工作区自动 stash（可切换）
 `gitRebaseVisual.autoStash`（默认开启）控制变基时对未提交改动的处理：
-- **自动（默认）**：变基前自动 stash，变基**完全结束后**（或你点 Continue / Abort 后）用 `git stash apply` 自动恢复——**不会 pop、不会 drop**，恢复副本会留在 stash 列表里由你决定何时清理。若变基暂停（冲突 / edit 停靠），stash 会保留、不会中途应用，待你 Continue/Abort 时再恢复，避免基于中间状态恢复导致冲突。仅在确实做了 stash 时才提示/恢复，工作区干净时不会有多余通知。
+- **自动（默认）**：变基前自动 stash，变基**完全结束后**（或你点 Continue / Abort 后）用 `git stash apply` 自动恢复内容，确认内容完整回来后再删除**插件自己那条**条目——`git stash list` 会回到你原来的样子，你自己的条目不会被动。若变基暂停（冲突 / edit 停靠），stash 会保留、不会中途应用，待你 Continue/Abort 时再恢复，避免基于中间状态恢复导致冲突。仅在确实做了 stash 时才提示/恢复，工作区干净时不会有多余通知。
 - **手动**（关闭 autoStash）：若工作区/暂存区有内容导致无法变基，直接弹警告，请你用顶部 **Stash** 按钮或自行 `git stash` 后再操作，完成后用 **Pop**（会先确认）恢复。
 
-> 恢复采用 stash 的**提交 sha** 作为标识（不依赖会被变基改写的 commit hash）。若你在终端自行 continue 并 pop 了 stash，插件下次刷新时会检测到该 stash 已不存在并静默清理记录，不会重复恢复，避免状态不同步。自动恢复留下的 stash 条目是刻意的：插件永不自动删除 stash，多余条目由你自行 `git stash drop`。
+> 恢复采用 stash 的**提交 sha** 作为标识（不依赖会被变基改写的 commit hash）。若你在终端自行 continue 并 pop 了 stash，插件下次刷新时会检测到该 stash 已不存在并静默清理记录，不会重复恢复，避免状态不同步。
+>
+> **插件只删除自己创建的 stash 条目。** 恢复成功后，插件会把自己那条临时条目删掉，因此 `git stash list` 与你让插件动手之前完全一致，你压入的条目不会被挡在后面、也不会被删除。自动化语义本来就是 stash → rebase → pop，而 `pop` 会删条目；用 `apply` 恢复内容、确认内容回来后删除自己的条目，效果与 `pop` 相同，但失败时不会吞掉唯一副本。`stash@{n}` 只是**位置**：插件按 sha 解析槽位、删除前再确认该槽位仍指向自己的 sha（期间你压入了新 stash 就拒绝删除并说明），删除后再核对 Git 实际删掉的是哪一个条目——判据是删除前后的 sha 集合，而不是 Git 那句会被翻译成其他语言的 `Dropped …`；只删掉自己那条要求删除前快照里没有别的条目同时消失（删除窗口内并发删掉自己那条、又误删你那条时，两条都会消失，你那条会被认出来并复原），同时消失多条则拒绝并点名而不是猜，删除前快照读不出来时消息会写明未做交叉核对（这条说明会同时进入日志与弹出提示，而不是只在 Git 模块里生成后被丢掉）。删除前的列表**读不出来**（reflog 损坏时 `git stash list` 退出码为 0 却什么都不打印）时，删除**直接拒绝**、不写任何内容——插件不会把“读不出”当成“已经没有这个条目”。万一删错会用 `git stash store` 原样恢复（复原后该条目会回到列表**最上方**，它的 reflog 说明 `%gs`——`git stash list` 显示的那行——变为 `git-rebase-visual restored <sha7>`，而 stash commit 的标题 `%s`——`git log` 显示的那行——不变，内容与 commit 也不变）。同一个 sha 同时出现在多个槽位（例如你对仍在列表里的条目执行过 `git stash store`）时一律拒绝删除并报告，两个条目都保留。内容未能完整确认时不删除，改为弹一次提示，点名 `stash@{n}`（附 sha）并给出可直接复制的 `git stash drop stash@{n}`。
 
 ### 13. commit 锁定（防误推他人提交）
 典型场景：你 cherry-pick 了别人的 commit A 作为依赖，在其之上写了自己的 B、C。推送时不应把别人的 A 一起推出去。

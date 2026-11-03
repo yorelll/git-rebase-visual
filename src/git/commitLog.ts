@@ -1,4 +1,4 @@
-import { git, runGit } from "./gitRunner";
+import { C_LOCALE, git, runGit, splitNul } from "./gitRunner";
 import { getWorktreeChanges, summarizeWorktreeChanges } from "./worktreeChanges";
 
 export interface Commit {
@@ -387,6 +387,9 @@ export function summarizeNumstat(numstat: string[]): string {
 
 /** Fetches rich details for a commit, used for the hover tooltip. */
 export async function commitDetail(cwd: string, hash: string): Promise<CommitDetail> {
+  // `%ar` is the relative date, rendered through Git's message catalog and shown
+  // in the hover. It is display text, never parsed, so the locale is deliberately
+  // left alone here: pinning C would change what every user sees in the tooltip.
   const fmt = ["%an", "%ae", "%ar", "%ad", "%B"].join("\x1f");
   const meta = await git(
     ["show", "-s", "--date=format:%Y-%m-%d %H:%M", `--pretty=format:${fmt}`, hash],
@@ -406,10 +409,13 @@ export async function commitDetail(cwd: string, hash: string): Promise<CommitDet
   if (statLine) {
     return { author, email, relDate, absDate, message, stat: statLine };
   }
-  // Fallback: parse the last `--shortstat` summary line (locale-dependent).
+  // Fallback: parse the last `--shortstat` summary line. The words in it
+  // ("3 files changed, 4 insertions(+)") are gettext msgids, so `LC_ALL=C` is
+  // pinned to keep the filter below matching; the primary `--numstat` path above
+  // is locale-independent and is what normally answers.
   const statRes = await runGit(
     ["show", "--shortstat", "--oneline", "--no-color", hash],
-    { cwd }
+    { cwd, env: C_LOCALE }
   );
   const shortstatLine =
     statRes.stdout
@@ -451,8 +457,11 @@ export async function isDirty(cwd: string): Promise<boolean> {
 
 /** Returns paths that Git marks as unresolved in the index. */
 export async function conflictedFiles(cwd: string): Promise<string[]> {
-  const res = await runGit(["diff", "--name-only", "--diff-filter=U"], { cwd });
-  return res.stdout.split("\n").map((path) => path.trim()).filter(Boolean);
+  // `-z`: the paths are shown to the user and handed back to Git as pathspecs
+  // (stage/resolve/restore). Without it a non-ASCII path arrives quoted and
+  // octal-escaped and matches nothing, and trimming would eat a leading space.
+  const res = await runGit(["diff", "--name-only", "-z", "--diff-filter=U"], { cwd });
+  return splitNul(res.stdout);
 }
 
 /**

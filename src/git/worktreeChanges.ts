@@ -1,6 +1,6 @@
 import * as fs from "fs/promises";
 import * as pathModule from "path";
-import { runGit } from "./gitRunner";
+import { LITERAL_PATHSPECS, runGit } from "./gitRunner";
 
 /** A UI-safe classification of a status side from `git status --porcelain=v2 -z`. */
 export type FileChangeKind = "modify" | "add" | "delete" | "rename" | "untracked" | "unmerged";
@@ -189,7 +189,7 @@ export async function stageWorktreeChange(cwd: string, change: WorktreeChange): 
   if (!change.unstaged || change.conflicted) {
     throw new Error("该文件不是可单独暂存的工作区改动。");
   }
-  const result = await runGit(["add", "-A", "--", change.path], { cwd });
+  const result = await runGit(["add", "-A", "--", change.path], { cwd, env: LITERAL_PATHSPECS });
   if (result.code !== 0) {
     throw new Error(result.stderr || result.stdout || `无法暂存 ${change.path}。`);
   }
@@ -226,14 +226,14 @@ export async function restoreWorktreeChange(
     if (change.worktreeKind === "untracked") {
       throw new Error("未跟踪文件不会自动删除；请在资源管理器中确认后手动删除。 ");
     }
-    const result = await runGit(["restore", "--worktree", "--", change.path], { cwd });
+    const result = await runGit(["restore", "--worktree", "--", change.path], { cwd, env: LITERAL_PATHSPECS });
     if (result.code !== 0) throw new Error(result.stderr || result.stdout || `无法恢复工作区文件 ${change.path}。`);
     return;
   }
 
   if (!change.staged) throw new Error("该文件没有可恢复的暂存改动。 ");
   const paths = change.originalPath ? [change.path, change.originalPath] : [change.path];
-  const result = await runGit(["restore", "--staged", "--", ...paths], { cwd });
+  const result = await runGit(["restore", "--staged", "--", ...paths], { cwd, env: LITERAL_PATHSPECS });
   if (result.code !== 0) throw new Error(result.stderr || result.stdout || `无法撤销暂存 ${change.path}。`);
 }
 
@@ -259,7 +259,7 @@ export async function discardAllWorktreeChanges(cwd: string, changes: readonly W
   const untracked = changes.filter((change) => change.unstaged && change.worktreeKind === "untracked" && !change.staged);
   if (!working.length && !untracked.length) throw new Error("没有可恢复的工作区改动。 ");
   if (working.length) {
-    const result = await runGit(["restore", "--worktree", "--", ...working.map((change) => change.path)], { cwd });
+    const result = await runGit(["restore", "--worktree", "--", ...working.map((change) => change.path)], { cwd, env: LITERAL_PATHSPECS });
     if (result.code !== 0) throw new Error(result.stderr || result.stdout || "无法恢复全部工作区改动。 ");
   }
   for (const change of untracked) await deleteUntrackedWorktreeChange(cwd, change);
@@ -273,6 +273,6 @@ export async function unstageAllWorktreeChanges(cwd: string, changes: readonly W
   const staged = changes.filter((change) => change.staged);
   if (!staged.length) throw new Error("暂存区为空。 ");
   const paths = [...new Set(staged.flatMap((change) => change.originalPath ? [change.path, change.originalPath] : [change.path]))];
-  const result = await runGit(["restore", "--staged", "--", ...paths], { cwd });
+  const result = await runGit(["restore", "--staged", "--", ...paths], { cwd, env: LITERAL_PATHSPECS });
   if (result.code !== 0) throw new Error(result.stderr || result.stdout || "无法撤销全部暂存。 ");
 }

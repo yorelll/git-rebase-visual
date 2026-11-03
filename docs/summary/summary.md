@@ -37,7 +37,7 @@ Webview (media/main.js)
 | 详情与菜单 | 悬停 400ms 由 `requestDetail` 取 `commitDetail`，host 回发 `detail`，webview 在侧栏行旁渲染浮动 tooltip（复制 message / 打开变更，指针移入不消失）；右键与 `Shift+F10`/Menu 在侧栏内打开 `#menu`，多选 ≥2 时提供批量锁定、批量删除与连续区间生成 Diff。不创建编辑器区面板，编辑器/窗口事件只下发 `closeMenu`。 |
 | 写锁与恢复 | `MutationLock` 持有 `{id, action, label, source, startedAt}`，提供 owner 身份校验的 `release`、`forceRelease`、`markSettled`/`reapSettled` 与 stale 判定；拒绝消息命名 owner、来源与耗时，90s 看门狗写入 `mutation-stuck` 诊断并提供“强制解除并刷新”（先重读 rebase 标记/冲突文件/commit 列表）。 |
 | 进程与日志 | `runGit` 以 `exit`（输出排空或 50ms 宽限）结算，超时/取消在固定宽限后只结算一次并**尝试**回收进程树（已脱离的孙进程可能存活，属进程泄漏，不阻塞结算）；`FileLogger` 每次会话一个 `<home>/tmp/log/git-rebase-visual-<version>/session-*.log`（0.8.1 起在用户主目录下，0.8.0 及更早为 `<tmp>/log/...`），按大小轮转、保留最近 10 个、脱敏凭据，失败即静默禁用；日志与 Output 首行为会话头（版本、扩展路径、VS Code 版本、宿主 pid、平台）。 |
-| 待恢复改动对账 | `pendingRecovery.ts` 以真实 Git 状态判定遗留记录：rebase 是否进行、stash 是否仍列出、stash 内容是否已在 index/worktree（`diff --quiet` / `--cached --quiet` / `hash-object` vs `stash^3`）、`targetHash` 是否仍是 HEAD 祖先，追加落地则用 `git ls-tree -z` 逐路径比较快照 `^2` 与 HEAD 的 **mode + object**。内容已在即 resolved（静默清记录、不重复 apply）；未落地则 `apply --index`，冲突保持 pending。**整轮恢复不执行任何 `stash drop/pop/clear`**：任何结论都只决定记录是否清除，stash 一律保留，`recoveryCommands()` 给出 `apply --index` / `apply` / 用户自己执行的 `drop` 三条命令（槽位无法解析时回退到 sha，且只给两条 apply——Git 没有按 sha 的 `stash drop`）。`pendingRecoveryPolicy.ts` 提供 `(sha, reason)` 告警去重、可关闭横幅与按记录单飞的 `RecoveryCoordinator`；`refresh()` 不再因记录存在而跳过渲染，也不在写锁持有时插队执行恢复。 |
+| 待恢复改动对账 | `pendingRecovery.ts` 以真实 Git 状态判定遗留记录：rebase 是否进行、stash 是否仍列出、stash 内容是否已在 index/worktree（`diff --quiet` / `--cached --quiet` / `hash-object` vs `stash^3`）、`targetHash` 是否仍是 HEAD 祖先，追加落地则用 `git ls-tree -z` 逐路径比较快照 `^2` 与 HEAD 的 **mode + object**。内容已在即 resolved（静默清记录、不重复 apply）；未落地则恢复快照，冲突保持 pending。注意“索引与快照一致”**不等于**追加已完成：目标仍是祖先且 rebase 仍进行时必须保持 pending，只有 `stagedSnapshotInHead` 或记录 `amended` 才算落地。**只删除插件自己创建的 stash 条目，从不碰用户压入的条目**：记录里持久化的 sha 是唯一入口，删除前必须 `stashPresence()` 四处（仍在列表 / 索引复现暂存那一半 / worktree 复现改动 / 未跟踪文件逐字节一致）**完整确认**内容已回来，再把 sha 解析成当前槽位、重读该槽位占用者仍等于自己的 sha 才 `drop`，删除后复核 Git 实际删掉的 sha，不符即用 `git stash store` 原样恢复；任一步不符都拒绝并报告、绝不重试。结算后 `git stash list` 与插件动手前**按 sha 集合一致**。`recoveryCommands()` 仍给出 `apply --index` / `apply` / 用户自己执行的 `drop` 三条命令（槽位无法解析时回退到 sha，且只给两条 apply——Git 没有按 sha 的 `stash drop`）。`pendingRecoveryPolicy.ts` 提供 `(sha, reason)` 告警去重、可关闭横幅与按记录单飞的 `RecoveryCoordinator`；`refresh()` 不再因记录存在而跳过渲染，也不在写锁持有时插队执行恢复。 |
 
 ## 3. 「追加暂存区」事务
 
@@ -50,7 +50,10 @@ Webview (media/main.js)
   ├─ stashPush(-u) 保存完整初始快照
   ├─ interactive rebase：目标 action = edit
   ├─ 校验 stopped SHA 是目标 SHA
-  ├─ stash apply --index 恢复初始 staged 内容
+  ├─ 三段式恢复快照（各自从自己的树，只触碰快照自己的路径）：
+  │    ├─ 工作区部分  git restore --source=<stash>   --worktree -- <stash^1..stash>
+  │    ├─ 暂存区部分  git restore --source=<stash>^2 --staged   -- <stash^1..stash^2>
+  │    └─ 未跟踪文件  git checkout <stash>^3 -- <path> 后 reset，保持未跟踪
   ├─ git commit --amend --no-edit
   ├─ 若原来有 unstaged：stash push --keep-index -u
   ├─ 持久化 pendingAppend（含原目标 SHA；跨刷新时区分完成与外部 Abort）
@@ -64,6 +67,8 @@ Webview (media/main.js)
 - 目标已锁定：必须先解除锁定，避免 amend 改变 patch-id 后失去推送保护。
 - 目标已推送：确认框明确提示公开历史将被改写并要求显式二次确认，后续需 `--force-with-lease`。
 - 发生重放冲突：保持 Git 原生 rebase 状态，面板 Continue/Abort 负责恢复 pending append stash。
+- **不能**用 `git stash apply --index` 恢复快照：它会合并 stash 的工作区那一半，目标早于 tip 时后续 commit 的路径会变成假的 `CONFLICT (modify/delete)` 并以 `Index was not unstashed.` 中止。三段式恢复的**工作区部分必须先于**暂存区部分（先做暂存删除会让路径离开索引、`restore --worktree` 无从解析），枚举路径的 `git diff` 必须带 `--no-renames`。
+- 追加只有在**确实落地**时才算完成（`stagedSnapshotInHead` 确认内容进入 HEAD，或记录标记 `amended`）。目标仍是祖先且变基仍在进行时，即使索引已与快照一致也保持 `pending`——否则用户按旧提示 `git add`“冲突”文件后，记录会被静默清除而追加从未发生。
 - 扩展在事务中途退出：下次刷新先按真实 Git 状态对账（rebase 是否进行、stash 是否仍列出、内容是否已在 index/worktree、原目标是否仍是 HEAD 祖先），再决定 resolved / restored / pending；记录本身永远不会阻止 commit 列表渲染或后续写操作。
 - 所有写操作由 provider 互斥；refresh 采用 generation token，避免旧请求覆盖当前 commit 快照。
 
@@ -77,11 +82,11 @@ src/
 │  ├─ gitRunner.ts                 spawn Git + 超时/输出上限/取消；exit 结算、尝试回收进程树、调用审计
 │  ├─ commitLog.ts                 log/range/status/rebase 元数据
 │  ├─ worktreeChanges.ts           porcelain v2 -z 解析、单文件 stage/restore/删除保护
-│  ├─ rebaseEngine.ts              todo、execute/continue/abort rebase
+│  ├─ rebaseEngine.ts              todo、execute/continue/abort rebase；Abort 永不删除任何文件；碰撞消息按 `git stash list` 实测结果措辞，可复制的 `mv` 命令做 POSIX 转义
 │  ├─ worktree.ts                  stash 按 SHA apply、提交；仅用户显式 Pop 会 pop
 │  ├─ message.ts                   message trailer 拆分与保留
 │  ├─ pushGuard.ts                 upstream/refspec/锁定范围检查
-│  ├─ pendingRecovery.ts           遗留记录与真实 Git 状态对账；只 apply，永不自动删除 stash
+│  ├─ pendingRecovery.ts           遗留记录与真实 Git 状态对账；只 apply 写内容，内容完整确认后按槽位删除**自己**的条目（用户条目永不触碰）
 │  ├─ undo.ts                      私有 before ref、操作 journal、Undo preflight/reset --keep
 │  └─ seq-editor.js                Git 调用的 sequence editor
 ├─ lock/lockStore.ts               patch-id 持久化锁与批量 lockMany
@@ -117,7 +122,7 @@ media/style.css                    主题语义、pending/status/高对比度 fa
 | 层级 | 文件 | 覆盖内容 |
 |---|---|---|
 | 逻辑 | `test/message.test.ts` | trailer 拆分、保留、显式替换、通用 trailer |
-| 逻辑 | `test/rebaseEngine.test.ts` | todo 顺序、各种 rebase action、空 todo |
+| 逻辑 | `test/rebaseEngine.test.ts` | todo 顺序、各种 rebase action、空 todo；`shellQuote` 把 `'`、`"`、反引号、`$`、空格、换行、前导 `-`、非 ASCII、`\` 与执行载荷逐字节往返过真实 `sh -c 'printf %s …'`，并断言载荷没有执行 |
 | Undo/Git 集成 | `test/undo.integration.test.ts` | 私有 ref、journal、reset --keep、dirty/HEAD/branch/rebase/ref 拒绝、跨仓库隔离 |
 | session/progress | `test/rebaseProgressState.test.ts` | done/todo、pending、unknown todo、exec/merge workflow、选择完整性 |
 | rebase 合并 | `test/squashFixup.integration.test.ts` | squash message、fixup 丢弃 message、todo action |
@@ -136,9 +141,9 @@ media/style.css                    主题语义、pending/status/高对比度 fa
 | Git 集成（append 守卫） | `test/appendGuard.integration.test.ts` | 已推 upstream 守卫、锁定 commit patch-id 跨重写稳定 |
 | 注入桩 | `test/secretsAccess.test.ts` | SecretStorage 访问器安全降级与委托 |
 | 恢复策略 | `test/pendingRecoveryPolicy.test.ts` | 同一 `(stash sha, 原因)` 只警告一次、已装填横幅在槽位漂移后**只更新文本、不重复弹窗**、横幅关闭后保持关闭（槽位漂移也不复活）、记录清空后重置、恢复单飞与失败后释放槽位、恢复在锁内运行且锁忙时整轮跳过、同步抛出不污染单飞键 |
-| 恢复集成 | `test/pendingRecovery.integration.test.ts` | **不变量：整轮恢复不出现任何 `stash drop/pop/clear`**（Git 调用观察器断言）。已应用快照静默清除且 stash 仍在、手动 `stash apply --index` 后静默清除、stash 已消失的空记录静默清除、fresh snapshot 只恢复一次且 stash 保留、冲突的工作区恢复保留两份 stash、amend 落地后按 `ls-tree` mode+object 结算并保留 stash、未完成追加保持 pending、reset 只清孤儿记录而保留有内容的 stash；失败探测（`^1`/`^2`/`^3` 对象或 `^3` 树缺失、`git diff` 非零、stash reflog 损坏）一律保留记录与 stash；`targetHash` 被改写但 HEAD 不含快照时保持 pending；仅改文件模式且已落地可结算、chmod 未落地则保留；revert 形状的 amend + 后续编辑保留（旧 raw-log 扫描看不见）、目录重命名保留、同字节巧合保留；stash 上方压入新条目时按 sha 解析到自身槽位且不动其它条目；索引匹配但未跟踪/未暂存内容仍只存在于 stash 时补回工作区；残留的已跟踪路径只在与快照内容一致或路径缺失时才写回，已提交的更新内容不会被覆盖；keep-index 残留快照在 `amend` 之后被 `rebase --continue` 还原成 `stash^2` 内容时视为本次事务自己的内容并真实写回（结论 `restored`，不再报误冲突），两份 stash 均保留；`recoveryCommands` 给出 `apply --index` / `apply` / 用户自己执行的 `drop` 三条命令，且**每条打印出来的命令都会在独立临时仓库里真正执行并断言退出码为 0**（槽位可解析时三条；无法解析时只给两条 apply，不提供 Git 无法执行的 `stash drop <sha>`） |
-| 恢复（provider 级） | `test/recoveryProvider.test.ts` | 真实 provider + 真实 Git：`dismissRecoveryNotice` 写入去重状态后跨 refresh（及推送的 state）不再出现横幅、并发 `stash push` 把记录压到 `stash@{1}` 后横幅改述新槽位且不重复弹窗、关闭后槽位漂移也不复活、`resetExtensionState` 保留不可验证/未恢复的 stash 并清除真正孤儿记录、`forceReleaseMutationLock` 重读 Git 状态、恢复在 mutation 持锁期间整轮跳过、settled 未释放的 owner 被 reap、看门狗对同一 owner 只告警一次且忽略外部 disarm、显式 **Pop** 只有确认后才执行（拒绝则 stash 完好，确认后条目被删且改动已恢复） |
-当前测试套件在 v0.8.1 中扩展至 217 项测试；v0.7.1 的 UI/交互与安全裁决见 [`../ui-reivew/ui-review-0-7-1.md`](../ui-reivew/ui-review-0-7-1.md)，最终发布评审见 [`../review/code-review-0-7-4.md`](../review/code-review-0-7-4.md)。
+| 恢复集成 | `test/pendingRecovery.integration.test.ts` | **不变量：只删除插件自己记录的 sha 对应的槽位，从不出现 `stash pop`/`stash clear`，也从不删除用户条目**。自动 stash 恢复成功与追加恢复成功后 `git stash list` 与用户原有条目**按 sha 集合完全一致**；并发 `stash push` 使槽位被换成用户条目时拒绝并保留两条；错误删除时 `git stash store` 把该条目原样放回；pop 风格冲突恢复保留插件条目并报告；任意恢复路径都不删用户自己的两个 stash。已应用快照静默清除并删除自己的条目、手动 `stash apply --index` 后静默清除并删除自己的条目、stash 已消失的空记录静默清除、fresh snapshot 只恢复一次且条目随后删除、冲突的工作区恢复保留插件条目与用户条目、amend 落地后按 `ls-tree` mode+object 结算并删除自己的条目、未完成追加保持 pending、reset 只清孤儿记录而保留有内容的 stash；失败探测（`^1`/`^2`/`^3` 对象或 `^3` 树缺失、`git diff` 非零、stash reflog 损坏）一律保留记录与 stash；`targetHash` 被改写但 HEAD 不含快照时保持 pending；仅改文件模式且已落地可结算、chmod 未落地则保留；revert 形状的 amend + 后续编辑保留（旧 raw-log 扫描看不见）、目录重命名保留、同字节巧合保留；stash 上方压入新条目时按 sha 解析到自身槽位且不动其它条目；索引匹配但未跟踪/未暂存内容仍只存在于 stash 时补回工作区；残留的已跟踪路径只在与快照内容一致或路径缺失时才写回，已提交的更新内容不会被覆盖；keep-index 残留快照在 `amend` 之后被 `rebase --continue` 还原成 `stash^2` 内容时视为本次事务自己的内容并真实写回（结论 `restored`，不再报误冲突），两份条目随后都被删除并各自报告；`recoveryCommands` 给出 `apply --index` / `apply` / 用户自己执行的 `drop` 三条命令，且**每条打印出来的命令都会在独立临时仓库里真正执行并断言退出码为 0**（槽位可解析时三条；无法解析时只给两条 apply，不提供 Git 无法执行的 `stash drop <sha>`） |
+| 恢复（provider 级） | `test/recoveryProvider.test.ts` | 真实 provider + 真实 Git：`dismissRecoveryNotice` 写入去重状态后跨 refresh（及推送的 state）不再出现横幅、并发 `stash push` 把记录压到 `stash@{1}` 后横幅改述新槽位且不重复弹窗、关闭后槽位漂移也不复活、`resetExtensionState` 保留不可验证/未恢复的 stash 并清除真正孤儿记录、`forceReleaseMutationLock` 重读 Git 状态、恢复在 mutation 持锁期间整轮跳过、settled 未释放的 owner 被 reap、看门狗对同一 owner 只告警一次且忽略外部 disarm、显式 **Pop** 只有确认后才执行（拒绝则 stash 完好，确认后条目被删且改动已恢复）；**结算即清理自己的条目**：`restored` 与 `resolved` 都删除插件自己的槽位（自动 stash 与追加两条路径各自验证），记录结算后重复轮询不会再次弹窗；内容无法完整验证或槽位已不属于自己时保留条目并如实报告 |
+当前测试套件在 v0.8.2 中为 **275 项**（`npm run test` 全绿、0 失败、0 跳过）；v0.7.1 的 UI/交互与安全裁决见 [`../ui-reivew/ui-review-0-7-1.md`](../ui-reivew/ui-review-0-7-1.md)，最终发布评审见 [`../review/code-review-0-7-4.md`](../review/code-review-0-7-4.md)。
 
 命令：
 
@@ -158,7 +163,7 @@ npm run package         # 编译并生成 VSIX
 2. 校验 tag 版本等于 `package.json.version`；
 3. `npm run test:release`；
 4. 打包 VSIX；
-5. 验证 VSIX 含必要 runtime 文件，不含 `src/`、`test/`、`docs/`、`node_modules/`，且不含任何 `.map` sourcemap（release 构建默认不生成，sourcemap 内嵌 `sourcesContent` 会泄露完整 TypeScript 源码）；
+5. 验证 VSIX 的条目集合与显式白名单**逐项完全一致**（当前 12 项）：多一条或少一条都失败并打印差异。`.vscodeignore` 是黑名单，新增顶层目录不会自动被排除，因此这里做正向断言；清单只在 `scripts/package-vsix.js` 的 `expectedEntries` 里存在一份，本地 `npm run package` 与 CI 的 `node scripts/package-vsix.js --verify-only` 执行的是同一份代码（CI 不再重复一份 heredoc 清单，避免两处半改）。白名单之外的 `src/`、`test/`、`docs/`、`node_modules/`、`*.map`（sourcemap 会内嵌 `sourcesContent`、泄露完整 TypeScript 源码）与 `scripts/`、`dist-vsix/`、`tsconfig` 都会被拒绝；
 6. 验证 `RELEASE.md` 包含对应版本，且 `docs/release-notes/<version>.md` 存在、标题匹配、无未替换模板占位符；
 7. 以该版本化 Markdown 作为最终 Release body 创建 GitHub Release 并上传 VSIX。
 

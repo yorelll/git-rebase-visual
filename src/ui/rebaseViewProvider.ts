@@ -41,7 +41,8 @@ import { splitTrailers, applyTrailers } from "../git/message";
 import {
   stashPush,
   stashPushKeepIndex,
-  stashApplyIndexBySha,
+  stashRestoreForAmend,
+  stashRestoreWorktreeAfterAmend,
   stashPopManual,
   commitIndex,
   commitAll,
@@ -714,11 +715,13 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
   /**
    * Recovery command for orphaned bookkeeping.
    *
-   * It reconciles against Git first and only then clears records that no longer
-   * hold anything. It **never** deletes a stash: `resetDecision` only decides
-   * whether a piece of bookkeeping is orphaned, and every stash it reports as
-   * still present is left untouched, with the exact manual commands shown so
-   * the user can act deliberately.
+   * It reconciles against Git first, so a record whose content is verifiably
+   * back (and whose entry is therefore the extension's own duplicate) is
+   * settled exactly as a normal pass would settle it. After that it only clears
+   * records that no longer hold anything: `resetDecision` decides bookkeeping
+   * only, and every entry it reports as still present is left untouched, with
+   * the exact manual commands shown so the user can act deliberately. It never
+   * removes a stash entry that the reconcile pass did not itself fully verify.
    */
   public async resetExtensionState(): Promise<void> {
     const folder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
@@ -740,7 +743,8 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     const cleared: string[] = [];
     const stashSha = this.getPendingStash(root);
     if (stashSha) {
-      const decision = resetDecision(await stashPresence(root, stashSha));
+      const presence = await stashPresence(root, stashSha);
+      const decision = resetDecision(presence);
       if (decision.action === "clear") {
         await this.clearPendingStash(root);
         cleared.push(`自动 stash 记录 ${stashSha.slice(0, 7)}（${decision.reason}）`);
@@ -749,14 +753,17 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
         // would turn every printed command into one that cannot run.
         const name = await stashNameForSha(root, stashSha);
         const label = name ?? `sha ${stashSha.slice(0, 7)}（当前无法解析 stash@{n}）`;
+        // The observed presence decides the command: an index half already in
+        // place makes `apply --index` fail with "already exists in index".
         kept.push(
-          `自动 stash ${label} ${decision.reason}；可手动执行 ${recoveryCommands(name, stashSha)[0].command}`
+          `自动 stash ${label} ${decision.reason}；可手动执行 ${recoveryCommands(name, stashSha, presence)[0].command}`
         );
       }
     }
     const append = this.getPendingAppend(root);
     if (append) {
-      const decision = resetDecision(await stashPresence(root, append.changeStash));
+      const presence = await stashPresence(root, append.changeStash);
+      const decision = resetDecision(presence);
       if (decision.action === "clear") {
         await this.clearPendingAppend(root);
         cleared.push(`追加事务记录 ${append.changeStash.slice(0, 7)}（${decision.reason}）`);
@@ -764,7 +771,7 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
         const name = await stashNameForSha(root, append.changeStash);
         const label = name ?? `sha ${append.changeStash.slice(0, 7)}（当前无法解析 stash@{n}）`;
         kept.push(
-          `追加快照 ${label} ${decision.reason}；可手动执行 ${recoveryCommands(name, append.changeStash)[0].command}`
+          `追加快照 ${label} ${decision.reason}；可手动执行 ${recoveryCommands(name, append.changeStash, presence)[0].command}`
         );
       }
     }
@@ -1551,8 +1558,15 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
   /**
    * Applies a reconcile outcome. A resolved/restored record is cleared (because
    * its content is verifiably back) and a still-pending record is kept with one
-   * warning. Returns a short user-facing summary, or undefined when the outcome
-   * needs no message (resolved, nothing restored).
+   * warning.
+   *
+   * A settled outcome is announced here — see `announceSettled`. Announcing from
+   * this single point means every caller (the poll, Continue, Abort, append)
+   * gets the same message exactly once, because `clear()` removes the record
+   * that would trigger a second one.
+   *
+   * Returns a short user-facing summary, or undefined when the outcome needs no
+   * further message (resolved, nothing restored).
    */
   private async applyPendingOutcome(
     root: string,
@@ -1580,22 +1594,23 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
       this.recoveryNotice = currentBannerText(this.pendingWarnings);
       if (observed.shouldNotify) {
         const label = name ?? `sha ${outcome.stashSha.slice(0, 7)}`;
-        const first = recoveryCommands(name, outcome.stashSha)[0];
+        const first = recoveryCommands(name, outcome.stashSha, outcome.presence)[0];
         toast(
           "warn",
-          `未完成的${kind === "append" ? "追加" : "自动 stash"}恢复：原始改动仍保存在 ${label}（sha ${outcome.stashSha.slice(0, 7)}）。${outcome.reason}。可手动执行 “${first.command}” 恢复；插件不会自动删除 stash。`
+          `未完成的${kind === "append" ? "追加" : "自动 stash"}恢复：原始改动仍保存在 ${label}（sha ${outcome.stashSha.slice(0, 7)}）。${outcome.reason}。可手动执行 “${first.command}” 恢复；内容被确认回到工作区之前，插件不会删除它自己的这个条目。`
         );
       }
       return this.recoveryNotice;
     }
 
-    if (outcome.stashKept) {
-      // The extension never drops a stash. A settled record whose recovery copy
-      // is still listed is the normal outcome of an apply-based recovery; the
-      // log records it, and the banner offered the user the manual cleanup.
+    for (const removal of outcome.stashRemoved ?? []) {
+      // Only entries this extension created are ever passed to the removal path.
+      // `removed` is the expected shape; `kept` means the entry still holds the
+      // content (it could not be verified back, or the slot refused to move) and
+      // the user has to be told.
       this.log(
         "recovery",
-        `保留 stash name=${outcome.stashKept.name ?? "(none)"} sha=${outcome.stashKept.sha}（不自动删除）`
+        `${removal.status === "removed" ? "已删除" : "保留"} stash name=${removal.name ?? "(none)"} sha=${removal.sha}${removal.message ? ` reason=${removal.message}` : ""}`
       );
     }
     await clear();
@@ -1603,20 +1618,24 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
       this.pendingWarnings = clearPendingWarnings(this.pendingWarnings);
       this.recoveryNotice = currentBannerText(this.pendingWarnings);
     }
+    // Announced after `clear()` so the record cannot re-trigger it: a second
+    // pass finds nothing pending and has nothing to say.
+    this.announceSettled(kind, outcome);
     return outcome.kind === "restored" ? outcome.detail : undefined;
   }
 
   /**
    * Banner text for a record that is still pending. It always carries the exact
-   * manual commands: the extension never deletes a stash, so the banner is the
-   * user's recovery surface, not a notice about something already handled.
+   * manual commands: the extension will not remove an entry whose content it
+   * could not confirm is back, so the banner is the user's recovery surface, not
+   * a notice about something already handled.
    */
   private pendingWarningText(
     kind: "autostash" | "append",
     name: string | undefined,
     outcome: Extract<PendingReconcile, { kind: "pending" }>
   ): string {
-    const steps = recoveryCommands(name, outcome.stashSha);
+    const steps = recoveryCommands(name, outcome.stashSha, outcome.presence);
     // The sha is the stable identity and is always printed; the slot is a hint.
     const label = name
       ? `${name}（sha ${outcome.stashSha.slice(0, 7)}）`
@@ -1624,7 +1643,7 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     const headline = kind === "append"
       ? `追加事务未完成：原始改动仍保存在 ${label}。${outcome.reason}。`
       : `自动 stash 尚未恢复：改动仍保存在 ${label}。${outcome.reason}。`;
-    return `${headline}可手动执行：${steps.map((step) => `${step.label} → ${step.command}`).join("；")}。插件不会自动删除任何 stash。`;
+    return `${headline}可手动执行：${steps.map((step) => `${step.label} → ${step.command}`).join("；")}。内容被确认回到工作区之前，插件不会删除它自己的这个条目。`;
   }
 
   /**
@@ -1642,14 +1661,152 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     // warning on the next refresh. `apply --index` keeps the recovery copy
     // until the content is confirmed present.
     const outcome = await reconcilePendingStash(cwd, sha);
+    // The user-facing notice comes from `applyPendingOutcome`, which announces a
+    // restore and any leftover recovery copy from one place.
     const summary = await this.applyPendingOutcome(root, outcome, "autostash", async () =>
       this.clearPendingStash(root)
     );
-    if (outcome.kind === "restored") {
-      toast("info", "已恢复自动 stash 的改动。");
-    } else if (summary) {
+    if (summary && outcome.kind !== "restored") {
       this.log("recovery", `autostash 保持待恢复：${summary}`);
     }
+  }
+
+  /**
+   * Tells the user, once, that recovery finished — and, when one of the
+   * extension's own entries had to stay, why.
+   *
+   * The expected settled shape is silent beyond one line: the extension removed
+   * its own entry, so `git stash list` looks exactly as it did before the plugin
+   * acted. A recovery that restores content and then leaves its own entry behind
+   * is what stranded the 0.8.1 report — a bare `git stash pop` hit the plugin's
+   * `-u` entry first and failed with `could not restore untracked files from
+   * stash`, so the user's own stash became hard to pop.
+   *
+   * The message therefore reports the *outcome*, not a chore: entries removed
+   * are not mentioned (that is the correct, invisible behaviour), and an entry
+   * that had to stay is named with the reason and the exact command. It never
+   * claims a removal that did not happen.
+   *
+   * Only `restored`/`resolved` reach here: a `pending` record still has its own
+   * warning and banner, and re-announcing it would resurrect a dismissed banner.
+   */
+  private announceSettled(
+    kind: "autostash" | "append",
+    outcome: Extract<PendingReconcile, { kind: "restored" | "resolved" }>
+  ): void {
+    if (outcome.kind !== "restored" && outcome.kind !== "resolved") {
+      return;
+    }
+    const name0 = kind === "append" ? "追加快照" : "自动 stash";
+    const removals = outcome.stashRemoved ?? [];
+    const state = outcome.kind === "restored" ? "已完成" : "已确认内容已回到工作区";
+    const settled = `${name0}恢复${state}`;
+
+    // Classification is by `kind`, a field the Git module sets at the moment it
+    // knows which branch it took. It used to be `removal.message.includes("git
+    // stash store")`, and that got both directions wrong:
+    //
+    //   - the `ambiguous-refusal` message ends with `可用 git stash store <sha>
+    //     逐个恢复`, so a refusal that restored *nothing* was announced as
+    //     "删到了别的条目…已原样恢复";
+    //   - an unreadable post-drop listing contains no such substring, so it fell
+    //     into the leftover branch and offered `git stash drop stash@{0}` — a
+    //     command naming a slot whose occupant was unknown.
+    //
+    // Prose is for humans; it must not be the input to a decision.
+    const leftovers = removals.filter((removal) => removal.kind === "leftover");
+    const restored = removals.filter((removal) => removal.kind === "undo-restored");
+    const unverified = removals.filter(
+      (removal) => removal.kind === "undo-unknown" || removal.kind === "ambiguous-refusal"
+    );
+    // A removal whose drop was applied but never cross-checked. `removed`, with a
+    // caveat that has to reach the log: the entry is demonstrably gone, but a
+    // second loss inside the same window could not be ruled out.
+    const caveats = removals.filter((removal) => removal.uncrosschecked === true);
+
+    if (caveats.length > 0) {
+      this.log(
+        "recovery",
+        `recovery ${kind} ${outcome.kind} uncrosschecked=${caveats
+          .map((removal) => removal.sha.slice(0, 7))
+          .join(",")} ${caveats.map((removal) => removal.message ?? "").filter(Boolean).join("；")}`
+      );
+      toast(
+        "warn",
+        settled +
+          `，插件自己的临时条目已删除，但删除前的 stash 列表未能读取，无法交叉核对是否有别的条目在同一次删除中一起消失。` +
+          `请执行 git stash list 确认你原有的 stash 都还在。`
+      );
+    }
+
+    if (unverified.length > 0) {
+      // Nothing was restored and no victim can be named. Saying "已恢复" here — or
+      // naming a slot to drop — would both be inventions. The one useful thing
+      // to pass on is the message, which says how to check by hand.
+      const why = unverified.map((removal) => removal.message).filter(Boolean).join("；");
+      this.log("recovery", `recovery ${kind} ${outcome.kind} unverified=${unverified.length} ${why}`);
+      toast(
+        "warn",
+        settled +
+          `，但在删除临时条目时出现无法确认的情况：${why || "无法确定删除的是哪一条"}。` +
+          `插件没有恢复任何条目，也没有再删除任何内容；请先执行 git stash list 核对后再决定。`
+      );
+      return;
+    }
+
+    if (restored.length > 0) {
+      // The user's entry was dropped and put back. This must never be announced
+      // as our leftover with a cleanup command: the entry named is theirs, it is
+      // back, and telling them to delete it would be the exact hazard this round
+      // removed.
+      const why = restored.map((removal) => removal.message).filter(Boolean).join("；");
+      this.log("recovery", `recovery ${kind} ${outcome.kind} undone=${restored.length} ${why}`);
+      toast("warn", `${settled}，但删除临时条目时删到了别的条目：${why}`);
+      if (leftovers.length === 0) {
+        return;
+      }
+    }
+
+    if (leftovers.length === 0) {
+      // Nothing of ours is left behind. A `resolved` with no removal has nothing
+      // to report at all — the record simply stopped having anything to do.
+      // A `caveats`-only result already told the user everything above (the
+      // removal happened, the cross-check did not), so a cheerful "已删除" line
+      // would contradict it.
+      if (outcome.kind === "restored" && caveats.length === 0) {
+        toast("info", `已恢复${name0}的改动，插件自己的临时 stash 已删除。`);
+      }
+      return;
+    }
+
+    const label = leftovers
+      .map((removal) =>
+        removal.name
+          ? `${removal.name}（sha ${removal.sha.slice(0, 7)}）`
+          : `sha ${removal.sha.slice(0, 7)}`
+      )
+      .join("、");
+    const why = leftovers
+      .map((removal) => removal.message)
+      .filter(Boolean)
+      .join("；");
+    const drops = leftovers
+      .filter((removal) => removal.name)
+      .map((removal) => `git stash drop ${removal.name}`);
+    const cleanup = drops.length
+      ? `确认无误后可自行执行 “${drops.join("”；“")}” 清理。`
+      : `槽位当前无法解析，可执行 \`git stash list\` 找到它后自行删除。`;
+    this.log("recovery", `announce ${kind} ${outcome.kind} kept=${leftovers.length} ${why}`);
+    toast(
+      "warn",
+      `${settled}，但插件自己的临时条目 ${label}没有删除：${why || "无法安全确认内容已回到工作区"}。` +
+        // Not "deleting it cannot lose anything": a `kept` entry may be one whose
+        // bytes are back in the worktree while the index no longer reproduces
+        // the staged half, so the entry is still the only record of the
+        // staged/unstaged split. The honest instruction is to check first.
+        `请先核对该条目里的改动已在工作区与索引中，再决定是否删除；${cleanup}` +
+        `你自己压入的 stash 从头到尾没有被改动。`
+    );
   }
 
   /**
@@ -1666,8 +1823,8 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
    *
    * Every branch is decided by reconciliation against Git state rather than by
    * the persisted `amended` flag: content that is already back in the index or
-   * the amended commit is resolved without re-applying, and no stash is dropped
-   * until its content is confirmed present.
+   * the amended commit is resolved without re-applying, and the transaction's own
+   * entries are removed only once their content is confirmed present.
    */
   private async restorePendingAppend(
     cwd: string,
@@ -1683,15 +1840,24 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
       // discard the original staged snapshot; tell the user to Abort or restore
       // it manually before proceeding. The record stays for reconciliation.
       const name = await this.stashNameBySha(cwd, pending.changeStash);
+      // Build the manual steps from the observed state, not from a fixed order.
+      // When the staged half is already back in the index, `git stash apply
+      // --index` is guaranteed to fail ("already exists in index ... Try without
+      // --index"), so it must not be the command the user is told to run.
+      // Abort is the primary action here and is named first in the text.
+      const presence = await stashPresence(cwd, pending.changeStash);
+      const steps = recoveryCommands(name, pending.changeStash, presence);
+      const manual = steps.map((step) => `${step.label} → ${step.command}`).join("；");
+      const text = `追加事务未完成：原始改动仍保存在 ${name}（sha ${pending.changeStash.slice(0, 7)}）。暂存内容尚未写入目标 commit，因此不能 Continue。请选择 Abort 以自动恢复并结束本次追加；如仍要手动处理：${manual}。`;
       const observed = observePendingWarning(
         this.pendingWarnings,
         pending.changeStash,
         "追加尚未到达 amend 步骤",
-        `追加事务未完成：原始改动仍保存在 ${name}（sha ${pending.changeStash.slice(0, 7)}）。请 Abort 以自动恢复，或手动 apply --index 后再 Continue。`
+        text
       );
       this.pendingWarnings = observed.state;
       if (observed.shouldNotify) {
-        toast("warn", `追加尚未完成，原始改动仍保存在 ${name}（sha ${pending.changeStash.slice(0, 7)}）。请 Abort 以自动恢复，或手动 apply --index 后再 Continue。`);
+        toast("warn", text);
       }
       return false;
     }
@@ -1699,6 +1865,7 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     // also verifies the content, so a completed append with a manually restored
     // worktree resolves silently instead of re-applying or warning.
     const outcome = await reconcilePendingAppend(cwd, pending);
+    // Announcement is centralised in `applyPendingOutcome`.
     const summary = await this.applyPendingOutcome(root, outcome, "append", async () =>
       this.clearPendingAppend(root)
     );
@@ -1710,26 +1877,28 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
 
   /**
    * Restores the original snapshot when setup failed before a pending record.
-   * Uses the same apply-only reconciliation as recovery: the stash is never
-   * dropped here, and a conflict keeps both the copy and the instructions.
+   * Uses the same reconciliation as recovery, so the entry is removed only when
+   * its content is confirmed back; a conflict keeps both the entry and the
+   * instructions.
    */
   private async restoreAppendSnapshot(cwd: string, sha: string): Promise<void> {
     const outcome = await reconcilePendingStash(cwd, sha);
     if (outcome.kind === "pending") {
       const name = await stashNameForSha(cwd, sha);
-      // The sha is the stable identity; the slot is a hint that may move.
-      const steps = recoveryCommands(name, sha);
+      // The sha is the stable identity; the slot is a hint that may move. Pass
+      // the probe the decision was already based on so the printed command
+      // cannot be one that is guaranteed to fail (index half already present).
+      const steps = recoveryCommands(name, sha, outcome.presence);
       toast(
         "warn",
         `恢复原始改动时有冲突：${outcome.reason}。安全副本 ${name ?? "（当前槽位无法解析）"}（sha ${sha.slice(0, 7)}）仍保留，可手动执行：${steps[0].command}`
       );
       return;
     }
-    if (outcome.kind !== "none" && outcome.stashKept) {
-      this.log(
-        "recovery",
-        `保留 stash name=${outcome.stashKept.name ?? "(none)"} sha=${outcome.stashKept.sha}（不自动删除）`
-      );
+    // No record exists on this path (setup failed before one was written), so
+    // `applyPendingOutcome` is not involved and the notice is raised here.
+    if (outcome.kind === "restored" || outcome.kind === "resolved") {
+      this.announceSettled("append", outcome);
     }
   }
 
@@ -2094,7 +2263,16 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
         throw new Error("目标 commit 未停靠，已取消追加操作。");
       }
 
-      const restore = await stashApplyIndexBySha(cwd, changeStash);
+      // Only the index (and untracked) halves are written before the amend. The
+      // worktree half is written afterwards on purpose: a worktree-half path
+      // that a later commit introduced does not exist in the edited target, so
+      // restoring it now leaves it on disk as an untracked file. If the amend
+      // then fails (a rejecting `pre-commit` hook, for example) `git rebase
+      // --abort` refuses to run at all — "untracked working tree files would be
+      // overwritten by reset" — so the Abort the user is told to run cannot
+      // succeed. Keeping the second half until after the amend leaves the tree
+      // exactly as the rebase found it.
+      const restore = await stashRestoreForAmend(cwd, changeStash);
       if (restore.gone || !restore.ok) {
         throw new Error(
           restore.gone
@@ -2105,6 +2283,20 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
 
       await git(["commit", "--amend", "--no-edit"], { cwd });
       restoredForAmend = true;
+
+      // The amend landed, so the snapshot's worktree half is safe to write now:
+      // a rebase is still in progress and can no longer be confused with an
+      // untracked file the transaction itself created. Writing it here also
+      // means the later `--abort` path never has to delete a file first.
+      const worktreeRestore = await stashRestoreWorktreeAfterAmend(cwd, changeStash);
+      if (worktreeRestore.gone || !worktreeRestore.ok) {
+        throw new Error(
+          worktreeRestore.gone
+            ? "追加已写入目标 commit，但原始工作区改动已不在 stash 中。"
+            : `恢复工作区改动失败：${worktreeRestore.message}`
+        );
+      }
+
       this.pendingRewrite = {
         operation: "追加暂存区",
         oldTip,
@@ -2149,17 +2341,26 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     } catch (e) {
       const inProgress = await isRebaseInProgress(cwd);
       if (inProgress) {
-        // Preserve the paused rebase so the user can resolve a replay conflict
-        // with the existing Continue / Abort controls. Before the amend, no
-        // pending transaction exists yet, so an Abort would otherwise leave the
-        // original snapshot stranded in stash.
+        // Preserve the paused rebase so the user can recover with Abort. Before
+        // the amend, no pending transaction exists yet, so an Abort would
+        // otherwise leave the original snapshot stranded in stash.
+        //
+        // Continue is deliberately NOT offered: once the append failed at the
+        // restore step the staged snapshot is not in the index, so continuing
+        // would replay the following commits without ever performing the
+        // append. The Continue command refuses this state too (see the
+        // `amended: false` guard there); telling the user to Continue here
+        // would send them into a dead end.
         if (!restoredForAmend) {
           await this.setPendingAppend(this.root!, {
             changeStash,
             targetHash: hash,
             amended: false,
           });
-          toast("warn", "追加已暂停；请解决冲突后 Continue 或 Abort。原始改动仍保存在 stash 中。");
+          toast(
+            "warn",
+            "追加已暂停：暂存区内容尚未写入目标 commit，因此不能 Continue。请选择 Abort 以自动恢复原始改动（原始改动仍保存在 stash 中）。"
+          );
         }
       } else if (!restoredForAmend) {
         await this.restoreAppendSnapshot(cwd, changeStash);
@@ -2932,7 +3133,7 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
 function describeOutcome(outcome: PendingReconcile): string {
   if (outcome.kind === "none") return "none";
   if (outcome.kind === "pending") return `pending reason=${outcome.reason} ${outcome.detail}`;
-  return `${outcome.kind} ${outcome.detail}${outcome.stashKept ? ` kept=${outcome.stashKept.name ?? outcome.stashKept.sha.slice(0, 7)}` : ""}`;
+  return `${outcome.kind} ${outcome.detail}${outcome.stashRemoved?.length ? ` stash=${outcome.stashRemoved.map((removal) => `${removal.status}:${removal.sha.slice(0, 7)}`).join(",")}` : ""}`;
 }
 
 /**

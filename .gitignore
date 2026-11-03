@@ -1,7 +1,14 @@
 # dependencies & build output
 node_modules/
 dist/
+# Packaged extensions live in dist-vsix/ (see the `package` script). Keep the
+# pattern recursive so a stray .vsix anywhere stays out of the repository.
 *.vsix
+dist-vsix/
+# The trailing slash above matches only a directory. `vsce package --out dist-vsix/`
+# without a trailing slash writes a *regular file* of that name, so name the path
+# without the slash as well: that pattern matches either form.
+/dist-vsix
 
 # local test repositories / scratch
 # Test source is versioned; transient fixture repositories remain ignored.

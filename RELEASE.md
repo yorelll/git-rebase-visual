@@ -37,13 +37,27 @@ npm install -g @vscode/vsce
 在项目根目录执行：
 
 ```bash
-vsce package
+npm run package
 ```
 
-成功后会在根目录生成 `git-rebase-visual-<version>.vsix`。
+成功后会在 **`dist-vsix/`** 目录生成 `git-rebase-visual-<version>.vsix`。所有打包产物都放在这个目录里，仓库根目录不再堆积 `.vsix`；`dist-vsix/` 与 `*.vsix` 均由 `.gitignore` 排除，不会被提交。
+>
+> 直接用 `vsce package` 会输出到根目录，推荐统一走 `npm run package`。
+>
+> 脚本不是简单转发 `--out dist-vsix/`：那样在**目录不存在**时（新克隆、CI 首次构建）`vsce` 会把参数当成文件名，写出一个**名为 `dist-vsix` 的普通文件**并仍然退出 0。`scripts/package-vsix.js` 先用 `mkdirSync(..., {recursive:true})` 建目录，再给 `--out` 传**完整文件名**，最后校验产物存在且是普通文件，否则非零退出。若 `dist-vsix` 已是一个普通文件（旧版本留下的那个 zip），脚本会明确报错并让你删掉它再重跑，而不是覆盖或静默失败。
 
 > `vsce` 默认会跑 `vscode:prepublish`（已配置为 `npm run compile`），所以打包时会自动重新编译。
-> 打包只包含必要文件；`dist/`、`media/`、`package.json` 会被包含，`node_modules`、`src/`、`.superpowers/` 等按 `.vscodeignore` 规则排除（如需精细控制可新增 `.vscodeignore`）。
+> `dist-vsix/` 与 `*.vsix` 也在 `.vscodeignore` 中：即使目录里还留着旧构建，它们也不会被递归打包进新的 VSIX。
+>
+> **`.vscodeignore` 是黑名单，单靠它不足以保证 VSIX 内容**：新增一个顶层目录却忘了加排除规则，它会静默进入 VSIX，而条目数看起来仍然“差不多”。因此 `npm run package` 在打包完成后会**列出 VSIX 的实际条目并按集合与显式的 12 项白名单逐项比对**，多一条或少一条都非零退出并打印 `+ 多出` / `- 缺失` 的差异。白名单在 `scripts/package-vsix.js` 的 `expectedEntries` 里，是一份有意写得又短又具体的常量；要调整打包内容时**同时**改 `expectedEntries` 和 `.vscodeignore`，让变化是显式决定而不是遗漏。`.github/workflows/release.yml` 的 “Verify packaged VSIX” 步骤不再重复这份清单，而是执行 `node scripts/package-vsix.js --verify-only`：对打包步骤产出的那个文件跑同一份代码、同一个清单，因此**清单只存在一份**，不会出现“本地改了、CI 的 heredoc 没改”的半改状态。
+>
+> 手动复核同样可行：
+>
+> ```bash
+> unzip -Z1 dist-vsix/git-rebase-visual-<version>.vsix   # 期望恰好 12 个条目
+> ```
+>
+> 白名单之外的任何条目（`src/`、`test/`、`docs/`、`scripts/`、`node_modules/`、`*.map`、`dist-vsix/`、`tsconfig` 等）都会让门禁失败。
 
 ---
 
@@ -53,7 +67,7 @@ vsce package
 
 **方式 A — 命令行**
 ```bash
-code --install-extension git-rebase-visual-<version>.vsix
+code --install-extension dist-vsix/git-rebase-visual-<version>.vsix
 ```
 
 **方式 B — VSCode 界面**
@@ -99,14 +113,48 @@ code --install-extension git-rebase-visual-<version>.vsix
 | 逻辑测试 | trailer 拆分/保留、rebase todo 构建、refspec 模板替换 |
 | 边界测试 | 空 todo、空白 refspec、无 trailer、Git 输出上限、取消信号、失效 stash |
 | Git 集成测试 | 临时仓库中的 staged/unstaged 状态、stash apply/pop/drop、keep-index、提交范围、rebase edit 停靠与绝对 git-path |
-| 发布测试 | TypeScript 类型检查、VSIX 必需文件与排除文件检查、Release 版本记录检查 |
+| 发布测试 | TypeScript 类型检查、VSIX 内容必须与显式白名单**逐项完全一致**（多一条、少一条都失败）、Release 版本记录检查 |
 
 测试文件位于 `test/`，运行 `npm run test` 或 `npm run test:coverage`。
 
 ### 更新记录
 
+- **0.8.2** — 修复追加到 commit 时把后续 commit 的文件误报为冲突（`Index was not unstashed.`），并消除两处会误导/静默放弃追加的提示：
+  - **假冲突的根因**：`stashPush` 保存整个工作区，`stashApplyIndexBySha` 却用 `git stash apply --index` 恢复——该命令会合并 stash 的**工作区那一半**，于是在只含目标 commit 树的停靠点上，**后续 commit 才引入的路径**变成 “Updated upstream 已删除 / Stashed changes 已修改” 的 `CONFLICT (modify/delete)`，整次恢复以 `Index was not unstashed.` 中止。每个 commit 只添加自己的文件，冲突不可能成立。**影响范围比报告更广**：目标早于 tip 即可能失败，不只是“最早那个 commit”；目标恰好是 tip 时不会触发这个 `apply --index` 合并冲突，但**路径名含非 ASCII、以空格开头或含 `*`/`?`/`[` 时仍会静默丢路径并报告成功**，因此“目标为 tip 就总能成功”同样不成立。**没有丢失任何用户数据**：stash 完整保留，Abort 后能按原暂存/未暂存状态完整放回。
+  - **修复方式**：改为把快照的**三个部分各自从自己的树**恢复，只触碰快照自己的路径——工作区部分用 `git restore --source=<stash> --worktree -- <stash^1..stash>`；暂存区部分用 `git restore --source=<stash>^2 --staged -- <stash^1..stash^2>`；未跟踪文件从 `stash^3` checkout 后 `reset` 保持未跟踪。**工作区必须先于暂存区**（先做暂存删除会让该路径离开索引，`restore --worktree` 随后无法解析 pathspec）；枚举路径的 `git diff` **必须带 `--no-renames`**（否则重命名折叠成只剩目标路径）。任一步非零即保持 stash 不动并在 `message` 中写明失败步骤。
+  - **被否决的方案**：`git read-tree <stash>^2` 替换整个索引，实测令 `commit --amend` 把五个文件全部提交进目标 commit；`git stash push --staged` 与 `--include-untracked` 互斥、单独使用又留下脏工作区，且需 Git 2.35+（下限 2.31.0）。两者均未采用。
+  - **提示死胡同**：amend 之前失败时曾提示“请解决冲突后 Continue 或 Abort”，但 Continue 在该状态（`amended: false`）本身会被拒绝。现改为明确说明“暂存内容尚未写入目标 commit、不能 Continue，请 Abort 自动恢复”。
+  - **静默放弃（第二个独立缺陷）**：照旧提示把“冲突”文件 `git add` 后，索引恰好与快照一致，对账曾判 `resolved` 清除记录——而变基仍停靠在原目标、追加从未 amend。现在只有 `stagedSnapshotInHead` 确认内容进入 HEAD（或记录标记 `amended`）才算完成；目标仍是祖先且变基仍在进行时**保留记录**并提示“追加未完成”。用户显式 Abort 后进行中的变基已不存在，同一状态正常结算、不会永久告警。
+  - **Abort 永不删除任何文件**：`git rebase --abort` 会被“未跟踪文件会被回退覆盖”（`untracked working tree files would be overwritten`，128）挡住。此前实现在“删除可证明无损”时会自动删掉阻挡路径以完成 abort；**这条路径已彻底移除**。
+    - **为什么放弃**：三轮审查各发现一种“证明无损、实际丢字节”的形状——① 归属证明只说明路径曾在本 HEAD 里，不说明盘上字节属于本次变基；② 预测源的属性基准：`git cat-file --filters --path=<p>` 从**工作区**解析 `.gitattributes`，而 `git reset --hard <orig>` 解析它即将写入的**目标树**里的那份；③ 相对路径的 `core.attributesFile`（Git 按进程工作目录解析，合成检出若换 `GIT_WORK_TREE` 就找不到它）与被 smudge filter 读取的工作区状态。每次修补只封住一种形状。这个类**无法穷举**：它的定义是“检出过滤器可能依赖 blob 之外的一切”，而 Git 过滤器可以执行任意命令、读取任意文件。
+    - **现在的行为**：只调用一次 `git rebase --abort`；成功即返回。失败时只认 Git 自己给出的碰撞文案（`untrackedCollisions` / `directoryCollisions` → `pathsUnderHeader`），用它**列出路径**，然后抛错。函数内**没有任何删除分支**。
+    - **错误信息**（`untrackedCollisionMessage` / `directoryCollisionMessage`）按五步写，面向从未读过这段代码的用户：① 发生了什么并逐条列出 Git 给出的原始路径；② **明确写明“没有删除任何文件”**；③ 下一步——把路径移出仓库或改名后重新 Abort，并给出可复制的 `mv <path> <path>.bak`（超过 5 条只列前 5 条并注明余数），同时提示 Windows 用户可在资源管理器里重命名；④ 改动没丢——**按 `git stash list` 实测结果**说明（有条目报条数，为空就明说为空并改为“工作区原封未动”），变基仍停在暂停态，停在这里没有损失；⑤ 若某个文件其实只是构建产物、用户愿意删掉，那个判断由用户做，扩展不替他决定。目录碰撞用同一套保证，并给出适合目录的处理建议。
+    - **可复制命令的 shell 转义**：路径用 POSIX 单引号包裹，内部 `'` 以 `'…'\''…'` 闭合重开。旧写法只加一层单引号，`it's.txt` 会生成粘不上的命令，`pwn'; touch OWNED; echo '.txt` 这种名字则会执行别的东西。扩展从不执行这些字符串，但它们的用途就是被复制。正确性由单测证明：每个恶意文件名经 `sh -c 'printf %s <quoted>'` 往返后必须逐字节等于原名，并断言执行载荷没有真的生成 `OWNED`；换回旧写法该用例立刻变红。
+    - **不认识的失败形状**原样抛出 Git 输出；因为整个函数不存在删除分支，这类形状不可能导向删除——这是结构性的，不再依赖“文案没匹配上”的巧合。
+    - **代价（据实说明）**：遇到历史遗留的碰撞状态，用户需要多手动做一步（把文件移开）才能完成 Abort，而不是点一下自动完成。这是有意的取舍——一步手动操作，换掉一整类无法枚举的静默丢字节风险。追加事务本身已改为“先索引/未跟踪 → amend → 再工作区”，不再产生这类残留，所以需要这一步的情况应当很少。
+    - **已删除的死代码**：`abortMayReplace`、`abortCheckoutBytes`、`attributeDirs`、`abortTarget`、`removable`/`userContent` 分类与两处删除循环，以及 `gitRunner.ts` 中只为预测器服务的 `rawStdout`/`stdoutBytes`/`stdoutChunks` 管线（已无其他调用方，一并移除以免留下无人钉住的安全辅助）。
+  - **删除预检与恢复公告（第四轮复审）**：`stashRemoveBySha` 开头的独立 `git stash list` 只判断退出码，reflog 损坏（退出 0、无输出、`refs/stash` 仍解析得到）会被读成“栈为空”并返回“条目已不存在”；当时只因调用方 `removeOwnStash` 先检查 `presence.listed !== true` 才不可达。现在预检走同一个 `readStashList`：`unreadable` → **拒绝**（`refused: true`）且不写入，只有 `empty` 才算 `gone`；`git stash drop` 非零退出的 `refused: false` 也改为 `true`。公告侧（`rebaseViewProvider.announceSettled`）原先用 `removal.message.includes("git stash store")` 分类，两个方向都错：`ambiguous` 拒绝（什么都没恢复）被公告成“删到了别的条目…已原样恢复”，drop 后列表读不出来则落进残留分支并给出 `git stash drop stash@{0}`，而该槽位占用者未知。现在 `StashRemoveResult` / `StashRemoval` 带判别字段 `kind`（`removed` / `leftover` / `undo-restored` / `undo-unknown` / `ambiguous-refusal`），公告只按 `kind` 分支，全链路不再对自产文案做子串或正则判断。`removeOwnStash` 曾把“删除前列表未能读取、无法交叉核对”这句说明构造后丢弃，现在作为 `uncrosschecked` 带出并同时进入日志与弹出提示；这类结果也不再显示无条件的“已恢复…已删除”成功话术。
+  - **目录碰撞显式拒绝**：Git 对目录碰撞的文案是 `Updating the following directories would lose untracked files in them`，与文件碰撞不同。旧代码不认识这种文案，只是把原始 stderr 抛出去——**恰好**没删东西，但这份安全是意外的。现在两种文案分别解析：目录碰撞明确报错、点名目录、说明未删除任何文件也没有删除任何目录，并给出“先移走再重试”的步骤。**不认识的失败形状只抛原始输出**；因为整个函数不存在删除分支，这类形状不可能导向删除。
+  - **测试**：新增真实 Git 集成用例，覆盖原始形状、暂存新文件+后续文件工作区改动（修复前失败）、纯修改后续文件且无任何残留（最简形状，修复前失败）、暂存删除（修复前通过，用于固定行为）、“索引一致但追加未落地必须保持 `pending`、Abort 后能结算”，以及本轮重写的拒绝契约：未跟踪碰撞 → 抛错且文件字节不变、变基仍暂停、stash 不变、错误信息包含每个路径并写明“没有删除任何文件”；目录碰撞 → 同类保证并点名目录；干净树 → 正常成功（回归护栏）；用户把文件改名移开后第二次 Abort 成功（把文档里的恢复步骤端到端钉住）；N5-1 形状（相对 `core.attributesFile`）与 N5-2 形状（smudge filter 读取工作区状态）现在一律拒绝，只断言抛错与字节存活；不认识的失败形状不删除任何东西。另保留 `worktree.ts`/`worktreeChanges.ts` 的**全部 9 个**字面 pathspec 站点（逐个站点撤掉 `GIT_LITERAL_PATHSPECS` 都实测变红，见下方逐点对照表）、`git stash apply --index` 退出码非零时记录仍保持 `pending`（该形状下内容探测会误报 `complete`）。已实测非空转：撤掉对应修复后相应用例变红，恢复后全绿。另有 3 条本轮新增用例钉住本节新增的两处改动：`shellQuote` 的恶意文件名往返证明（换回旧的未转义写法即变红）、`abort refuses when a smudge filter reads worktree state` 的 `cat-file --filters` 前提断言（把 filter 换成恒等 `cat` 即变红）、以及 `the abort refusal describes the stash as it actually is, not as assumed`（stash 为空与有一条两种状态都要匹配 `git stash list`）。全量 **275 项**通过、0 失败、0 跳过，两个类型检查零输出。
+
+    字面 pathspec 站点与钉住它的用例（每个站点单独撤掉 `GIT_LITERAL_PATHSPECS` 均实测变红）：
+
+    | 站点（文件 / 符号） | 调用 | 钉住它的用例 | 用例所在文件 |
+    | --- | --- | --- | --- |
+    | `worktree.ts` `restoreStagedHalf` | `restore --staged`（暂存半） | `a quoted non-ASCII path, a leading space and a glob name are all appended for real` | `appendStaged.integration.test.ts` |
+    | `worktree.ts` `restoreUntrackedHalf` | `checkout <stash>^3 -- <path>` | `an untracked glob-named path is restored from ^3 without checking out its decoy` | `worktree.integration.test.ts` |
+    | `worktree.ts` `restoreUntrackedHalf` | `reset -q -- <path>` | 同上（诱饵在快照后已有索引条目，glob 会把它改写成 stash 内容） | `worktree.integration.test.ts` |
+    | `worktree.ts` `restoreWorktreeHalf` | `restore --source=<stash> --worktree` | `the worktree half restores a glob-named path without reverting its decoy` | `worktree.integration.test.ts` |
+    | `worktreeChanges.ts` `stageWorktreeChange` | `add -A -- <path>` | `a glob-named path is staged and restored literally, never touching its decoy` | `worktreeChanges.integration.test.ts` |
+    | `worktreeChanges.ts` `restoreWorktreeChange`（working） | `restore --worktree -- <path>` | `single-file and bulk worktree restoration treat glob names literally` | `worktree.integration.test.ts` |
+    | `worktreeChanges.ts` `restoreWorktreeChange`（staged） | `restore --staged -- <paths>` | `a glob-named path is staged and restored literally, never touching its decoy` | `worktreeChanges.integration.test.ts` |
+    | `worktreeChanges.ts` `discardAllWorktreeChanges` | `restore --worktree -- <paths...>` | `single-file and bulk worktree restoration treat glob names literally` | `worktree.integration.test.ts` |
+    | `worktreeChanges.ts` `unstageAllWorktreeChanges` | `restore --staged -- <paths...>` | `bulk unstage treats glob names literally and keeps the decoy's entry` | `worktree.integration.test.ts` |
+
+    诱饵的构造原则（否则用例空转）：**错 glob 写入的字节必须与不写不同**。因此每个夹具都让诱饵在该次调用发生的那一刻持有目标永远没有的内容——例如 bulk unstage 的两条路径都是**新增文件**（`restore --staged` 会整条删掉无 HEAD 对应项的索引条目，而“已跟踪文件被回退到 HEAD 值”这种变化与“没碰它”无法区分）。
+
 - **0.8.1** — 修复追加到 commit 时的误报冲突，日志移入用户主目录：
-  - **追加误报“工作区冲突”**：edit 停靠 rebase 中的追加有时会报 `快照中未提交的部分与当前工作区冲突：<文件>`，并建议 `git stash apply --index`。这是**误判**——被判冲突的路径当时存放的正是本次追加已提交的内容（`rebase --continue` 会把该 commit 拥有的路径还原成 `stash^2` 的内容），不是用户的新改动。**没有丢失任何用户数据**：完整快照与 keep-index 残留快照都仍在 `git stash list` 中，追加本身也已成功，被跳过的只是“把未提交部分放回工作区”。旧建议是个死循环（`apply --index` 会重跑同一段比对、得到同一个“冲突”），对这类形状**不再出现**。现在 `restoreResidualSnapshot` 把“工作区 blob == `stash^2:path`”视为本次事务自己的内容并放回快照的工作区版本；判定只看 Git 状态（`ls-tree`/`hash-object`），不看持久化的 `amended` 标志，任何与 `stash^2` 不同的内容（更新的用户改动、快照中的删除）仍然拒绝覆盖。**插件依然永不自动删除 stash，永不覆盖更新内容。**
+  - **追加误报“工作区冲突”**：edit 停靠 rebase 中的追加有时会报 `快照中未提交的部分与当前工作区冲突：<文件>`，并建议 `git stash apply --index`。这是**误判**——被判冲突的路径当时存放的正是本次追加已提交的内容（`rebase --continue` 会把该 commit 拥有的路径还原成 `stash^2` 的内容），不是用户的新改动。**没有丢失任何用户数据**：完整快照与 keep-index 残留快照都仍在 `git stash list` 中，追加本身也已成功，被跳过的只是“把未提交部分放回工作区”。旧建议是个死循环（`apply --index` 会重跑同一段比对、得到同一个“冲突”），对这类形状**不再出现**。现在 `restoreResidualSnapshot` 把“工作区 blob == `stash^2:path`”视为本次事务自己的内容并放回快照的工作区版本；判定只看 Git 状态（`ls-tree`/`hash-object`），不看持久化的 `amended` 标志，任何与 `stash^2` 不同的内容（更新的用户改动、快照中的删除）仍然拒绝覆盖。**插件永不覆盖更新的用户内容；它只删除自己创建的 stash 条目**——内容被完整确认（列表 / 索引 / 工作区与未跟踪三处）回来后，才把记录里的 sha 解析成当前槽位、复核占用者仍是自己的 sha、`drop` 后复核删掉的正是自己的 sha（不符则 `git stash store` 还原），结算后 `git stash list` 与用户原有条目按 sha 集合一致；用户自己压入的条目在任何路径上都不会被删除。
   - **日志目录移入用户主目录**：从 `<os.tmpdir()>/log/...` 改为 `<用户主目录>/tmp/log/git-rebase-visual-<version>/`（Linux/macOS 为 `~/tmp/log/...`，Windows 为 `C:\Users\<用户>\tmp\log\...`）。轮转、保留 10 个会话、脱敏与写入失败容错不变；旧临时目录中的历史日志**不迁移、不删除**，每次扩展会话首次执行 **Git Rebase: Open Logs** 时在 Output 中追加一行说明旧位置（不弹通知、不重复打扰）。
   - **残留探测误报审计**：用真实 Git 复核了 keep-index 快照的 `worktree=missing unstaged=missing` 结论——后续 commit 不触碰该路径时确实缺失且会被真实写回、报 `restored`；拥有该路径时为 `present` 不重复写；改写该路径时 `rebase --continue` 先冲突，对账走不到。不存在假 `pending`/假 `resolved`，理由已写入代码注释。
   - **测试**：新增上述形状的集成回归（复现 edit 停靠 → `apply --index` → `amend` → `keep-index` 暂存 → `rebase --continue` → 对账，断言残留回到工作区、结论非 `pending`、两份 stash 均在），文件日志路径用例改为注入 `home`/`tmpdir` 以保证可移植。另修掉 `streamChat` 中途取消用例的时序竞态：原先固定 5 ms 定时器与“首个 delta 已收到”竞速，全量套件高负载下会先取消、`chunks` 为空而失败；现在改为首个 delta 送达后立即取消，服务端有上限地继续发数据——取消失效时断言失败而不是挂住套件（已实测 sabotage 后变红）。全量 **217 项**，两个类型检查零输出。
@@ -116,8 +164,9 @@ code --install-extension git-rebase-visual-<version>.vsix
   - **根治“上一个操作尚未完成，请稍候。”**：`runGit` 不再等待 `close` 事件——子进程 `exit` 后立即在输出排空或 50ms 宽限期结算，因此 Git hook / rebase editor 留下的、继承 stdio 的孙进程无法再永久挂住调用；超时与 Abort 只在固定宽限后结算一次，并用 `taskkill /T /F`（Windows）或进程组信号（POSIX）**尝试**回收进程树；`taskkill` 只能沿树根向下枚举，已脱离或期间新建的孙进程可能存活——那只是进程泄漏，不再阻塞结算或占用调用方 deadline。
   - **可解释的写锁**：`busy` 布尔值替换为带 `{id, action, label, source, startedAt}` 的 `MutationLock`。拒绝消息会说明具体操作、来源与耗时；释放按 owner 身份校验，迟到的 `finally` 不会误清新的 owner；owner 已结束但释放丢失时，下一条消息会自愈回收。90 秒看门狗会写入一行 `mutation-stuck ...` 诊断，并提供 **强制解除并刷新**——先重读 Git 的 rebase 标记、冲突文件与 commit 列表再释放，不盲信内存状态。
   - **文件日志**：每次扩展会话在 `<os.tmpdir()>/log/git-rebase-visual-<version>/` 下创建带时间戳的会话日志，按大小轮转并保留最近 10 个文件；记录与 Output 相同的诊断、写锁生命周期、webview 操作、每次 Git 调用（argv/退出码/耗时）、rebase 状态与异常堆栈，复用并扩展凭据脱敏；日志写入失败只会静默关闭文件日志。新增 **Git Rebase: Open Logs** 命令。
-  - **插件永远不自动删除 stash**：恢复全程只用 `git stash apply`（含 `--index`），自动路径上没有任何 `git stash pop` / `git stash drop` / `git stash clear`；`stashDropBySha`、`stashPopBySha`、`dropConfirmed`、`dropListedStash` 等“自动删除”实现已整体删除，`git stash pop` 只保留在用户显式点击 **Pop** 的命令里。记录只有在内容被**正面确认**已在工作区/暂存区/HEAD 中时才清除；确认不了就保留记录、横幅与 stash，误判的最坏结果是“多留一个 stash”，而不是“唯一副本被删掉”。
-  - **待恢复改动对账与 Reset Extension State**：`refresh()` 不再因为一条遗留的“追加事务未完成”记录而直接 `return` 掉整张 commit 列表，而是先与真实 Git 状态对账（rebase 是否进行、stash 是否仍列出、stash 内容是否已在 index/worktree、`targetHash` 是否仍是 HEAD 祖先）再渲染。内容已在（包括 `stash apply` 成功但未丢弃 stash、以及用户手动 `git stash apply --index` 之后）判定为已恢复，静默清记录、不重复 apply、不告警，**并保留 stash**；内容未落地则自动 `apply --index`，冲突时保留记录。同一 `(stash sha, 原因)` 只警告一次（后续只写日志），界面改用一条可关闭的“待恢复的改动”横幅，横幅内直接列出 `git stash apply --index <name>`、`git stash apply <name>`、`git stash drop <name>` 三条可复制的显式命令——删除永远由用户自己执行。恢复按记录单飞，轮询/事件/读取消息重叠时只执行一次，且不会在写操作持锁期间插队执行 Git 写入。新增 **Git Rebase: Reset Extension State**（`gitRebaseVisual.resetState`）：先对账，只清孤儿状态记录，绝不删除仍保存未提交内容的 stash，并报告清理/保留内容（含保留 stash 的可执行恢复命令）与日志目录。日志与 Output 首行新增会话头（版本、扩展路径、VS Code 版本、宿主 pid、平台），便于确认运行的是哪个构建。
+  - **只删除插件自己创建的 stash 条目**：恢复全程只用 `git stash apply`（含 `--index`），自动路径上没有任何 `git stash pop` / `git stash clear`。内容被**完整确认**重新回到索引、worktree 与未跟踪文件三处（`stashPresence().complete`）之后，插件把自己那条临时条目删除；结算后 `git stash list` 与插件动手前**按 sha 集合完全一致**。恢复与删除是两件事：恢复只用 apply（失败可重试、不吞副本），删除是记账（内容已在条目之外）。
+  - **为什么删除必须按槽位、而且要检查两次**：`git stash pop <sha>` / `git stash drop <sha>` 都不是合法用法（实测 `error: '<sha>' is not a stash reference`），只能用 `stash@{n}`。而 `stash@{n}` 是**位置**：解析出槽位到真正删除之间若有并发 `git stash push`，该槽位会换成用户的条目。因此删除前重读槽位占用者、必须仍等于自己的 sha 才动手；删除后核对实际被删掉的是哪一个条目：判据是**删除前后的 sha 集合差**——自己的 sha 已不在列表即正确；仍在列表说明删掉的是别的条目，从删除前一刻的快照里找出消失的那一个。Git 的 `Dropped stash@{n} (<sha>)` 只作旁证：它是 gettext msgid、会被翻译，旧实现依赖它时在非英语环境下把“删错了”报成“删对了”，整段回滚静默失效。若不是自己的，用 `git stash store` 把它**原样恢复**（实测可完整恢复该 commit 与其 reflog 条目；复原后条目位于列表最上方、**reflog 说明 `%gs`（`git stash list` 显示的那行）**变为 `git-rebase-visual restored <sha7>`，而 stash commit 的**标题 `%s`（`git log` 显示的那行）不变**，回滚消息把两个字段都点名写出）。判断“只删掉了自己那条”还要求删除前快照里**没有别的 sha 同时消失**：删除窗口内并发删掉自己那条、自己的 drop 又删掉用户那条时，列表同样不再包含自己的 sha，但用户那条必须被认出来并用 `stash store` 复原；同时消失多条则拒绝并点名，不猜。删除前快照读不出来时仍返回已删除，但消息写明**未做交叉核对**。任一步不符都是拒绝并报告，绝不重试。
+  - **为什么不是 `pop`**：自动 stash 带 `--include-untracked`，其未跟踪文件被恢复回工作区之后，对同一条目执行 `pop` 必然以 `already exists, no checkout` / `could not restore untracked files from stash` 失败且**条目仍在**（实测）。也就是说“先 apply 再 pop”永远不会成功，“先 pop 再 apply”则会让每次冲突重试都先做一次破坏性写入。
   - **对账失败即保守**：遗留记录的对账改为“正面验证才放行”。index/worktree/untracked 三部分默认 `unknown`，只有探测成功才提升为 `present`/`missing`；`complete` 要求 `git stash list` 成功且三部分全部 `present`，任何探测失败（`^1`/`^3` 对象或 `^3` 树不可读、`git diff` 非零）都只会得到 `pending`，记录与 stash 原样保留。`git stash list` 非零退出，或在 reflog 损坏时“空输出 + `refs/stash` 仍指向列表外的 sha”，都返回未知而不是 `[]`，不再被误判为 stash 已消失。`targetHash` 被改写时不再仅凭祖先关系认定 amend 已落地，而是逐路径用 `git ls-tree` 比较快照 `^2` 与 HEAD 的 **mode + object**；任何一项无法读取都判为未知。
   - **恢复与写锁、渲染路径**：恢复轮次整体在 mutation lock 内执行，锁忙时整轮跳过并在下一次空闲轮询重试，不再出现“入口检查一次、随后 6–14 次 Git 写在锁外”的窗口。对账也移出渲染路径：commit 列表先渲染，对账随后异步执行，持续失败时指数退避（最长 30 秒），不再每 1.5 秒阻塞一次渲染。`RecoveryCoordinator` 改为先登记 `inFlight` 再放行任务，同步抛出的异常不再永久占用单飞 key。`stop()` 在子进程已 `exit` 时只安排结算定时器，不再按可能被回收的 pid 追发 kill。
   - **关闭提示真正生效**：横幅文本随 `(stash sha, 原因)` 去重状态一起持久化，渲染只读取当前 banner key；`dismissRecoveryNotice` 清除状态并通知 webview 隐藏横幅，之后同一问题的刷新不会再把它画回来，只有出现不同 key 才重新提示。

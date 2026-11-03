@@ -132,15 +132,31 @@ export class RecoveryCoordinator {
 /**
  * Outcome shape the recovery loop needs; the Git module supplies the rest.
  *
- * Note what is absent: there is no "dropped" channel. A settled recovery may
- * report the stash it *kept* (`stashKept`), never one it removed — the
- * extension never deletes a stash automatically.
+ * A settled recovery reports what it did with the entries the extension itself
+ * created: `stashRemoved` lists one result per such entry, `removed` or `kept`.
+ * Entries belonging to the user are never candidates for removal, but an
+ * attempt on the plugin's own entry can still take one of them down with it
+ * (`undo-restored` / `undo-unknown` name that entry in `victim`), so a `kept`
+ * result is not necessarily a leftover: read `kind`, never the prose.
  */
 export interface RecoverableOutcome {
   kind: "none" | "resolved" | "restored" | "pending";
   /** Diagnostic detail; present on every concrete outcome but not modelled here. */
   detail?: string;
-  stashKept?: { name?: string; sha: string };
+  stashRemoved?: {
+    status: "removed" | "kept";
+    /**
+     * Which shape the attempt took, decided by the Git module when it knows the
+     * answer. The announcer branches on this; it must never be re-derived from
+     * `message`, which is prose for humans.
+     */
+    kind: "removed" | "leftover" | "undo-restored" | "undo-unknown" | "ambiguous-refusal";
+    sha: string;
+    name?: string;
+    victim?: string;
+    uncrosschecked?: boolean;
+    message?: string;
+  }[];
 }
 
 export interface RecoveryHooks<R extends RecoverableOutcome> {

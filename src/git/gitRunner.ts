@@ -27,6 +27,76 @@ export interface GitInvocationLog {
   cancelled: boolean;
 }
 
+/**
+ * Environment for any Git command that receives a path taken from a Git tree
+ * listing or a status/diff record as a pathspec.
+ *
+ * Pathspecs are not plain strings: `*`, `?`, `[` and a leading `:` are pattern
+ * syntax. A file literally named `br[1].txt` is then read as "b, r, or 1" and
+ * can match the wrong paths or none at all. Every path this extension passes
+ * back to Git came *from* Git, so none of them may be reinterpreted.
+ */
+export const LITERAL_PATHSPECS: NodeJS.ProcessEnv = { GIT_LITERAL_PATHSPECS: "1" };
+
+/**
+ * Environment for any Git command whose *human-readable output* is parsed.
+ *
+ * Git translates its prose (gettext msgids: "No local changes to save",
+ * "Dropped stash@{1} (…)"), so a regex written against the English text silently
+ * stops matching on a machine whose `LANG`/`LC_ALL` selects another catalog.
+ * `LC_ALL=C` pins the C locale for the child, so the output this extension reads
+ * is the output it was written against.
+ *
+ * Pinning is the weaker of the two possible fixes: it only helps the commands it
+ * is attached to, and a missed call site fails silently again. The stronger rule
+ * both places below follow is to *not depend on the prose at all* — decide from
+ * exit codes and from before/after identity sets, and use these strings only as
+ * corroboration.
+ *
+ * ## Audit: every place `src/` reads Git's human-readable output
+ *
+ * Each entry was classified by asking "does a translated catalog change the
+ * answer?". The ones marked *prose* were the risk; the rest are structural.
+ *
+ * | site | output read | verdict |
+ * | --- | --- | --- |
+ * | `worktree.ts` `stash` | `stash push` notice | **prose** — now decided by sha-set diff; `C_LOCALE` passed |
+ * | `worktree.ts` `undoWrongDrop` | `Dropped stash@{n} (<sha>)` | **prose** — now decided by sha-set diff; parse kept as a corroborating fallback; `LC_ALL=C` on the drop |
+ * | `commitLog.ts` `commitDetail` | `--shortstat` summary line | **prose** — fallback only (primary is `--numstat`); `C_LOCALE` passed |
+ * | `rebaseEngine.ts` `abortRebase` | collision headers | **prose** — pinned via `ABORT_ENV` (= `C_LOCALE`) |
+ * | `rebaseEngine.ts` `describeStash` | count of `--format=%gd` lines | structural — same line count in any locale |
+ * | `commitLog.ts` `patchId` | `patch-id --stable` first field | structural — hex token |
+ * | `commitLog.ts` `gitVersion` | `--version` | structural — version digits |
+ * | `commitLog.ts` `rebaseAtEditStop` | `done` file `edit <sha>` | structural — the todo file's own grammar, never translated |
+ * | `ui/rebaseState.ts` `parseTodoStep` | todo file commands | structural — same file grammar |
+ * | `worktreeChanges.ts` `parseWorktreeChanges` | `status --porcelain=v2 -z` | structural — designed as a machine format |
+ * | `ui/commitDiffState.ts` | `diff-tree --name-status -z` / `--numstat -z` | structural — status letters and counts |
+ * | `ui/commitSearch.ts`, `ui/*State.ts` | stored hashes/fields | structural — just validation of our own data |
+ * | `git/message.ts` | commit message trailers | structural — the user's own text, not Git's |
+ * | `git/pushGuard.ts` | refspecs | structural — refs, not messages |
+ * | all `--format=` / `-z` / exit-code-only calls | — | structural by construction |
+ *
+ * The `--name-only`-family audit lives on `pendingRecovery.changedPaths`; the
+ * short version is that `worktree.diffNames` and `pendingRecovery.changedPaths`
+ * are the only two path-enumerating diffs and both now carry `--no-renames`,
+ * while the rest take `-z` and are compared by object id rather than by listing
+ * the paths at all.
+ */
+export const C_LOCALE: NodeJS.ProcessEnv = { LC_ALL: "C" };
+
+/**
+ * Splits NUL-separated Git output (any `-z` listing) into paths.
+ *
+ * Never split these on `\n` and never trim: `core.quotePath` makes Git print a
+ * non-ASCII path as a quoted, octal-escaped string (`"\346\226\260..."`) that no
+ * `rev-parse` or `cat-file` can resolve, and a path may legally begin or end
+ * with a space. `-z` suppresses the quoting and gives raw bytes; the only
+ * correct delimiter is NUL. The empty trailing record is dropped.
+ */
+export function splitNul(output: string): string[] {
+  return output.split("\0").filter((entry) => entry.length > 0);
+}
+
 const DEFAULT_MAX_BUFFER = 50 * 1024 * 1024;
 const DEFAULT_TIMEOUT = 120_000;
 /**
@@ -237,7 +307,11 @@ export function runGit(args: string[], opts: GitRunOptions): Promise<GitResult> 
         reject(error);
         return;
       }
-      resolve({ code: finalCode, stdout, stderr });
+      resolve({
+        code: finalCode,
+        stdout,
+        stderr,
+      });
     };
 
     /** After exit, settle as soon as both pipes ended; otherwise use the grace. */
