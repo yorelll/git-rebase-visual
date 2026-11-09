@@ -14,11 +14,16 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # Pinned to the latest majors. The action runtime (node24 in both) is
+      # independent of `node-version` below, which stays at 20: that is the Node
+      # the project builds and tests with, and `scripts/run-tests.js` enumerates
+      # test files itself precisely because Node 20's `node --test` has no glob
+      # support. Raising the action must not raise the Node runtime.
       - name: Check out release tag
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 20
           cache: npm

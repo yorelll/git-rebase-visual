@@ -94,12 +94,18 @@ test("the count-failure detail is the last stderr line, on one line, and bounded
   // Code points, not UTF-16 units: cutting a surrogate pair in half renders a
   // lone surrogate (a replacement glyph) instead of a clean ellipsis.
   //
-  // The string must MIX a BMP character with an astral one. A pure astral string
-  // does not discriminate: pairs start at offset 0, so a UTF-16 slice at an even
-  // boundary lands exactly between pairs and the mutant survives. Prefixing one
-  // BMP character shifts every pair to an odd offset, so the 140-unit boundary
-  // falls inside a pair. (U+2728 `✨` was used here before and was useless for
-  // this: it is BMP with UTF-16 length 1, i.e. not a surrogate pair at all.)
+  // The string MIXES a BMP character with an astral one, and that is the
+  // stronger fixture. On a pure astral string the code-point length assertion
+  // below still kills the mutant: a pure 145-code-point input (`𝄞`×145, which
+  // is also 290 UTF-16 units) comes out at 141 code points with the correct
+  // implementation and at 71 with a UTF-16 slice, so 141 ≠ 71 and the assertion
+  // fails. What never fires on a pure astral string is the lone-surrogate
+  // assertion, because given pairs starting at offset 0 every even 140-unit
+  // boundary lands exactly between two pairs. Prefixing one BMP character
+  // shifts every pair to an odd offset, so the boundary falls inside a pair and
+  // BOTH assertions become live. (U+2728 `✨` was used here before and was
+  // useless for this: it is BMP with UTF-16 length 1, i.e. not a surrogate pair
+  // at all.)
   const mixed = "a" + "\u{1D11E}".repeat(NOTE_DETAIL_LIMIT + 5);
   const mixedDetail = upstreamNoteDetail({ code: 128, stdout: "", stderr: mixed });
   assert.equal(Array.from(mixedDetail).length, NOTE_DETAIL_LIMIT + 1, "140 code points plus the ellipsis");
@@ -116,6 +122,45 @@ test("the count-failure detail is the last stderr line, on one line, and bounded
   // Exactly at the limit is kept whole; no gratuitous ellipsis.
   const exact = "y".repeat(NOTE_DETAIL_LIMIT);
   assert.equal(upstreamNoteDetail({ code: 128, stdout: "", stderr: exact }), exact);
+  // The limit gates on code points, not UTF-16 units. The inputs above cannot
+  // tell the two measures apart — the long ones are > 140 under both, `exact` is
+  // 140 under both — which is why the gate could be changed to `last.length`
+  // with this whole file still green. This input sits in the one window that
+  // separates them: 140 code points but 141 UTF-16 units, so a gate written as
+  // `last.length > NOTE_DETAIL_LIMIT` would append an ellipsis to a line that is
+  // not over the limit.
+  const codePointLimit = "a".repeat(NOTE_DETAIL_LIMIT - 1) + "\u{1D11E}";
+  assert.equal(Array.from(codePointLimit).length, NOTE_DETAIL_LIMIT, "140 code points");
+  assert.equal(codePointLimit.length, NOTE_DETAIL_LIMIT + 1, "but 141 UTF-16 units");
+  assert.equal(
+    upstreamNoteDetail({ code: 128, stdout: "", stderr: codePointLimit }),
+    codePointLimit,
+    "unchanged, with no ellipsis: the gate counts code points"
+  );
+  // And the boundary is exact, not merely "somewhere past 140": one code point
+  // over must be truncated. Without this, a gate written as
+  // `chars.length > NOTE_DETAIL_LIMIT + 1` passes the whole file while leaving a
+  // 141-code-point line untruncated.
+  const overByOne = "a".repeat(NOTE_DETAIL_LIMIT) + "\u{1D11E}";
+  assert.equal(Array.from(overByOne).length, NOTE_DETAIL_LIMIT + 1, "141 code points");
+  assert.equal(overByOne.length, NOTE_DETAIL_LIMIT + 2, "142 UTF-16 units");
+  assert.equal(
+    upstreamNoteDetail({ code: 128, stdout: "", stderr: overByOne }),
+    "a".repeat(NOTE_DETAIL_LIMIT) + "…",
+    "one code point over is truncated to the limit plus the ellipsis"
+  );
+  // The fixture above cannot separate "gate +1" from "gate on UTF-16 units +1":
+  // it is 141 code points but 142 units, so a mutant that both measures in units
+  // and widens by one would still truncate it. All-BMP input makes the two
+  // measures equal, so it pins the gate to exactly `> NOTE_DETAIL_LIMIT` code
+  // points no matter which side the implementation counts.
+  const overByOneBmp = "a".repeat(NOTE_DETAIL_LIMIT + 1);
+  assert.equal(overByOneBmp.length, NOTE_DETAIL_LIMIT + 1, "141 code points and 141 UTF-16 units");
+  assert.equal(
+    upstreamNoteDetail({ code: 128, stdout: "", stderr: overByOneBmp }),
+    "a".repeat(NOTE_DETAIL_LIMIT) + "…",
+    "the gate is exactly one over the limit, not two"
+  );
 });
 
 test("branch context gives explicit detached and no-upstream labels", () => {

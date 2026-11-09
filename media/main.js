@@ -131,9 +131,10 @@
     }
     // `state.commits ?? []` for the same reason as in `renderList`: the
     // `rebaseInProgress` error states from `resolveRange` / `getCommits` carry no
-    // commit list. This one is worse than the list throwing — the banner is
-    // painted last, so a throw here leaves the user looking at an empty banner
-    // with no error at all.
+    // commit list. This one is worse than the list throwing: `renderBanner` is
+    // the FIRST thing `render()` does, so a throw here happens before any error
+    // text is painted and leaves the user looking at an empty banner with no
+    // error at all.
     const stopped = (state.commits ?? []).find((c) => c.hash === state.stoppedAt);
     const isConflict = state.conflictCount > 0;
     const isEditStop = state.pausedReason === "edit" && stopped;
@@ -298,9 +299,10 @@
       return [c.shortHash, c.hash, c.subject, c.author, c.authorEmail, c.date].join(" ").toLowerCase().includes(term.value);
     });
   }
-  // `?? []` for the same reason as in `renderList`: a state carrying only an
-  // error has no commit list, and the filter controls are still reachable.
-  function filteredCommits() { return (state.commits ?? []).filter((c) => queryMatch(c, filterText)); }
+  // No `?? []` here on purpose: the only caller is `renderList`, which returns
+  // early when `commits` is empty or absent, so `state.commits` is a non-empty
+  // array by the time this runs. A guard here would be unreachable.
+  function filteredCommits() { return state.commits.filter((c) => queryMatch(c, filterText)); }
   function isFilterActive() { return filterText.trim().length > 0; }
   function commitIsPending(c) { return (state.pendingHashes || []).some((hash) => c.hash.startsWith(hash) || hash.startsWith(c.hash)); }
   function commitIsStopped(c) { return state.pausedReason === "edit" && state.stoppedAt === c.hash; }

@@ -249,7 +249,7 @@
   * **实测红/绿**：把实现改回 `lines[lines.length - 1]` → 红，`actual: "'git <command> [<revision>...] -- [<file>...]'"`、`expected: "fatal: ambiguous argument 'ghost/master...HEAD': …"`；恢复后绿。
   * **可达性声明保留**：这条分支今天只由"损坏对象"形态触达，`unknown revision` 形态被 `[gone]` 吸收；本项是**潜伏**缺陷，但不是纯理论——一旦 `[gone]` 判据放宽就会变成用户可见的错信息。
 * **新发现 2（P3，测试质量，已修复）——用 `✨` 冒充代理对，防孤立代理的断言是空转。** `✨` 是 U+2728，UTF-16 长度 **1**，根本不是代理对；把实现换成 UTF-16 切片后整个文件 4/4 仍绿。这是第七轮"按码点截断"那条修复留下的**空断言**，属于反复出现的"测试看起来在钉、实际没钉"。
-  * 新用例改用**混合串** `"a" + "\u{1D11E}".repeat(NOTE_DETAIL_LIMIT + 5)`：前面一个 BMP 字符把每个代理对整体推到奇数偏移，140 码元的边界正好落在对中间。（纯 astral 串不行——对从 0 开始，偶数边界会"碰巧"落在对之间，变异体照样存活；这一点是反向实测出来的。）
+  * 新用例改用**混合串** `"a" + "\u{1D11E}".repeat(NOTE_DETAIL_LIMIT + 5)`：前面一个 BMP 字符把每个代理对整体推到奇数偏移，140 码元的边界正好落在对中间。**纯 astral 串仍会被长度断言杀掉**（`𝄞`×145 是 141 码点，UTF-16 切片后只剩 71 码点，`141 ≠ 71`），只是它的**孤立代理断言**永远不触发——对从 0 开始，偶数边界恰好落在对之间；混合串让**两道**断言都生效，所以它是更强的夹具。（此处理由在 `code-review-0-8-21.md` 新发现 1 中被实测纠正；原文说"纯 astral 串上变异体会存活"是反的。）
   * 断言两条：`Array.from(result).length === NOTE_DETAIL_LIMIT + 1`，且结果不匹配孤立代理正则 `/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/`。
   * **实测红/绿**：把 `Array.from` + `chars.slice` 换成 `last.slice(0, NOTE_DETAIL_LIMIT)`（UTF-16 码元切）→ 红，`actual` 是 `cp=72, utf16=141, lone=true, tail="𝄞\ud834…"`；恢复后绿。
 * **新发现 3（P4，文档/注释一致性，已修复）——第七轮已撤回的"任何原因"说法仍活在两处。** `src/ui/rebasePresentation.ts` 的 `BranchContextInput.upstreamNote` JSDoc 与 `docs/improvement/improvement.md` 的 P3-6 四.1 都还写着"上游被 prune、配置了但 ref 不解析"会填这个字段；实测这两个形态都报 `[gone]`、在 `getUpstream` 就被吸收，永远到不了这里。
@@ -262,6 +262,34 @@
   * **实测红/绿（两个守卫分别验证）**：只回退 `renderList` 守卫 → 红，`actual: undefined`（期望空列表文案）；只回退 `renderBanner` 守卫 → 红，`actual: ''`（横幅全空），jsdom 报 `Cannot read properties of undefined (reading 'find')`。
   * 说明：变基进行中时横幅按既有优先级显示"变基进行中"而不显示 `error`，本项不改这个优先级；错误仍通过上下文栏的 note 可见。
 * **验证**：两个类型检查零输出；完整套件 **324 项**全部通过、0 失败、0 跳过（本轮 +1：`test/webviewDom.test.ts` 12→13；`test/rebasePresentation.test.ts` 仍 4 条——新发现 1、2 的断言都加进既有那条用例，因为它们钉的是同一个函数的同一个行为）。三处计数已同步：`docs/summary/summary.md`、`RELEASE.md`、`docs/release-notes/0.8.3.md`。
+
+### P3-9. 0.8.3 第九轮复核后的 P4 清理（`code-review-0-8-21.md` 新发现 1–5）
+
+> 来源：`code-review-0-8-21.md` 第四节。B 是该版本的签核轮：维持批准并建议提交、打 tag，五条新发现全部 P4，没有一条改变用户可见行为。本轮把这五项全部关闭，并把两个已弃用的 GitHub Action 升到当前主版本。**没有产品行为改动**：唯一的代码改动是去掉一处不可达守卫（行为逐字节不变，实测见下）与两处注释/文档更正。
+
+* **\[x] 新发现 1（P4，注释/文档理据写反）——"纯 astral 串上变异体会存活"是反的。** `test/rebasePresentation.test.ts:97-102` 的注释与本节 P3-8 新发现 2 的第二段都这么写。实测（`code-review-0-8-21.md` §二.3）：纯 astral 串 `𝄞`×145 正解 141 码点、UTF-16 切片后 71 码点，**长度断言 141 ≠ 71 必然红**；在纯 astral 串上不触发的是**孤立代理断言**，因为对从 0 开始、偶数边界恰好落在对之间。两处都改成实测结论，并保留混合串作为更强夹具（它让两道断言都生效）。注释变化，无测试行为变化。
+* **\[x] 新发现 2（P4，断言窗口）——`NOTE_DETAIL_LIMIT` 的门按码点还是按 UTF-16 长度没有断言钉住。** 原用例的输入在两种度量下都 > 140（或恰好都等于 140），所以把门改成 `last.length > NOTE_DETAIL_LIMIT` 后整个文件仍绿（B 的 `m7`）。新增一条卡在**唯一能区分两种度量**的窗口上的断言：`"a".repeat(NOTE_DETAIL_LIMIT - 1) + "\u{1D11E}"` = 140 码点 / 141 码元，必须**原样返回、无省略号**；并显式断言这两个度量值，避免夹具长度将来被改掉而断言静默失效。断言并入既有那条 `rebasePresentation` 用例（同一个函数、同一个行为），**测试条数不变**。
+  * **实测红/绿（在 `%TEMP%` 副本里做，工作树未动）**：只把 `src/ui/rebasePresentation.ts` 的门改成 `return last.length > NOTE_DETAIL_LIMIT` → **红**，`actual` 是 `"a"×139 + "𝄞" + "…"`、`expected` 是 `"a"×139 + "𝄞"`，失败断言正是 `unchanged, with no ellipsis: the gate counts code points`；把仓库原文件覆盖回去 → 4/4 **绿**。
+* **\[x] 新发现 3（P4，注释事实错误）——`renderBanner` 的注释说"横幅最后绘制"。** `render()` 是 `renderBanner(); renderContext(); renderChanges(); renderList();`，横幅是**第一个**。结论本身仍然对（抛在写 `innerHTML` 之前，横幅确实全空），错的只是因果句，而且与 `test/webviewDom.test.ts:603-605` 的正确注释直接矛盾。已改为"`renderBanner` 是 `render()` 做的第一件事，所以抛异常发生在任何错误文案被绘制之前"。**没有改守卫**，只改注释；`test/webviewDom.test.ts` 13/13 绿。
+* **\[x] 新发现 4（P4，不可达守卫）——`filteredCommits` 的 `?? []` 当前不可达，注释也不成立。** 选择**删掉守卫与它的注释**（而不是把注释改成"防御性"）：`filteredCommits()` 唯一的调用点是 `renderList`，而 `renderList` 在 `commits` 为空时就提前返回，所以到这里时 `state.commits` 一定是非空数组；留一个永远不执行的守卫、再写一段解释它为什么不执行，比直接删掉更误导。注释改为说明"为什么这里**不**需要 `?? []`"以及调用点的前提。**行为不变**（实测见下），**没有为它写用例**——为不可达代码造测试比代码本身更糟。
+  * **实测（在 `%TEMP%` 副本里做）**：删掉守卫后的 `media/main.js` 跑 `test/webviewDom.test.ts` → **13/13 绿**；把 `?? []` 加回去（即基线行为）再跑同一套 → 仍 **13/13 绿**。两次完全相同，证明这是一次行为零变化的删除。这与 B 的 `m4` 变异（去掉守卫后 13/13 绿）互相印证：该路径本就不可达。
+* **\[x] 新发现 5（P4，仅记录）——末条标记行可能取到"原因之后"的标记行。** **不改行为**：B 试过损坏 commit-graph、损坏 loose object、未知 revision、缺 alternates、两个损坏对象，**没有一种真实形态**在 `fatal:` 之后再打印标记行；而改成"取第一条标记行"会让损坏对象形态取到前两行较泛的 `error:`（实测该形态是 `error:`×2 → `fatal: loose object … is corrupt`）。已在 `src/ui/rebasePresentation.ts` 的 `REASON_LINE` 上写明这个权衡、替代方案实测更差、以及形态清单（**直接内联在注释里**：commit-graph 损坏 exit 0 走不到这里、loose object 的 `fatal:` 在最后、unknown revision 的 `fatal:` 在最前、缺 alternates 是 `error:` 在前、两个损坏对象仍以 `fatal:` 收尾）——留给下一位维护者，不在今天为一个不可达形态加规则。**产品源码不引用 `docs/review/`**（见 P4-4）。
+* **\[x] 流程项——两个已弃用的 GitHub Action。** `release.yml` 的 `actions/checkout@v4` / `actions/setup-node@v4` 升到 **`@v7`**（`gh api repos/<action>/tags` 实测 `v7` 与 `v7.0.1` / `v7.1.0` 均存在，`action.yml` 的 `runs.using` 为 `node24`，即弃用告警指向的运行时）。`node-version: 20` **保持不动**：那是项目构建与测试所用的 Node，`scripts/run-tests.js` 按文件枚举正是因为 Node 20 的 `node --test` 不支持 glob；action 运行时与 `node-version` 相互独立，升 action 不得悄悄改 Node 版本。本工作流用到的输入（`node-version`、`cache: npm`）在 v4→v7 之间形状与默认值都没变；`package-manager-cache`（v5 新增、默认 `true`）只在 `package.json` 有 `packageManager`/`devEngines` 时才生效，本仓库两者都没有，所以自动缓存不会介入。
+* **验证**：两个类型检查零输出；`test/rebasePresentation.test.ts` + `test/webviewDom.test.ts` 合计 **17/17** 绿；完整套件 **324 项 / 47 个文件**全绿、0 失败、0 跳过（本轮**条数不变**，新增断言并入了既有用例）。三处计数未变，仍为 324。
+
+### P3-10. 0.8.3 第十轮复核（`code-review-0-8-22.md` 四、P4-1 至 P4-5）
+
+> 来源：`code-review-0-8-22.md` 第四节。B 复核了 P3-9 的六项改动，**批准提交**（`filteredCommits` 守卫删除经 7 条动态路径验证不崩、Action 主版本升级成立），另留 5 项 P4。P4-1/P4-2/P4-3/P4-4 已在本轮改完，P4-5 是**记录在案的 0.9.0 政策项，本轮不动**。
+
+* **\[x] P4-1（文档精度）——`always-auth` 的删除被归错了主版本。** P3-9 的"流程项"原文说"`v7` 只删掉了久已弃用的 `always-auth`"。实测各 tag 的 `action.yml`：`v6.0.0` **仍有** `always-auth`，到 **`v6.1.0`** 才消失（release note：`Remove always-auth configuration handling`，PR #1436）。v7 的真实变更是 ESM 迁移与依赖升级、新增 `cache-primary-key`/`cache-matched-key` 两个输出、去掉 dummy `NODE_AUTH_TOKEN` 导出。**本工作流从未使用 `always-auth`**，所以升级不涉及它；上一段已按此改写，免得下一位维护者去 v7 的 diff 里找一个 v7 里根本不存在的输入。
+* **\[x] P4-2（断言窗口，窄一格）——码点门钉住了"用哪种度量"，但仍放过"边界差一"。** B 把门改成 `chars.length > NOTE_DETAIL_LIMIT + 1` 后整个文件仍 **4/4 绿**，此时 141 码点的行（`'a'×140 + 𝄞`）**不会被截断**。新增第二条夹具：`overByOne = "a".repeat(NOTE_DETAIL_LIMIT) + "\u{1D11E}"`（141 码点 / 142 码元），并断言 `Array.from(overByOne).length === 141`、`.length === 142`，再要求输出**恰好**是 `"a"×140 + "…"`（精确相等，不是 `startsWith`）。断言仍并入既有用例，**测试条数不变**。
+  * **实测红/绿（`%TEMP%` 副本，工作树未动）**：只把门改成 `return chars.length > NOTE_DETAIL_LIMIT + 1` → **红**，失败断言 `one code point over is truncated to the limit plus the ellipsis`，`actual` 是 141 码点的原串、`expected` 是 `"a"×140 + "…"`；把仓库原文件覆盖回去 → 4/4 **绿**。
+  * **补充关闭（0-8-23 复核后）**：`0-8-23` 指出上一条夹具仍留一格——它在"码点"下是 141、在"UTF-16 码元"下是 142，所以 `last.length > NOTE_DETAIL_LIMIT + 1`（**同时**换成码元度量**并**放宽一格）仍 4/4 绿。补一条**全 BMP** 夹具 `"a".repeat(NOTE_DETAIL_LIMIT + 1)`（141 码点 = 141 码元，两种度量相等），断言输出恰好是 `"a"×140 + "…"`。实测该组合变异由 **4/4 绿** 变为 **fail 1**（`the gate is exactly one over the limit, not two`）；真实实现仍 4/4 绿。断言并入既有用例，测试条数仍为 324。
+* **\[x] P4-3（注释措辞）——`𝄞`×145 那句的主语不准。** 输入是 **145 码点 / 290 码元**；141 是**正确实现截断后的输出**码点数（140 + 省略号），71 是**变异体输出**码点数。原注释压缩成 "a pure astral string … measures 141 code points"，严格读会把 141 当成输入长度。已改为"a pure 145-code-point input（also 290 UTF-16 units）comes out at 141 code points with the correct implementation and at 71 with a UTF-16 slice"。核心结论（长度断言能杀、孤立代理断言不触发）不变，`improvement.md:252` 的表述本来就是准确的。
+* **\[x] P4-4（分层）——产品源码引用了评审档案。** `REASON_LINE` 的 JSDoc 原写"the shapes that were tried are enumerated in `docs/review/code-review-0-8-21.md`"。产品源码依赖 `docs/review/` 不妥：那是不可修改的历史审计快照，将来若重组/归档会留下悬空引用。已把五种实测形态**直接内联**进注释（commit-graph 损坏 exit 0、loose object 的 `fatal:` 在最后、unknown revision 的 `fatal:` 在最前且用法提示无标记、缺 alternates 是 `error:` 在前、两个损坏对象仍以 `fatal:` 收尾），**不再指向 `docs/review/` 或 `docs/improvement/`**，理由自足在代码里。行为不变，且这行 JSDoc 本就不进产物（B 已确认 `dist/extension.js` 里 `code-review-0-8-21` 命中 0）。
+* **\[ ] P4-5（0.9.0 政策项，本轮不改）——`node-version: 20` 已过上游 EOL。** Node 20 的支持期在 **2026-04-30** 结束；依赖侧已经开始报 `npm warn EBADENGINE … required: { node: '>=22.0.0' }`（如 `@azure/*`）。**本轮按任务明确要求保留 20**，它没有阻塞面：发布工作流实测解析到 `20.20.2`，`scripts/run-tests.js` 按文件枚举正是因为 Node 20 的 `node --test` 不支持 glob。
+  * **0.9.0 的候选路线**：升到 Node 22（支持到 2027-04-30）或 24（到 2028-04-30）。升到 22+ 后 `node --test 'test/*.test.ts'` 才可能（glob 自 Node 22 起支持），但**是否切回 glob 是另一个决定**——枚举还能保证 bash 与 cmd.exe 的语义一致，并让"顶层枚举会不会静默漏跑"这件事有个显式的检查点。切换前应先确认 `docs/research/test-performance.md` 的并发策略仍成立。**这一条不阻塞本次提交。**
+* **非缺陷观察（有意保留，不加断言）**：`NOTE_DETAIL_LIMIT` 的**值**不被任何断言钉住——改成 139 或 145 后仍然全绿，因为所有断言都相对该常量书写。140 是**排版选择**（上下文栏 29px 单行），不是正确性常量，所以不锁。若将来有人要改它，改完跑一遍 UI 截图比断言更有用。
 
 ## 验收原则
 所有后续历史改写功能应满足：

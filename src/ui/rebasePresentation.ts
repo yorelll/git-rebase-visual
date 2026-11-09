@@ -3,7 +3,24 @@ import { RangeConfig } from "../git/commitLog";
 /** Keeps the note well inside one ellipsised context line. */
 export const NOTE_DETAIL_LIMIT = 140;
 
-/** Git tags the line carrying the reason. Usage hints and warnings are untagged. */
+/**
+ * Git tags the line carrying the reason. Usage hints and warnings are untagged.
+ *
+ * Known limit of preferring the LAST tagged line: if a real failure were
+ * followed by another tagged line (say a hook or a cleanup step failing
+ * afterwards), that later line would win and the cause would be lost. The
+ * alternative — preferring the first tagged line — is worse: the corrupt-object
+ * shape prints two `error:` lines before the `fatal:` line that names the
+ * object, so "first" would pick the less specific line.
+ *
+ * No real Git shape that inverts the two has been found. The shapes tried, and
+ * why each one does not: a corrupt commit-graph exits 0 and never reaches this
+ * code; a corrupt loose object prints `fatal:` last; an unknown revision prints
+ * `fatal:` first with the trailing usage hint untagged; missing alternates print
+ * `error:` first and then `fatal:`; two corrupt objects still end on `fatal:`.
+ * Revisit only if a real shape appears — do not add a "last `fatal:`, else last
+ * `error:`" rule for a shape nobody has observed.
+ */
 const REASON_LINE = /^(fatal|error):/;
 
 /**
