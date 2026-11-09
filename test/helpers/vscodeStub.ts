@@ -18,6 +18,18 @@ export interface StubState {
   workspaceFolders: { uri: { fsPath: string } }[] | undefined;
   /** Value returned by showWarningMessage/showInformationMessage. */
   choice?: string;
+  /**
+   * Configuration overrides keyed by full name (`gitRebaseVisual.push.refspecTemplate`).
+   * `getConfiguration().get` returns the fallback for every key not listed, so a
+   * test that needs a non-default setting must register it here; without this
+   * the stub always reported the default and settings-dependent branches never
+   * executed.
+   */
+  config: Record<string, unknown>;
+  /** Value returned by `window.showQuickPick`; `undefined` models a dismissal. */
+  quickPick?: unknown;
+  /** Value returned by `window.showInputBox`; `undefined` models a dismissal. */
+  inputBox?: string;
 }
 
 export const stub: StubState = {
@@ -26,6 +38,9 @@ export const stub: StubState = {
   outputLines: [],
   workspaceFolders: undefined,
   choice: undefined,
+  config: {},
+  quickPick: undefined,
+  inputBox: undefined,
 };
 
 function memoryMemento() {
@@ -105,8 +120,8 @@ const vscodeStub = {
       stub.messages.push({ level: "error", text, items });
       return stub.choice;
     },
-    showQuickPick: async () => undefined,
-    showInputBox: async () => undefined,
+    showQuickPick: async () => stub.quickPick,
+    showInputBox: async () => stub.inputBox,
     showTextDocument: async () => ({}),
     withProgress: async (_opts: unknown, task: (value: unknown, token: unknown) => Promise<unknown>) =>
       task({ report() {} }, { isCancellationRequested: false, onCancellationRequested: () => disposable() }),
@@ -118,8 +133,11 @@ const vscodeStub = {
     get workspaceFolders() {
       return stub.workspaceFolders;
     },
-    getConfiguration: () => ({
-      get: <T>(_key: string, fallback?: T): T | undefined => fallback,
+    getConfiguration: (section?: string) => ({
+      get: <T>(key: string, fallback?: T): T | undefined => {
+        const full = section ? `${section}.${key}` : key;
+        return (full in stub.config ? (stub.config[full] as T) : fallback);
+      },
     }),
     onDidChangeConfiguration: () => disposable(),
     onDidChangeTextDocument: () => disposable(),
@@ -158,6 +176,9 @@ export function resetStub(): void {
   stub.outputLines.length = 0;
   stub.workspaceFolders = undefined;
   stub.choice = undefined;
+  stub.config = {};
+  stub.quickPick = undefined;
+  stub.inputBox = undefined;
 }
 
 /** Memento pair plus a fake extension context. */

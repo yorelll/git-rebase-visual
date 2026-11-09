@@ -1,6 +1,6 @@
 import * as path from "path";
 import * as vscode from "vscode";
-import { runGit } from "../git/gitRunner";
+import { runGit, withPositionals } from "../git/gitRunner";
 import { WorktreeChange } from "../git/worktreeChanges";
 import {
   CommitFileChange,
@@ -72,7 +72,11 @@ export class GitContentProvider implements vscode.TextDocumentContentProvider, v
     if (request.descriptor.version === "empty") return "";
     const object = gitObject(request.descriptor);
     if (!object) return "";
-    const result = await runGit(["show", "--no-ext-diff", object], {
+    // `object` is `<rev>:<path>` read back from a stored descriptor; the path
+    // half comes from `git status`/`diff-tree` output filesystem paths, so it is
+    // still untrusted text: a path beginning with `-` would otherwise be read as
+    // an option by `git show`, which keeps parsing after a positional.
+    const result = await runGit(withPositionals(["show", "--no-ext-diff"], [object]), {
       cwd: request.repository,
       maxBuffer: MAX_CONTENT_BYTES,
     });

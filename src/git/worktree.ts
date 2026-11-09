@@ -1,4 +1,4 @@
-import { C_LOCALE, git, LITERAL_PATHSPECS, runGit, splitNul } from "./gitRunner";
+import { C_LOCALE, git, LITERAL_PATHSPECS, runGit, splitNul, withPositionals } from "./gitRunner";
 
 export interface StashEntry {
   /** Human-readable stash name, e.g. `stash@{2}`. */
@@ -231,18 +231,25 @@ function unreadableStash(): StashRestoreResult {
  * as well (trimming would delete it).
  */
 async function diffNames(cwd: string, from: string, to: string): Promise<string[]> {
-  const res = await runGit(["diff", "--name-only", "-z", "--no-renames", from, to], { cwd });
+  const res = await runGit(
+    withPositionals(["diff", "--name-only", "-z", "--no-renames"], [from, to]),
+    { cwd }
+  );
   return splitNul(res.stdout);
 }
 
 /** True when `rev:path` resolves to a blob in that tree. */
 async function pathInTree(cwd: string, rev: string, path: string): Promise<boolean> {
-  return (await runGit(["cat-file", "-e", `${rev}:${path}`], { cwd })).code === 0;
+  return (
+    await runGit(withPositionals(["cat-file", "-e"], [`${rev}:${path}`]), { cwd })
+  ).code === 0;
 }
 
 /** True when the path exists in the current index. */
 async function pathInIndex(cwd: string, path: string): Promise<boolean> {
-  return (await runGit(["cat-file", "-e", `:${path}`], { cwd })).code === 0;
+  return (
+    await runGit(withPositionals(["cat-file", "-e"], [`:${path}`]), { cwd })
+  ).code === 0;
 }
 
 /** Restores the index half of a snapshot: exactly the staged delta `^1..^2`. */
@@ -276,21 +283,31 @@ async function restoreUntrackedHalf(cwd: string, sha: string): Promise<string | 
   // Each file is checked out from `^3` and then unstaged, so it is restored as
   // untracked like it originally was. A path already present and untouched is
   // left alone rather than overwritten.
-  if ((await runGit(["cat-file", "-e", `${sha}^3`], { cwd })).code !== 0) {
+  if (
+    (await runGit(withPositionals(["cat-file", "-e"], [`${sha}^3`]), { cwd })).code !== 0
+  ) {
     return undefined;
   }
   // `-z` + NUL-split for the same reason as `diffNames`: an untracked file with
   // a non-ASCII name is otherwise dropped silently while the function still
   // reports success.
   const untrackedPaths = splitNul(
-    (await runGit(["ls-tree", "-r", "-z", "--name-only", `${sha}^3`], { cwd })).stdout
+    (
+      await runGit(
+        withPositionals(["ls-tree", "-r", "-z", "--name-only"], [`${sha}^3`]),
+        { cwd }
+      )
+    ).stdout
   );
   for (const path of untrackedPaths) {
     if ((await pathInIndex(cwd, path)) || (await pathInTree(cwd, "HEAD", path))) {
       // Tracked again (or already staged): not an untracked file any more.
       continue;
     }
-    const res = await runGit(["checkout", `${sha}^3`, "--", path], { cwd, env: LITERAL_PATHSPECS });
+    const res = await runGit(
+      [...withPositionals(["checkout"], [`${sha}^3`]), "--", path],
+      { cwd, env: LITERAL_PATHSPECS }
+    );
     if (res.code !== 0) {
       return `恢复未跟踪文件 ${path} 失败：${(res.stderr || res.stdout).trim()}`;
     }
@@ -603,7 +620,10 @@ export async function stashRemoveBySha(
   // Re-read the slot at the last possible moment: a `git stash push` between the
   // lookup above and the drop below moves this entry and puts someone else's in
   // its place.
-  const occupant = await runGit(["rev-parse", "--verify", "--quiet", slot], { cwd });
+  const occupant = await runGit(
+    withPositionals(["rev-parse", "--verify", "--quiet"], [slot]),
+    { cwd }
+  );
   if (occupant.code !== 0 || occupant.stdout.trim() !== sha) {
     return {
       ok: false,
@@ -872,6 +892,13 @@ export async function undoWrongDrop(
     }
   }
 
+  // Deliberately NO `--end-of-options` here: unlike every other command in this
+  // file, `git stash store` implements its own argument parsing and rejects the
+  // marker outright (`"git stash store" requires one <commit> argument`, exit 1,
+  // measured on 2.53.0.windows.2). The marker cannot be added "for consistency"
+  // — it breaks the undo restore. What protects this call instead is `dropped`:
+  // a full 40-hex sha parsed out of `git stash list --format=%H`, never a ref
+  // name and never user text.
   const restored = await runGit(
     ["stash", "store", "-m", `git-rebase-visual restored ${dropped.slice(0, 7)}`, dropped],
     { cwd }

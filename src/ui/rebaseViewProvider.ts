@@ -4,6 +4,7 @@ import * as path from "path";
 import {
   Commit,
   getCommits,
+  rangeArgvKey,
   resolveRange,
   isRebaseInProgress,
   rebaseStoppedSha,
@@ -30,7 +31,7 @@ import {
   RebaseItem,
   RebaseBase,
 } from "../git/rebaseEngine";
-import { git, runGit } from "../git/gitRunner";
+import { git, runGit, withPositionals } from "../git/gitRunner";
 import {
   getUpstream,
   lockedInPush,
@@ -64,7 +65,8 @@ import {
   isLlmConfigured,
 } from "../config";
 import { currentCommitSelection, rebaseProgressState } from "./rebaseState";
-import { branchContext } from "./rebasePresentation";
+import { branchContext, upstreamNoteDetail } from "./rebasePresentation";
+import { describeDeletion, describePush, isDeletionRefspec, pushDestination, pushSource, PushKind } from "./pushNotification";
 import {
   deleteUntrackedWorktreeChange,
   discardAllWorktreeChanges,
@@ -406,12 +408,36 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     const upstream = branch ? await getUpstream(root, branch) : undefined;
     let aheadCount = 0;
     let behindCount = 0;
+    let upstreamNote: string | undefined;
     if (upstream) {
-      const counts = await runGit(["rev-list", "--left-right", "--count", `${upstream.ref}...HEAD`], { cwd: root });
+      // `upstream.ref` is Git's `%(upstream:short)`, so its remote half can begin
+      // with `-` (`git remote add -- -evil …`). Without the marker, `git
+      // rev-list --left-right --count -evil/master...HEAD` is read as options and
+      // exits 129; the counts then stayed 0/0 and the sidebar confidently showed
+      // "nothing to push, nothing behind".
+      const counts = await runGit(
+        withPositionals(["rev-list", "--left-right", "--count"], [`${upstream.ref}...HEAD`]),
+        { cwd: root }
+      );
       const [behind, ahead] = counts.stdout.trim().split(/\s+/).map(Number);
       if (counts.code === 0 && Number.isFinite(ahead) && Number.isFinite(behind)) {
         aheadCount = ahead;
         behindCount = behind;
+      } else {
+        // Silence here is the defect: 0/0 is indistinguishable from "in sync".
+        //
+        // Scope, stated precisely because it was once claimed too broadly: this
+        // covers "`getUpstream` resolved an upstream, but the count against it
+        // failed". It does NOT cover the other unhealthy shapes — a pruned,
+        // never-fetched, dangling, symref-broken or non-commit tracking ref all
+        // report `[gone]` from `%(upstream:track)`, so `getUpstream` returns
+        // `undefined` earlier and the caller's "未配置 upstream" label handles
+        // them. Measured: the only shape that actually reaches this branch is a
+        // corrupt object in HEAD's history. `getCommits` reads the same history
+        // and fails too, which is why the `catch` below spreads `presentation` —
+        // without that, the note is computed here and then discarded, i.e. the
+        // exact silent-0/0 outcome this branch exists to prevent.
+        upstreamNote = `无法计算与 ${upstream.ref} 的领先/落后（${upstreamNoteDetail(counts)}）`;
       }
     }
     const presentation = branchContext({
@@ -419,6 +445,7 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
       upstreamRef: upstream?.ref,
       aheadCount,
       behindCount,
+      upstreamNote,
       range: rangeConfig,
       rebasing: rebaseInProgress,
     });
@@ -431,7 +458,14 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     try {
       commits = await getCommits(root, range.revRange);
     } catch (e: any) {
-      return postCurrent({ type: "state", error: String(e.message ?? e), rebaseInProgress });
+      // `...presentation` is deliberate, not blanket: it is what makes
+      // `upstreamNote` reach the webview. The one measured shape that sets a
+      // note — a corrupt object in HEAD's history — also fails here, so a bare
+      // `{ type, error }` would compute the note and then drop it. Losing it
+      // leaves the user with `error` only (which names the Git failure but not
+      // "and therefore the divergence is unknown"). Everything else presentation
+      // carries (branch, upstream, counts) is still truthful in this state.
+      return postCurrent({ type: "state", error: String(e.message ?? e), rebaseInProgress, ...presentation });
     }
 
     const [stoppedAt, atEditStop, conflictPaths, todoFiles, userEmail] = rebaseInProgress
@@ -502,7 +536,7 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
       {
         repository: root,
         branch,
-        range: range.revRange,
+        range: rangeArgvKey(range.revRange),
         rebaseInProgress,
         hashesNewestFirst: commits.map((commit) => commit.hash),
         lockedHashes: this.lockedHashes,
@@ -1293,7 +1327,7 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     }
     const [inProgress, branch, head, dirty, ref, root] = await Promise.all([
       isRebaseInProgress(cwd), currentBranch(cwd), this.headTip(cwd), isDirty(cwd),
-      runGit(["show-ref", "--verify", "--quiet", record.beforeRef], { cwd }), repoRoot(cwd),
+      runGit(withPositionals(["show-ref", "--verify", "--quiet"], [record.beforeRef]), { cwd }), repoRoot(cwd),
     ]);
     if (!root || root !== record.repository) {
       toast("warn", "Undo 记录属于另一个仓库，不能在当前仓库撤销。 ");
@@ -1313,7 +1347,10 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     );
     if (confirm !== "撤销") return;
     // --keep rejects instead of silently losing a dirty merge/worktree state.
-    const reset = await runGit(["reset", "--keep", record.beforeRef], { cwd });
+    const reset = await runGit(
+      withPositionals(["reset", "--keep"], [record.beforeRef]),
+      { cwd }
+    );
     if (reset.code !== 0) throw new Error(reset.stderr || reset.stdout || "撤销失败；工作区未被丢弃。 ");
     await this.undo.mark(record, "undone");
     toast("info", `已撤销 ${record.operation}；未自动 force push。`);
@@ -1931,6 +1968,12 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async headTip(cwd: string): Promise<string | undefined> {
+    // No `--end-of-options` here, and the reason is specific to `rev-parse`:
+    // without `--verify` it prints the marker itself on stdout
+    // (`--end-of-options\n<sha>`, measured), so adding one would corrupt the
+    // hash this returns. That is why the marker is only ever used on
+    // `rev-parse --verify …` in this codebase. The argument is the literal
+    // `"HEAD"`, so there is nothing user-influenced to protect anyway.
     const result = await runGit(["rev-parse", "HEAD"], { cwd });
     return result.code === 0 ? result.stdout.trim() : undefined;
   }
@@ -1956,8 +1999,8 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     // skip an already-applied patch during rebase, leaving its equivalent patch
     // in the shared ancestry where it still correctly remains locked.
     const [before, after] = await Promise.all([
-      runGit(["rev-list", beforeTip], { cwd }),
-      runGit(["rev-list", "HEAD"], { cwd }),
+      runGit(withPositionals(["rev-list"], [beforeTip]), { cwd }),
+      runGit(withPositionals(["rev-list"], ["HEAD"]), { cwd }),
     ]);
     if (before.code !== 0 || after.code !== 0) {
       this.log("lock", `改写后无法枚举 commit，跳过锁定 patch 连续性检查：${before.stderr || before.stdout || after.stderr || after.stdout}`);
@@ -2087,7 +2130,8 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     const oldTip = await this.headTip(cwd);
     if (!oldTip) throw new Error("无法读取 rewrite 前的 HEAD，已取消操作。");
     const [branch, upstream] = await Promise.all([
-      currentBranch(cwd), runGit(["rev-parse", "--verify", "--quiet", "@{upstream}"], { cwd }),
+      currentBranch(cwd),
+      runGit(withPositionals(["rev-parse", "--verify", "--quiet"], ["@{upstream}"]), { cwd }),
     ]);
     const rewritesPushed = upstream.code === 0 && (await isAncestor(cwd, oldTip, "@{upstream}"));
     if (rewritesPushed) {
@@ -2207,7 +2251,10 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     // Rejection guard: never amend a commit that is already on the local
     // upstream. Doing so would silently rewrite already-shared history, and the
     // later --force-with-lease push would abort (remote moved on) or clobber.
-    const upstream = await runGit(["rev-parse", "--verify", "--quiet", "@{upstream}"], { cwd });
+    const upstream = await runGit(
+      withPositionals(["rev-parse", "--verify", "--quiet"], ["@{upstream}"]),
+      { cwd }
+    );
     const alreadyPushed =
       upstream.code === 0 && (await isAncestor(cwd, hash, "@{upstream}"));
     const pushedWarning = alreadyPushed
@@ -2499,6 +2546,24 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     if (!["commit", "staged", "working"].includes(mode) || (mode === "commit" && !hash)) {
       throw new Error("未知 Compose 目标，不能生成 message。 ");
     }
+    // `hash` arrives in a webview message and `generate` is deliberately NOT in
+    // `requiresCurrentCommitHash` (staged/working generation has no commit at
+    // all), so the value must not reach `git show` as-is: `git show
+    // --no-color --format= --output=<file>` writes that file — measured, exit 0,
+    // file created. Accepting a session only proves the *panel* is the one we
+    // opened, not that the hash in this message is the panel's target: a page can
+    // echo the real `sessionId` and pair it with any hash. The authority is the
+    // session the host created from a hash that `openCompose` validated, so the
+    // target is read from there and the message's copy is used only to agree.
+    let targetHash = hash;
+    if (mode === "commit") {
+      const target = this.compose.activeSession()?.hash;
+      if (!target || target !== hash) {
+        this.compose.post({ type: "genError", message: "生成目标与 Compose 会话不一致；未发送 AI 请求，请重新打开草稿。" });
+        return;
+      }
+      targetHash = target;
+    }
     if (await isRebaseInProgress(cwd)) {
       const active = this.compose.activeSession();
       const hasConflicts = (await conflictedFiles(cwd)).length > 0;
@@ -2526,8 +2591,10 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
             if (this.compose.acceptsActiveSession(sessionId, revision)) this.compose.post({ type: "genDelta", text: chunk });
           };
           const requestOptions = { signal: ctrl.signal, timeout };
-          if (mode === "commit" && hash) {
-            text = await generateMessage(cwd, hash, getLlmConfig(), opts, onDelta, requestOptions);
+          if (mode === "commit" && targetHash) {
+            // `targetHash`, never `hash`: see the session check above. This is
+            // the value that reaches `git show` as a positional.
+            text = await generateMessage(cwd, targetHash, getLlmConfig(), opts, onDelta, requestOptions);
           } else {
             const diff =
               mode === "staged"
@@ -2737,10 +2804,26 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
   private async openCommitDiff(cwd: string, hash: string): Promise<void> {
     let plan = this.commitDiffCache.get(`${cwd}:${hash}`);
     if (!plan) {
+      // `hash` is gated by `requiresCurrentCommitHash` + `isCurrentCommitHash`
+      // before this runs, but all three calls below still take it after the
+      // marker: each one parses options after a positional, and the argument is
+      // the only thing standing between the gate and a file write.
       const [parentsResult, namesResult, numstatResult] = await Promise.all([
-        runGit(["show", "-s", "--format=%P", hash], { cwd }),
-        runGit(["diff-tree", "--no-commit-id", "--name-status", "-z", "-M", "--root", "-r", hash], { cwd }),
-        runGit(["diff-tree", "--no-commit-id", "--numstat", "-z", "-M", "--root", "-r", hash], { cwd }),
+        runGit(withPositionals(["show", "-s", "--format=%P"], [hash]), { cwd }),
+        runGit(
+          withPositionals(
+            ["diff-tree", "--no-commit-id", "--name-status", "-z", "-M", "--root", "-r"],
+            [hash]
+          ),
+          { cwd }
+        ),
+        runGit(
+          withPositionals(
+            ["diff-tree", "--no-commit-id", "--numstat", "-z", "-M", "--root", "-r"],
+            [hash]
+          ),
+          { cwd }
+        ),
       ]);
       if (parentsResult.code !== 0 || namesResult.code !== 0 || numstatResult.code !== 0) {
         throw new Error(
@@ -2800,10 +2883,13 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     const commits = generatedDiffCommits(this.commits, hashes);
     if (!commits) throw new Error("Diff 选择已失效；请刷新后重试。 ");
     const snapshot = await buildGeneratedDiffSnapshot(commits, async (commit) => {
-      const result = await runGit(["show", "--binary", "--find-renames", "--format=fuller", "--no-ext-diff", commit.hash], {
-        cwd,
-        maxBuffer: 4_000_000,
-      });
+      // `commit` comes from `generatedDiffCommits(this.commits, hashes)`, so the
+      // hash is already one of the rendered ones; the marker states that rather
+      // than relying on the reader to trace it.
+      const result = await runGit(
+        withPositionals(["show", "--binary", "--find-renames", "--format=fuller", "--no-ext-diff"], [commit.hash]),
+        { cwd, maxBuffer: 4_000_000 }
+      );
       if (result.code !== 0) throw new Error(result.stderr || result.stdout || `无法生成 ${commit.shortHash} 的 Diff。`);
       return result.stdout;
     });
@@ -2825,6 +2911,14 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
   }
 
   /** Hover detail rendered by the sidebar's own floating tooltip. */
+  /**
+   * `hash` reaches `git show` as a positional, and `git show -s --pretty=%s HEAD
+   * --output=<file>` does write that file — so this is only safe because the
+   * caller (`requestDetail`) is in `requiresCurrentCommitHash`'s set and the
+   * gate above rejects anything that is not 40 hex characters matching a commit
+   * in the current snapshot. Keep that coupling: widening the gate would turn
+   * this into the same file-write injection that `getCommits` had.
+   */
   private async sendDetail(cwd: string, hash: string): Promise<void> {
     try {
       const d = await commitDetail(cwd, hash);
@@ -2949,6 +3043,14 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     this.armWatchdog(acquired.owner);
     try {
       await this.pushBranchInternal();
+    } catch (error: any) {
+      if (!(error instanceof PushAlreadyReported)) {
+        throw error;
+      }
+      // A failed push is reported by `pushBranchInternal`; swallow the control
+      // flow rather than letting fire-and-forget command registration turn it
+      // into an unhandled rejection. Git's state may have changed, so refresh.
+      await this.refresh();
     } finally {
       this.mutations.markSettled(acquired.owner);
       this.mutations.release(acquired.owner);
@@ -2982,13 +3084,27 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     }
 
     // Lock guard: reject if any locked commit is in <upstream>..HEAD.
-    const blocked = await lockedInPush(
-      cwd,
-      up.ref,
-      "HEAD",
-      this.locks.lockedHashes(this.root!),
-      this.locks.lockedPatchIds(this.root!)
-    );
+    //
+    // A range that cannot be computed is reported, not skipped. `pushRange`
+    // throws instead of returning `[]` precisely so this branch exists: an empty
+    // list means "no locked commit in range" to the check below, so a silently
+    // failed range query would let a locked commit through the guard.
+    let blocked: string[];
+    try {
+      blocked = await lockedInPush(
+        cwd,
+        up.ref,
+        "HEAD",
+        this.locks.lockedHashes(this.root!),
+        this.locks.lockedPatchIds(this.root!)
+      );
+    } catch (error: any) {
+      toast(
+        "error",
+        `无法计算推送范围（${up.ref}..HEAD）：${String(error.message ?? error)}。未执行推送。`
+      );
+      return;
+    }
     if (blocked.length > 0) {
       const short = blocked.map((h) => h.slice(0, 7)).join(", ");
       toast("error", 
@@ -2998,9 +3114,21 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     }
 
     // Decide the refspec: normal branch push, or a configured review push.
+    // `kind` is the decision itself, carried alongside the refspec: the
+    // notification must not guess it back from the string, because a custom
+    // refspec can be identical to a normal one.
     const template = getPushRefspecTemplate();
+    // One roster for the confirmation dialogs and the notification, so the two
+    // can never disagree about the destination. Only the notification used to
+    // receive it, which is how `推送到 ./other？` (a local tracking upstream) was
+    // shown next to `→ （无法确定目标分支）` for the same push.
+    const remotes = await this.remoteNames(cwd);
     let refspec = resolveRefspec(up, "HEAD", "");
-    let label = `推送到 ${up.ref}`;
+    // The confirmation names the destination this refspec writes, resolved the
+    // same way as the notification; `up.ref` would name a branch a review or
+    // custom push never touches. It is recomputed after the kind is chosen.
+    let label = `推送到 ${pushDestination(up.remote, refspec, remotes)}`;
+    let kind: PushKind = "normal";
     if (template.trim()) {
       const choice = await vscode.window.showQuickPick(
         [
@@ -3014,8 +3142,9 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
         return;
       }
       if ((choice as any).kind === "review") {
+        kind = "review";
         refspec = resolveRefspec(up, "HEAD", template);
-        label = `评审推送 (${refspec})`;
+        label = `评审推送到 ${pushDestination(up.remote, refspec, remotes)}`;
       } else if ((choice as any).kind === "custom") {
         const input = await vscode.window.showInputBox({
           prompt: "输入 refspec（可用 ${tip} / ${branch} 占位符，${tip} 解析为 HEAD）",
@@ -3024,8 +3153,9 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
         if (!input) {
           return;
         }
+        kind = "custom";
         refspec = resolveRefspec(up, "HEAD", input);
-        label = `自定义推送 (${refspec})`;
+        label = `自定义推送到 ${pushDestination(up.remote, refspec, remotes)}`;
       }
     }
 
@@ -3038,10 +3168,48 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
       return;
     }
 
-    await vscode.window.withProgress(
+    // The destination comes from the resolved refspec, not `up.ref`: a review
+    // push writes refs/for/* and a custom refspec can write anywhere, so the
+    // upstream branch would name a ref this push never touched. Configured
+    // remote names are passed so an unlisted one is never printed as a branch.
+    const target = pushDestination(up.remote, refspec, remotes);
+    // The commit being published, by message and not by hash: the user cannot
+    // recognize a hash, and the refspec is equally unreadable. Read the subject
+    // of the refspec's *source* side, not `HEAD`: a custom refspec may publish
+    // `HEAD~1`, and naming HEAD's subject would then describe a commit this push
+    // does not send. Ordinary and review refspecs source from HEAD, so this is
+    // unchanged for them.
+    //
+    // A deletion refspec (`:refs/heads/gone`) publishes no commit at all; falling
+    // back to HEAD there quoted a commit the push never sent, so it gets its own
+    // wording instead of a subject.
+    const deletion = isDeletionRefspec(refspec);
+    const sourceRev = pushSource(refspec);
+    // `sourceRev` is user data — the source side of a template or hand-typed
+    // refspec — and `git log` keeps parsing options after a positional, so a
+    // "revision" of `--output=.git/config` truncated that file to the subject
+    // line and left the repository unreadable (`error: key does not contain a
+    // section`). `--end-of-options` makes it a revision Git must resolve, and
+    // the failure is reported rather than swallowed: a silent empty subject
+    // printed `（无法读取 commit 标题）` for a push that then went ahead.
+    const subjectResult =
+      deletion || !sourceRev
+        ? undefined
+        : await runGit(withPositionals(["log", "-1", "--pretty=%s"], [sourceRev]), { cwd });
+    if (subjectResult && subjectResult.code !== 0) {
+      toast(
+        "error",
+        `refspec 的源端 ${sourceRev} 不是可解析的 commit：${subjectResult.stderr.trim() || `git log 退出码 ${subjectResult.code}`}。未执行推送。`
+      );
+      return;
+    }
+    const subject = subjectResult?.stdout.trim() ?? "";
+    const described = deletion ? describeDeletion(kind, target) : describePush(kind, subject, target);
+
+    const outcome = await vscode.window.withProgress(
       {
         location: vscode.ProgressLocation.SourceControl,
-        title: `推送中：${refspec} → ${up.remote}`,
+        title: `推送中：${described}`,
         cancellable: true,
       },
       async (_progress, token) => {
@@ -3049,20 +3217,43 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
         token.onCancellationRequested(() => controller.abort());
         this.log("push", `开始 ${up.remote} ${refspec}`);
         try {
-          await pushRefspec(cwd, up, refspec, controller.signal);
-          this.log("push", `完成 ${up.remote} ${refspec}`);
+          const result = await pushRefspec(cwd, up, refspec, controller.signal);
+          this.log("push", `完成 ${up.remote} ${refspec}${result.changed ? "" : "（无变化）"}`);
+          return result;
         } catch (error: any) {
           const message = String(error.message ?? error);
           this.log("push", `失败 ${message}`);
           if (controller.signal.aborted) {
+            // Cancellation is an explicit user action, not a push outcome; keep
+            // it on the same throwing path so no success toast can follow.
             throw new Error("推送已取消。");
           }
-          throw error;
+          // Report the same three facts on failure: which push, what it was
+          // publishing, and where it was going. The Git error follows them.
+          toast("error", `推送失败：${described}。${message}`);
+          // Throw rather than return: a `return` leaves the progress callback
+          // and lands on the success toast below, telling the user a failed
+          // push succeeded. The message is already shown, so swallow it here.
+          throw new PushAlreadyReported(message);
         }
       }
     );
-    toast("info", `已推送：${refspec} → ${up.remote}`);
+    // Git exits 0 for a push that changes nothing (an already-current branch, or
+    // a delete of a ref that was never there). Saying 已推送 would report a
+    // change the remote did not receive.
+    if (outcome && !outcome.changed) {
+      toast("info", `无需推送：${described}（远端已是该状态）`);
+      await this.refresh();
+      return;
+    }
+    toast("info", `已推送：${described}`);
     await this.refresh();
+  }
+
+  /** Configured remote names, for destination validation. */
+  private async remoteNames(cwd: string): Promise<string[]> {
+    const out = await git(["remote"], { cwd }).catch(() => "");
+    return out ? out.split("\n").map((name) => name.trim()).filter(Boolean) : [];
   }
 
   private html(webview: vscode.Webview): string {
@@ -3126,6 +3317,20 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
 <script nonce="${nonce}" src="${scriptUri}"></script>
 </body>
 </html>`;
+  }
+}
+
+/**
+ * Control flow for a push that failed and was already reported to the user.
+ * Distinct from a real error: the caller swallows it after one last `refresh()`
+ * instead of surfacing the raw Git message a second time. It exists so the
+ * failure path can leave the `withProgress` callback early without falling
+ * through to the success toast.
+ */
+class PushAlreadyReported extends Error {
+  constructor(readonly gitMessage: string) {
+    super(gitMessage);
+    this.name = "PushAlreadyReported";
   }
 }
 

@@ -1,6 +1,6 @@
 # Git Rebase Visual — 功能、架构与测试总结
 
-> 当前基线：v0.8.1——侧栏内 hover tooltip 与右键菜单、owner 可解释的写锁与看门狗恢复、确定性结算的 Git 进程回收、位于用户主目录下的带轮转/脱敏会话文件日志、与真实 Git 状态对账的待恢复改动处理，以及 keep-index 残留快照的误报冲突修复。
+> 当前基线：v0.8.3——单文件恢复的侧别协议（webview 的 `staged`/`unstaged` 分组键 → 宿主的 `working`/`staged`）、Push 提示的推送方式 / commit 标题 / 目标分支三要素、锁定的 run 摘要排版，以及 0.8.2 的追加恢复、只删自己创建的 stash 条目与“Abort 永不删除文件”。
 
 ## 1. 项目定位
 
@@ -28,10 +28,10 @@ Webview (media/main.js)
 | rebase session | 解析步骤 N/M、completed/active/pending、edit/conflict/paused/unknown；待重放 hash 明确会变化，不伪造外部 rebase 进度。 |
 | Compose Panel / AI | 编辑器区 subject/body Panel、50/72、72 列参考、原 message/trailer 折叠、AI draft/取消/替换/追加/恢复、失败保留输入。 |
 | stash | autoStash 以 stash commit SHA 持久化定位，避免 `stash@{0}` 漂移；append Abort 避免完整 snapshot 与 keep-index stash 重复恢复。 |
-| push | 普通分支 `--force-with-lease`；可选评审 refspec；可取消进度/Output；rebase edit 停靠时仍可推送，并明确 detached HEAD 的分支/upstream 语义。 |
+| push | 普通分支 `--force-with-lease`；可选评审 refspec；可取消进度/Output；rebase edit 停靠时仍可推送，并明确 detached HEAD 的分支/upstream 语义。进度标题、成功与失败提示统一经 `ui/pushNotification.ts` 生成 **推送方式 + commit 标题 + 目标分支**（如 `普通推送："…" → origin/master`），标题按码点截断到 60 字符；推送方式由 `pushBranchInternal` 与 refspec 一起决定并带出，不从 refspec 反推；**目标分支取自 refspec 的目的端**（`refs/heads/*` → `origin/<分支>`，其他 ref → `origin:<ref>`，无法判定则如实说明），因此评审与自定义推送不会报成 upstream 分支。失败路径抛出 `PushAlreadyReported` 由 `pushBranch` 处理，一次推送只报告一个结果。 |
 | 自动状态同步 | 文件事件与节流 index 轮询刷新 staged/unstaged 文件数；后台 status 使用 `GIT_OPTIONAL_LOCKS=0`，避免 optional `index.lock` 与终端写操作竞争。 |
 | 列表/上下文/可访问性 | 作者文字前缀和稳定语义色、pending 文本、branch/upstream/ahead-behind、`author:`/`msg:`/`hash:0x` 搜索、IME composition、多选、右击目标重定向、安全 locked-run 折叠、ARIA、roving menu、状态栏和 High Contrast fallback。 |
-| 文件级 SCM 恢复与 Diff | porcelain v2 `-z` 结构化 staged/working/untracked 状态；单文件 working/staged restore、确认删除未跟踪文件；公开 `vscode.diff` 的 index↔working、HEAD↔index 和 parent↔commit 对比；opaque request store 防止 URI 暴露仓库/ref/path。 |
+| 文件级 SCM 恢复与 Diff | porcelain v2 `-z` 结构化 staged/working/untracked 状态；单文件 working/staged restore、确认删除未跟踪文件（webview 的分组键 `staged`/`unstaged` 与宿主的侧别词表 `staged`/`working` 是两回事，只在 `requestRestore` 的消息边界翻译，宿主不接受 `unstaged` 别名）；公开 `vscode.diff` 的 index↔working、HEAD↔index 和 parent↔commit 对比；opaque request store 防止 URI 暴露仓库/ref/path。 |
 | 连续 generated Diff | 单项或连续多选 commit 的 oldest-first frozen Diff snapshot；webview 禁用非连续选择，host 重验完整 hash、revision 与连续性；扩展私有只读 provider 使用 opaque token、TTL/LRU/repository invalidation。 |
 | 写入与交互协议 | stage/restore/bulk stage-discard-unstage 作为 mutation 经 busy 串行化，paused edit-stop 由明确 allow-list 控制；pointer/native drag 使用 immutable canonical session，routine worktree refresh 不会使其 stale，而真正 timeline/lock/rebase 变化仍会拒绝旧手势；无副作用 UI 流量不触发暂停告警。 |
 | 详情与菜单 | 悬停 400ms 由 `requestDetail` 取 `commitDetail`，host 回发 `detail`，webview 在侧栏行旁渲染浮动 tooltip（复制 message / 打开变更，指针移入不消失）；右键与 `Shift+F10`/Menu 在侧栏内打开 `#menu`，多选 ≥2 时提供批量锁定、批量删除与连续区间生成 Diff。不创建编辑器区面板，编辑器/窗口事件只下发 `closeMenu`。 |
@@ -108,6 +108,7 @@ src/
 ├─ diagnostics/diagnostics.ts      进程级日志 sink（未安装时静默降级）
 ├─ ui/canonicalSnapshot.ts          drag canonical revision key
 ├─ ui/refreshFeedbackPolicy.ts     manual/poll refresh feedback 策略
+├─ ui/pushNotification.ts          Push 提示的三要素与标题截断（纯函数）
 ├─ ui/secretsAccess.ts             SecretStorage 访问器注入桩（安全降级）
 
 media/main.js                      sidebar DOM、拖拽/键盘重排、菜单、筛选/多选/locked 折叠
@@ -138,12 +139,15 @@ media/style.css                    主题语义、pending/status/高对比度 fa
 | 暂停状态 | `test/rebasePauseState.test.ts` | conflict / explicit edit / paused 状态派生 |
 | LLM HTTP mock | `test/llmClient.test.ts` | SSE delta、畸形事件、deadline、预取消、流读取途中取消/超时（取消由首个 delta 送达触发，不依赖定时器；服务端有上限地继续推送，取消失效即断言失败）、错误正文脱敏，以及 Fetch Standard 全量 bad-port policy、真实 listener close/retry 生命周期 |
 | Git 集成（推送/守卫） | `test/pushGuard.integration.test.ts` | bare-remote：force-with-lease 并发拒绝、lockedInPush 拦截/解锁 |
+| 推送通知 | `test/pushNotification.test.ts` | `describePush` 的三要素（推送方式 / commit 标题 / 目标分支）与 `普通推送："…" → origin/…` 形状、不含 40 位 hash、refspec 不进标题；三种方式的标签；`pushDestination` 从 refspec 目的端推导目标（普通/评审/自定义、`+` 前缀、空白、无冒号、空目的端、删除 refspec）；60 字符上限按**码点**截断（恰好等于上限不截、代理对不被切开、首尾空白被裁掉）；真实 provider + 真实 bare remote 的**成功**路径断言进度标题与成功提示都含三要素、不含任何 hash；**失败**路径（远端不存在）断言 `推送失败：…` 保留三要素并接上 Git 原始错误，且**同一断言反向确认没有成功提示**，成功路径反向确认没有失败提示；**评审推送**（配置模板 + quick pick）与**自定义 refspec**（input box）各用真实远端断言提示的目标与远端上真正移动的 ref 一致；上游被 `fetch --prune` 清掉且存在锁时断言给出一条可见的中文提示而不是静默失败（把 `%(upstream:track)` 的 `[gone]` 判定去掉后该用例变红——`for-each-ref` 仍报告 `origin/master`，于是推送范围查询落在已消失的 ref 上，报错正是 `git rev-list origin/master..HEAD failed (128)`；`rev-parse --verify` 那次调用已在前一轮被同一次 `for-each-ref` 取代，删它不会让该用例变红）；`branch.<b>.remote = "."` 不弹确认框、任何可见文本都不含 `./other`；自定义 refspec `HEAD~1:refs/heads/older` 的标题写的是 `HEAD~1` 的标题而非 `HEAD` 的（把 `pushSource` 换成常量 `HEAD` 后变红）；删除型 refspec 走 `删除远端 ref` 措辞、不引用任何 commit（把删除分支改回引用 HEAD 标题后变红）（并以 `showQuickPick`/`showInputBox` 的调用记录证明自定义分支确实被执行，而不是退回默认模板）；取消选择时不推送、不报告；**带斜杠的远端名**（手写 `.git/config` 的 `team/origin`，另设一个名为 `team` 的诱饵远端）断言提示为 `team/origin/master` 且诱饵远端上没有被创建任何 ref，把实现改回“按第一个 `/` 切分”该用例变红；远端名不在 `git remote` 名单内时降级为 `（无法确定目标分支）`；commit 标题取自 refspec 源端而非恒取 `HEAD`；空操作推送（`Everything up-to-date`、删除不存在的 ref）报 `无需推送` 而不是 `已推送` |
+| webview DOM | `test/webviewDom.test.ts` | 真实 `media/main.js` 在 JSDOM 中渲染：拖拽与原生 drop、作者色点、右键菜单/悬停、文件行与分组动作、restore 侧别词表、锁定 run 摘要（含 ` · replay` 后缀与对应的 `aria-label`）；**“仅生成 message（不提交）”入口的状态矩阵**——逐个状态断言 Changes 分组与横幅各自的入口数量、发出的 `mode` 与 `messageOnly`，覆盖空闲（全部已暂存 / 未暂存 / 混合）、普通暂停、冲突暂停、edit 停靠 |
+| 恢复协议 | `test/restoreFileProtocol.test.ts` | 把 webview **自己发出的**三条 `restoreFile` 消息送进真实宿主处理器：`⌫`（未跟踪）真的删掉文件、Changes 的 `↶` 真的丢弃工作区改动、Staged Changes 的 `↶` 真的撤销暂存且保留工作区内容；夹具先断言三种侧别都被覆盖，消息里的 `side` 断言为宿主的 `working`/`staged`——把 webview 改回发送分组键 `unstaged` 时该用例立即变红 |
 | Git 集成（append 守卫） | `test/appendGuard.integration.test.ts` | 已推 upstream 守卫、锁定 commit patch-id 跨重写稳定 |
 | 注入桩 | `test/secretsAccess.test.ts` | SecretStorage 访问器安全降级与委托 |
 | 恢复策略 | `test/pendingRecoveryPolicy.test.ts` | 同一 `(stash sha, 原因)` 只警告一次、已装填横幅在槽位漂移后**只更新文本、不重复弹窗**、横幅关闭后保持关闭（槽位漂移也不复活）、记录清空后重置、恢复单飞与失败后释放槽位、恢复在锁内运行且锁忙时整轮跳过、同步抛出不污染单飞键 |
 | 恢复集成（结算） | `test/pendingRecovery.settle.integration.test.ts`<br>`test/pendingRecovery.append.integration.test.ts`<br>`test/pendingRecovery.residual.integration.test.ts`<br>（共用夹具 `test/helpers/pendingRecoveryFixtures.ts`） | **不变量：只删除插件自己记录的 sha 对应的槽位，从不出现 `stash pop`/`stash clear`，也从不删除用户条目**。自动 stash 恢复成功与追加恢复成功后 `git stash list` 与用户原有条目**按 sha 集合完全一致**；并发 `stash push` 使槽位被换成用户条目时拒绝并保留两条；错误删除时 `git stash store` 把该条目原样放回；pop 风格冲突恢复保留插件条目并报告；任意恢复路径都不删用户自己的两个 stash。已应用快照静默清除并删除自己的条目、手动 `stash apply --index` 后静默清除并删除自己的条目、stash 已消失的空记录静默清除、fresh snapshot 只恢复一次且条目随后删除、冲突的工作区恢复保留插件条目与用户条目、amend 落地后按 `ls-tree` mode+object 结算并删除自己的条目、未完成追加保持 pending、reset 只清孤儿记录而保留有内容的 stash；失败探测（`^1`/`^2`/`^3` 对象或 `^3` 树缺失、`git diff` 非零、stash reflog 损坏）一律保留记录与 stash；`targetHash` 被改写但 HEAD 不含快照时保持 pending；仅改文件模式且已落地可结算、chmod 未落地则保留；revert 形状的 amend + 后续编辑保留（旧 raw-log 扫描看不见）、目录重命名保留、同字节巧合保留；stash 上方压入新条目时按 sha 解析到自身槽位且不动其它条目；索引匹配但未跟踪/未暂存内容仍只存在于 stash 时补回工作区；残留的已跟踪路径只在与快照内容一致或路径缺失时才写回，已提交的更新内容不会被覆盖；keep-index 残留快照在 `amend` 之后被 `rebase --continue` 还原成 `stash^2` 内容时视为本次事务自己的内容并真实写回（结论 `restored`，不再报误冲突），两份条目随后都被删除并各自报告；`recoveryCommands` 给出 `apply --index` / `apply` / 用户自己执行的 `drop` 三条命令，且**每条打印出来的命令都会在独立临时仓库里真正执行并断言退出码为 0**（槽位可解析时三条；无法解析时只给两条 apply，不提供 Git 无法执行的 `stash drop <sha>`） |
 | 恢复（provider 级） | `test/recoveryProvider.test.ts` | 真实 provider + 真实 Git：`dismissRecoveryNotice` 写入去重状态后跨 refresh（及推送的 state）不再出现横幅、并发 `stash push` 把记录压到 `stash@{1}` 后横幅改述新槽位且不重复弹窗、关闭后槽位漂移也不复活、`resetExtensionState` 保留不可验证/未恢复的 stash 并清除真正孤儿记录、`forceReleaseMutationLock` 重读 Git 状态、恢复在 mutation 持锁期间整轮跳过、settled 未释放的 owner 被 reap、看门狗对同一 owner 只告警一次且忽略外部 disarm、显式 **Pop** 只有确认后才执行（拒绝则 stash 完好，确认后条目被删且改动已恢复）；**结算即清理自己的条目**：`restored` 与 `resolved` 都删除插件自己的槽位（自动 stash 与追加两条路径各自验证），记录结算后重复轮询不会再次弹窗；内容无法完整验证或槽位已不属于自己时保留条目并如实报告 |
-当前测试套件在 v0.8.2 中为 **275 项**（`npm run test` 全绿、0 失败、0 跳过）；v0.7.1 的 UI/交互与安全裁决见 [`../ui-reivew/ui-review-0-7-1.md`](../ui-reivew/ui-review-0-7-1.md)，最终发布评审见 [`../review/code-review-0-7-4.md`](../review/code-review-0-7-4.md)。
+当前测试套件在 v0.8.3 中为 **324 项**（`npm run test` 全绿、0 失败、0 跳过）；v0.7.1 的 UI/交互与安全裁决见 [`../ui-reivew/ui-review-0-7-1.md`](../ui-reivew/ui-review-0-7-1.md)，最终发布评审见 [`../review/code-review-0-7-4.md`](../review/code-review-0-7-4.md)。
 
 命令：
 

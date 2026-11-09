@@ -1,7 +1,7 @@
 import * as os from "os";
 import * as fs from "fs";
 import * as path from "path";
-import { C_LOCALE, runGit, GitResult } from "./gitRunner";
+import { C_LOCALE, runGit, withPositionals, GitResult } from "./gitRunner";
 
 export type RebaseAction = "pick" | "reword" | "drop" | "edit" | "squash" | "fixup";
 
@@ -70,9 +70,14 @@ export async function resolveBase(
   cwd: string,
   oldestHash: string
 ): Promise<RebaseBase> {
-  const res = await runGit(["rev-parse", "--verify", "--quiet", `${oldestHash}^`], {
-    cwd,
-  });
+  // `oldestHash` comes from `this.commits`/the plan's items, i.e. a rendered
+  // 40-hex hash, but `rev-parse` keeps parsing options after a positional, so
+  // the marker is what makes that a property of the argument rather than of the
+  // current call sites.
+  const res = await runGit(
+    withPositionals(["rev-parse", "--verify", "--quiet"], [`${oldestHash}^`]),
+    { cwd }
+  );
   if (res.code !== 0 || !res.stdout.trim()) {
     return { root: true };
   }
@@ -111,14 +116,18 @@ export async function executeRebase(
   }
 
   const base = plan.onto ?? (await resolveBase(cwd, plan.items[0].hash));
-  const args = ["rebase", "-i"];
-  if (base.root) {
-    args.push("--root");
-  } else {
-    args.push(base.base);
-  }
-
-  const res: GitResult = await runGit(args, { cwd, env });
+  // `-i` and `--root` are options; the base revision is a positional. They
+  // cannot live in one array because the marker has to sit between them — the
+  // same split `RangeArgv` forces on `git log`. `base.base` is a 40-hex hash
+  // returned by `resolveBase`, but `plan.onto` is caller-supplied and a rebase
+  // aborts on an unparsable argument instead of rewriting to the wrong place,
+  // so the distinction is worth stating in the argv itself.
+  const res: GitResult = await runGit(
+    base.root
+      ? ["rebase", "-i", "--root"]
+      : withPositionals(["rebase", "-i"], [base.base]),
+    { cwd, env }
+  );
 
   cleanup(tmp);
 

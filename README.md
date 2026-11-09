@@ -52,7 +52,7 @@
 多选 ≥2 个 commit 后，菜单提供 **批量锁定 commit**、**批量删除 commit** 与连续区间的 **生成 Diff…**；其余单项操作会禁用并说明原因。
 
 ### 4. commit message 编辑弹窗（reword / AI）
-右键菜单的 **编辑 message…** 与 **AI 生成 message…**、顶部 **未提交的改动** 区的 **仅生成 message（不提交）**、以及 edit 停靠时的 **追加到 … (amend)…** / **新建 commit…** 都会打开同一个 compose 弹窗：
+右键菜单的 **编辑 message…** 与 **AI 生成 message…**、顶部 **未提交的改动** 区的 **仅生成 message（不提交）**（出现条件见下一节）、以及 edit 停靠时的 **追加到 … (amend)…** / **新建 commit…** 都会打开同一个 compose 弹窗：
 
 - **原始 message**：只读、可选中复制，方便与新内容对比。
 - **补充信息给 AI**（仅 AI 模式）：可填写额外上下文（如关联的链接、Issue 号），配合 **生成 / 重新生成** 按钮多次生成。
@@ -79,7 +79,7 @@
 - **安全错误提示**：LLM 认证失败、限流和服务端错误会显示分类提示，不会把服务端响应正文展示到界面中。
 - **可取消 Push**：Push 显示可取消进度；Push 或其他 provider 操作失败时，可在 VS Code 的 **Output → Git Rebase Visual** 查看诊断摘要。
 - **操作互斥提示与恢复**：同一时间只允许一个写操作。被拒绝时会说明**正在执行什么**、来自哪里、已耗时多久，例如 `正在执行 “变基重排” (reorder, webview, 12s)；请等待完成，或点击“强制解除”。`；若操作超过 90 秒仍未结束，会弹出带 **强制解除并刷新** 的警告。强制解除不会盲信内存状态，而是重新读取 Git 的 rebase 标记、冲突文件和 commit 列表后再刷新，因此在终端里已经结束或手动恢复的仓库是安全的。
-- **日志**：一次扩展会话一个日志文件，位于 `<用户主目录>/tmp/log/git-rebase-visual-<版本>/session-<时间>-<pid>.log`（Linux/macOS 即 `~/tmp/log/git-rebase-visual-0.8.2/`，Windows 为 `C:\Users\<用户>\tmp\log\git-rebase-visual-0.8.2\`）。可用命令 **Git Rebase: Open Logs**（`gitRebaseVisual.openLogs`）直接打开该目录。0.8.1 之前的日志写在系统临时目录（Linux/macOS 的 `/tmp/log/...`、Windows 的 `%TEMP%\log\...`），这些旧文件**没有迁移也没有删除**；每个扩展会话首次打开日志目录时，**Output → Git Rebase Visual** 会追加一行说明旧日志的位置。日志包含 Output 中的诊断、写锁获取/释放、webview 操作、每次 Git 调用的参数/退出码/耗时、rebase 状态变化与异常堆栈，并对 URL userinfo、Authorization、token/password 等凭据做脱敏；写入失败（只读目录、磁盘满）只会关闭文件日志，不影响插件功能。每个日志文件与 **Output → Git Rebase Visual** 的第一行都是会话头，写明扩展版本、扩展安装路径、VS Code 版本、扩展宿主 pid 与操作系统，可用来确认当前运行的是哪一个构建。
+- **日志**：一次扩展会话一个日志文件，位于 `<用户主目录>/tmp/log/git-rebase-visual-<版本>/session-<时间>-<pid>.log`（Linux/macOS 即 `~/tmp/log/git-rebase-visual-0.8.3/`，Windows 为 `C:\Users\<用户>\tmp\log\git-rebase-visual-0.8.3\`）。可用命令 **Git Rebase: Open Logs**（`gitRebaseVisual.openLogs`）直接打开该目录。0.8.1 之前的日志写在系统临时目录（Linux/macOS 的 `/tmp/log/...`、Windows 的 `%TEMP%\log\...`），这些旧文件**没有迁移也没有删除**；每个扩展会话首次打开日志目录时，**Output → Git Rebase Visual** 会追加一行说明旧日志的位置。日志包含 Output 中的诊断、写锁获取/释放、webview 操作、每次 Git 调用的参数/退出码/耗时、rebase 状态变化与异常堆栈，并对 URL userinfo、Authorization、token/password 等凭据做脱敏；写入失败（只读目录、磁盘满）只会关闭文件日志，不影响插件功能。每个日志文件与 **Output → Git Rebase Visual** 的第一行都是会话头，写明扩展版本、扩展安装路径、VS Code 版本、扩展宿主 pid 与操作系统，可用来确认当前运行的是哪一个构建。
 - **待恢复改动与 Reset Extension State**：若遗留的追加/自动 stash 记录在启动对账后仍无法自动恢复，侧栏会显示一条可关闭的“待恢复的改动”横幅（commit 列表照常显示，不会被记录挡住），并提供 **打开日志** / **关闭提示**；同一条警告（同一 stash sha + 原因）只弹一次，后续轮询只写文件日志；关闭横幅后不会在下一次轮询里重新弹出，只有出现**不同**的问题才会再次提示。恢复动作按记录单飞（single-flight），1.5 秒轮询、工作区事件与读取消息重叠时只会执行一次恢复。恢复会**获取同一把写锁**：写操作进行中时整轮跳过、下一次空闲轮询再试，绝不与 rebase 并发写同一个 index。对账本身不在渲染路径上——commit 列表先显示，对账在其后异步进行；持续无法解决时按指数退避重试（最长 30 秒），不会每 1.5 秒重复探测。命令 **Git Rebase: Reset Extension State**（`gitRebaseVisual.resetState`）会先做同样的 Git 对账——内容已确认回来的插件条目会像正常轮询一样被结算删除——之后再清理已成为孤儿的状态记录；**你自己压入的 stash 在任何情况下都不会被它删除**。它会报告清理了什么、保留了什么、日志目录位置。手动 `git stash apply --index` 恢复后，下一次刷新会自动识别、静默清除记录，并删掉插件自己那条临时条目。横幅与 reset 报告都会列出可直接执行的下一步，例如 `git stash apply --index <name>`（恢复暂存区与工作区）、`git stash apply <name>`（只恢复工作区）、以及在你确认不再需要后才执行的 `git stash drop <name>`；这里列出的条目都是**内容尚未被确认恢复**的插件自己的条目，此时自动路径不会删它们，只有你自己动手。`stash@{n}` 只是**位置**而不是名字：每一轮恢复检查都会重新解析它（不是缓存在首次出现的值上），并始终同时给出稳定的 sha；当槽位无法解析时（例如 stash reflog 损坏），命令回退到 sha（`git stash apply --index <sha>`，Git 接受），并且**不再提供 drop**——Git 没有按 sha 的 `stash drop`，这样的命令只会失败。
 - **自动刷新暂存状态**：通过 VS Code 源代码管理或终端 `git add` 暂存文件后，面板会自动更新菜单状态；无需手动点击 Refresh。后台只读状态查询使用 `GIT_OPTIONAL_LOCKS=0`，避免与终端 `git switch` / `git stash` 的 optional `index.lock` 刷新竞争。
 - **危险操作确认**：删除 commit 前会显示目标 commit 与历史重写确认；edit 停靠横幅会明确显示当前目标及 Continue / Abort 下一步。
@@ -110,8 +110,10 @@
 ### 9. 为未提交的改动生成 message 并提交
 当工作区有未提交改动时，面板顶部出现 **未提交的改动** 区；展开 **更多提交选项** 后提供：
 - **AI 生成 message 并提交暂存区**（Staged Changes 分组右侧的 `✦`，需先配置 LLM）：基于暂存内容生成 message，确认后提交暂存区（`git commit -s`，仅提交暂存内容）。
-- **仅生成 message（不提交）**（需先配置 LLM）：基于暂存内容（无暂存时基于工作区）生成草稿，只复制到弹窗，不执行任何 Git 写操作。
-- 文件行的 `+`、`↶`、`⌫` 分别用于暂存单个文件、恢复单个文件的工作区改动或撤销其暂存、删除未跟踪文件；分组标题提供 **暂存全部更改 / 恢复全部更改** 与 **撤销全部暂存**。
+- **仅生成 message（不提交）**（需先配置 LLM）：基于暂存内容（无暂存时基于工作区）生成草稿，只复制到弹窗，不执行任何 Git 写操作。这是**唯一**不写 Git 的 compose 入口：其他入口（Staged Changes 的 `✦`、Amend、**新建 commit**、提交右键菜单）最终都会提交，弹窗里的 **复制 message** 也只在 `messageOnly` 模式下才显示。
+  - **出现的位置**：edit 停靠时**横幅的编辑操作区与「更多提交选项」各出现一次**（两处发出的是同一条消息）；冲突暂停与普通暂停时只在「更多提交选项」出现一次；**未暂存任何内容时**也会出现（此时它是唯一能以 `working` 模式针对工作区起草的入口）。
+  - **唯一省略的情况**：空闲、且改动全部已暂存（无未暂存内容）——这一状态下用户认为它与 Staged Changes 的 `✦` 重复。需要说明的是，即便在这里它也仍是唯一不写 Git 的路径，省略它是遵循用户的要求，而不是因为它已被完全覆盖。
+- 文件行的 `+`、`↶`、`⌫` 分别用于暂存单个文件、恢复单个文件的工作区改动或撤销其暂存、删除未跟踪文件；分组标题提供 **暂存全部更改 / 恢复全部更改** 与 **撤销全部暂存**。`⌫`（未跟踪文件）与 Changes 分组的 `↶` 走同一条恢复通道，宿主按 `working` / `staged` 两种侧别校验：未跟踪文件是工作区侧的删除，Staged Changes 的 `↶` 是暂存侧的撤销。
 
 ### 10. 变基进行中（暂停状态）
 当选择「变基到此 commit」或发生冲突时，rebase 会**暂停**：
@@ -126,6 +128,8 @@
 - **Push**：**普通推送**（推送当前 HEAD）。
   - 推送前做锁定检查（范围 `<upstream>..HEAD`）：若含被锁定 commit 则拒绝。
   - 若配置了 `push.refspecTemplate`，弹出选择：**普通推送 / 评审推送 / 自定义 refspec…**。
+  - 进度标题（`推送中：…`）、成功提示（`已推送：…`）和失败提示（`推送失败：…`）都写明同一组三件事：**推送方式**、**这次推送的 commit 标题**（不是 hash）和**目标分支**，例如 `普通推送："feat(cmos_sensor): add ir ispll" → origin/fpga/rle1283_rts3923`。refspec 不进标题行，失败时 Git 的原始错误接在这三件事之后。标题超过 60 个字符时截断并以 **…** 结尾（按字符截断，不会切开 emoji 等代理对）；推送方式是选择时的那一项，不会从 refspec 反推——自定义的 refspec 可能与普通推送长得一模一样。
+  - **目标分支取自实际使用的 refspec 的目的端**，不是 upstream 分支：评审推送写的是 `refs/for/<branch>`，自定义 refspec 可能写任何 ref，用 upstream 分支会报出一个这次推送根本没碰的分支。`refs/heads/<branch>` 显示为 `origin/<branch>`；其他 ref（如 `refs/for/*`）显示为 `origin:refs/for/<branch>`，不会被误认为某个分支。无法可靠判定时如实写 **（无法确定目标分支）**，而不是给出一个看起来合理的错误分支。
   - **变基过程中也可推送**：例如用「变基到此 commit」停靠后，在该 commit 上改代码并 commit，可直接点 **Push** 推送这个 commit（此时 HEAD 处于 detached，插件会用正在变基的分支解析其 upstream）。锁定检查依然生效——**不允许推送越过被锁定的 commit**。
   - 推送与变基解耦，避免 Gerrit 因「无改动」拒绝合并式推送。
 - **Stash**（archive 图标）：把当前未提交改动 `git stash push --include-untracked`（含未跟踪文件）。

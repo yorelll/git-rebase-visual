@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import * as fs from "fs";
 import * as path from "path";
-import { clearPatchIdCache, commitDetail, conflictedFiles, currentBranch, getCommits, isDirty, isRebaseInProgress, patchId, rebaseAtEditStop, rebaseStoppedSha, rebasingBranch, resolveRange, summarizeNumstat, workingStatus } from "../src/git/commitLog";
+import { clearPatchIdCache, commitDetail, conflictedFiles, currentBranch, getCommits, isDirty, isRebaseInProgress, patchId, RangeArgv, rebaseAtEditStop, rebaseStoppedSha, rebasingBranch, resolveRange, summarizeNumstat, workingStatus } from "../src/git/commitLog";
 import { resolveBase } from "../src/git/rebaseEngine";
 import { createRepo, commitFile, git, removeRepo } from "./helpers/gitTestRepo";
 
@@ -89,14 +89,81 @@ test("commit queries preserve newest-first order and calculate a rebase base", a
   const first = commitFile(cwd, "one.txt", "one\n", "first");
   const second = commitFile(cwd, "two.txt", "two\n", "second");
 
-  const commits = await getCommits(cwd, "HEAD");
+  const commits = await getCommits(cwd, { options: [], positionals: ["HEAD"] });
   assert.deepEqual(commits.map((commit) => commit.hash), [second, first]);
   assert.deepEqual(await resolveBase(cwd, second), { root: false, base: first });
   assert.equal(await currentBranch(cwd), "master");
   assert.deepEqual(await resolveRange(cwd, { kind: "recentN", count: 0 }), {
-    revRange: "-n 1 HEAD",
+    revRange: { options: ["-n", "1"], positionals: ["HEAD"] },
     hasBase: false,
   });
+});
+
+// `recentN` used to reach `git log` as the single string `-n 20 HEAD`, which
+// `getCommits` split and passed as positionals. That put `-n` *after*
+// `--end-of-options`, and Git rejected the whole command:
+//   fatal: option '-n' must come before non-option arguments
+// The commit list went blank for anyone on the documented `recentN` setting
+// while the string-shape assertion above stayed green. This test executes the
+// resolved range instead of inspecting it.
+test("every committed range executes and returns the commits it promises", async (t) => {
+  const cwd = createRepo();
+  t.after(() => removeRepo(cwd));
+  const hashes: string[] = [];
+  for (let i = 1; i <= 5; i += 1) {
+    hashes.push(commitFile(cwd, `f${i}.txt`, `${i}\n`, `c${i}`));
+  }
+  // A base *behind* the tip, so `base..HEAD` is the five commits above it.
+  git(cwd, ["branch", "base", hashes[0]]);
+
+  /** Resolve and narrow away the `{ error }` arm, which these configs preclude. */
+  async function argvFor(cfg: Parameters<typeof resolveRange>[1]) {
+    const resolved = await resolveRange(cwd, cfg);
+    assert.ok(!("error" in resolved), `range resolves: ${JSON.stringify(resolved)}`);
+    return (resolved as { revRange: RangeArgv }).revRange;
+  }
+
+  // Execute before inspecting: the regression was invisible to a shape-only
+  // assertion, so the execution result is the assertion that must speak first.
+  const recentTwo = await argvFor({ kind: "recentN", count: 2 });
+  assert.deepEqual(
+    (await getCommits(cwd, recentTwo)).map((c) => c.hash),
+    [hashes[4], hashes[3]],
+    "recentN returns exactly N newest commits"
+  );
+  assert.deepEqual(recentTwo, { options: ["-n", "2"], positionals: ["HEAD"] });
+
+  // `count` is a settings number; a zero/negative value must clamp to at least 1
+  // rather than producing `-n 0` (which means "no limit" to Git).
+  const recentClamped = await argvFor({ kind: "recentN", count: 0 });
+  assert.deepEqual(recentClamped.options, ["-n", "1"]);
+  assert.equal((await getCommits(cwd, recentClamped)).length, 1);
+
+  const all = await argvFor({ kind: "all" });
+  assert.deepEqual(all, { options: [], positionals: ["HEAD"] });
+  assert.equal((await getCommits(cwd, all)).length, 5);
+
+  // Both base kinds still execute. `upstream` needs a tracking ref.
+  git(cwd, ["config", "remote.origin.url", cwd]);
+  git(cwd, ["config", `remote.origin.fetch`, "+refs/heads/*:refs/remotes/origin/*"]);
+  git(cwd, ["update-ref", "refs/remotes/origin/master", hashes[4]]);
+  git(cwd, ["config", "branch.master.remote", "origin"]);
+  git(cwd, ["config", "branch.master.merge", "refs/heads/master"]);
+  const upstream = await argvFor({ kind: "upstream" });
+  assert.deepEqual(upstream, { options: [], positionals: ["HEAD@{upstream}..HEAD"] });
+  assert.deepEqual(
+    (await getCommits(cwd, upstream)).map((c) => c.hash),
+    [],
+    "upstream range whose tip is the upstream is empty, and it executes"
+  );
+
+  const base = await argvFor({ kind: "mainBranch", mainBranch: "base" });
+  assert.deepEqual(base, { options: [], positionals: ["base..HEAD"] });
+  assert.equal(
+    (await getCommits(cwd, base)).length,
+    4,
+    "base is the first commit, so the four above it are in range"
+  );
 });
 
 test("conflictedFiles returns no paths in a clean repository", async (t) => {

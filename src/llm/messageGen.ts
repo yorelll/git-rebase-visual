@@ -1,5 +1,5 @@
 import * as fs from "fs";
-import { git } from "../git/gitRunner";
+import { git, withPositionals } from "../git/gitRunner";
 import { ChatMessage, LlmConfig, LlmRequestOptions, streamChat } from "./client";
 
 const BASE_PROMPT = `You are an expert software engineer writing a git commit message.
@@ -9,9 +9,18 @@ Rules:
 - Optionally, a blank line then a body explaining what and why.
 - Output ONLY the commit message text. No code fences, no commentary.`;
 
-/** Returns the diff introduced by a single commit (parent..commit). */
+/**
+ * Returns the diff introduced by a single commit (parent..commit).
+ *
+ * `hash` reaches `git show` as a positional, and this command keeps parsing
+ * options after one: `git show --no-color --format= --output=<file>` exits 0 and
+ * writes that file (measured). The caller (`RebaseViewProvider.generate`) now
+ * derives the hash from the session the host created, but the marker is what
+ * makes the *argument* safe regardless of how the caller got it — the same
+ * defence the push subject lookup got.
+ */
 export async function getCommitDiff(cwd: string, hash: string): Promise<string> {
-  return git(["show", "--no-color", "--format=", hash], { cwd });
+  return git(withPositionals(["show", "--no-color", "--format="], [hash]), { cwd });
 }
 
 /** Diff of staged changes (the index). */

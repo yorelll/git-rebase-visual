@@ -1,6 +1,6 @@
 import * as fs from "fs";
 import * as pathModule from "path";
-import { LITERAL_PATHSPECS, runGit, splitNul } from "./gitRunner";
+import { LITERAL_PATHSPECS, runGit, splitNul, withPositionals } from "./gitRunner";
 import { isRebaseInProgress } from "./commitLog";
 import { readStashList, stashRemoveBySha, type StashRemoveResult } from "./worktree";
 
@@ -277,7 +277,10 @@ interface PathsProbe {
  * non-ASCII path arrives quoted and octal-escaped, and matches nothing.
  */
 async function changedPaths(cwd: string, from: string, to: string): Promise<PathsProbe> {
-  const res = await runGit(["diff", "--name-only", "-z", "--no-renames", from, to], { cwd });
+  const res = await runGit(
+    withPositionals(["diff", "--name-only", "-z", "--no-renames"], [from, to]),
+    { cwd }
+  );
   if (res.code !== 0) {
     return { paths: [], ok: false, error: nonEmpty(res.stderr) ?? `git diff exit ${res.code}` };
   }
@@ -299,7 +302,10 @@ type UntrackedProbe =
  * when the `^3` tree has been deleted (the commit still lists three parents).
  */
 async function parentCount(cwd: string, sha: string): Promise<number | undefined> {
-  const res = await runGit(["rev-list", "--parents", "-n", "1", sha], { cwd });
+  const res = await runGit(
+    withPositionals(["rev-list", "--parents", "-n", "1"], [sha]),
+    { cwd }
+  );
   if (res.code !== 0) {
     return undefined;
   }
@@ -322,7 +328,10 @@ async function treeBlobs(cwd: string, sha: string): Promise<UntrackedProbe> {
   if (parents < 3) {
     return { kind: "absent" };
   }
-  const res = await runGit(["ls-tree", "-r", "-z", `${sha}^3`], { cwd });
+  const res = await runGit(
+    withPositionals(["ls-tree", "-r", "-z"], [`${sha}^3`]),
+    { cwd }
+  );
   if (res.code !== 0) {
     return {
       kind: "error",
@@ -354,7 +363,10 @@ async function worktreeBlob(cwd: string, filePath: string): Promise<string | und
 
 /** Blob id at `path` inside `rev`, or undefined when the path is not there. */
 async function revBlob(cwd: string, rev: string, filePath: string): Promise<string | undefined> {
-  const res = await runGit(["rev-parse", "--verify", "--quiet", `${rev}:${filePath}`], { cwd });
+  const res = await runGit(
+    withPositionals(["rev-parse", "--verify", "--quiet"], [`${rev}:${filePath}`]),
+    { cwd }
+  );
   return res.code === 0 ? nonEmpty(res.stdout) : undefined;
 }
 
@@ -561,7 +573,7 @@ export async function stashPresence(cwd: string, sha: string): Promise<StashPres
     parts.index = "present";
   } else {
     const diff = await runGit(
-      ["diff", "--cached", "--quiet", `${sha}^2`, "--", ...staged.paths],
+      [...withPositionals(["diff", "--cached", "--quiet"], [`${sha}^2`]), "--", ...staged.paths],
       { cwd, env: LITERAL_PATHSPECS }
     );
     if (diff.code === 0) parts.index = "present";
@@ -585,7 +597,7 @@ export async function stashPresence(cwd: string, sha: string): Promise<StashPres
     parts.unstaged = "present";
   } else {
     const diff = await runGit(
-      ["diff", "--quiet", sha, "--", ...worktreeChanges.paths],
+      [...withPositionals(["diff", "--quiet"], [sha]), "--", ...worktreeChanges.paths],
       { cwd, env: LITERAL_PATHSPECS }
     );
     if (diff.code === 0) parts.worktree = "present";
@@ -604,7 +616,7 @@ export async function stashPresence(cwd: string, sha: string): Promise<StashPres
       parts.unstaged = "present";
     } else {
       const unstagedDiff = await runGit(
-        ["diff", "--quiet", sha, "--", ...unstagedChanges.paths],
+        [...withPositionals(["diff", "--quiet"], [sha]), "--", ...unstagedChanges.paths],
         { cwd, env: LITERAL_PATHSPECS }
       );
       if (unstagedDiff.code === 0) parts.unstaged = "present";
@@ -770,7 +782,10 @@ async function treeEntry(
   rev: string,
   filePath: string
 ): Promise<TreeEntry | undefined | "error"> {
-  const res = await runGit(["ls-tree", "-z", rev, "--", filePath], { cwd, env: LITERAL_PATHSPECS });
+  const res = await runGit(
+    [...withPositionals(["ls-tree", "-z"], [rev]), "--", filePath],
+    { cwd, env: LITERAL_PATHSPECS }
+  );
   if (res.code !== 0) {
     return "error";
   }
@@ -879,7 +894,10 @@ async function applyIndex(
   cwd: string,
   sha: string
 ): Promise<{ ok: boolean; message: string; presence: StashPresence }> {
-  const res = await runGit(["stash", "apply", "--index", sha], { cwd });
+  const res = await runGit(
+    withPositionals(["stash", "apply", "--index"], [sha]),
+    { cwd }
+  );
   const presence = await stashPresence(cwd, sha);
   return {
     ok: res.code === 0 && presence.complete,
@@ -979,7 +997,12 @@ export async function reconcilePendingAppend(
   record: PendingAppendRecord
 ): Promise<PendingReconcile> {
   const targetStillAncestor = record.targetHash
-    ? (await runGit(["merge-base", "--is-ancestor", record.targetHash, "HEAD"], { cwd })).code === 0
+    ? (
+        await runGit(
+          withPositionals(["merge-base", "--is-ancestor"], [record.targetHash, "HEAD"]),
+          { cwd }
+        )
+      ).code === 0
     : false;
   const change = await stashPresence(cwd, record.changeStash);
   const detail = `change:${presenceDetail(change)}`;
@@ -1251,7 +1274,7 @@ async function reconcileWorktreeStash(
     };
   }
   // `apply` (not `pop`): a conflicting pop removes the entry it failed to apply.
-  const applied = await runGit(["stash", "apply", sha], { cwd });
+  const applied = await runGit(withPositionals(["stash", "apply"], [sha]), { cwd });
   const after = await stashPresence(cwd, sha);
   if (!after.contentPresent || after.probeError) {
     return {

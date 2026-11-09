@@ -73,7 +73,8 @@ export const LITERAL_PATHSPECS: NodeJS.ProcessEnv = { GIT_LITERAL_PATHSPECS: "1"
  * | `ui/commitDiffState.ts` | `diff-tree --name-status -z` / `--numstat -z` | structural — status letters and counts |
  * | `ui/commitSearch.ts`, `ui/*State.ts` | stored hashes/fields | structural — just validation of our own data |
  * | `git/message.ts` | commit message trailers | structural — the user's own text, not Git's |
- * | `git/pushGuard.ts` | refspecs | structural — refs, not messages |
+ * | `git/pushGuard.ts` `pushRefspec` | `Everything up-to-date` / `deleting a non-existent ref` | **prose** — decides whether anything changed; `LC_ALL=C` passed |
+ * | `git/pushGuard.ts` `getUpstream` | `for-each-ref` fields incl. `%(upstream:track)` | **prose** — `[gone]` decides "no usable upstream"; `LC_ALL=C` passed |
  * | all `--format=` / `-z` / exit-code-only calls | — | structural by construction |
  *
  * The `--name-only`-family audit lives on `pendingRecovery.changedPaths`; the
@@ -83,6 +84,60 @@ export const LITERAL_PATHSPECS: NodeJS.ProcessEnv = { GIT_LITERAL_PATHSPECS: "1"
  * the paths at all.
  */
 export const C_LOCALE: NodeJS.ProcessEnv = { LC_ALL: "C" };
+
+/**
+ * The marker that ends option parsing: every argument after it is positional,
+ * even if it starts with `-`.
+ *
+ * Some Git subcommands keep parsing options *after* a positional argument.
+ * `git log -1 --pretty=%s HEAD --output=file` writes the log to `file`; `git
+ * push --force-with-lease=x origin --receive-pack=<prog>` **runs `<prog>`**, and
+ * `--mirror` rewrites the whole remote. Those strings are user data here (a
+ * workspace setting such as `push.refspecTemplate`, the custom-refspec input, a
+ * main-branch name), so a repository that ships a `.vscode/settings.json` could
+ * otherwise pick a command to execute or a file to overwrite.
+ *
+ * `--end-of-options` is the only general defence: Git itself rejects the marker
+ * (or treats the following argument as a revision that does not exist) instead
+ * of honouring it as an option. Use `withPositionals` so every such site reads
+ * the same way.
+ */
+export const END_OF_OPTIONS = "--end-of-options";
+
+/**
+ * `[...options, "--end-of-options", ...positionals]`.
+ *
+ * `options` must already be complete: nothing after the marker is parsed as an
+ * option, so a flag that still belongs to the command has to be listed before
+ * it. Positionals are the arguments a user or a settings file can influence.
+ *
+ * This is not a blanket rule — two shapes were measured and must NOT get the
+ * marker (both are documented at their call sites):
+ *
+ *  - `git stash store`: it implements its own argument parsing and rejects the
+ *    marker outright (`"git stash store" requires one <commit> argument`,
+ *    exit 1). What protects it instead is that `<commit>` is a 40-hex sha parsed
+ *    out of `git stash list --format=%H`, so it cannot be option-shaped.
+ *  - **bare** `git rev-parse` (no `--verify`): it does not *execute* options, it
+ *    **echoes** them. `git rev-parse --end-of-options <sha>` prints
+ *    `--end-of-options` followed by the sha (measured), so any caller reading
+ *    stdout gets a corrupted answer. `rev-parse --verify` does not do this and
+ *    is safe.
+ *
+ *    Note what the protection actually is, because it is not "the argument is a
+ *    fixed ref name": the unsuffixed form is used both for fixed names (`HEAD`,
+ *    `--show-toplevel`) and for a sha read out of a
+ *    repository-internal file — `commitLog.ts` runs `rev-parse <sha>` where
+ *    `<sha>` is the *content* of `.git/rebase-merge/stopped-sha`. That is not
+ *    option-shaped input, but neither is it a constant: the real invariant is
+ *    that bare `rev-parse` only ever echoes, never acts on, an option-shaped
+ *    argument, and that every caller treats its output as a name string. A site
+ *    that both passes untrusted input and parses more than the name out of
+ *    stdout must use `--verify` (or another subcommand).
+ */
+export function withPositionals(options: string[], positionals: string[]): string[] {
+  return [...options, END_OF_OPTIONS, ...positionals];
+}
 
 /**
  * Splits NUL-separated Git output (any `-z` listing) into paths.

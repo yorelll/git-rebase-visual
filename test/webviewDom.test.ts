@@ -315,7 +315,156 @@ test("actual webview worktree rows expose paths at rest and route file and secti
     const remove = [...view.dom.window.document.querySelectorAll(".file-action")]
       .find((button) => button.getAttribute("aria-label") === "删除未跟踪文件") as HTMLButtonElement;
     remove.click();
-    assert.deepEqual(JSON.parse(JSON.stringify(view.messages.at(-1))), { type: "restoreFile", path: "tmp/generated.bin", side: "unstaged", deleteUntracked: true, source: "webview:worktree-mutation" });
+    assert.deepEqual(JSON.parse(JSON.stringify(view.messages.at(-1))), { type: "restoreFile", path: "tmp/generated.bin", side: "working", deleteUntracked: true, source: "webview:worktree-mutation" });
+  } finally {
+    view.close();
+  }
+});
+
+/**
+ * `messageOnly` is the only compose entry that produces a message without
+ * writing to Git; every other entry ends in a commit. It must therefore exist
+ * wherever the panel offers no other draft route, and may be omitted only where
+ * it is genuinely redundant.
+ *
+ * This matrix is the regression guard for a real defect: the entry was once
+ * removed from every non-edit-stop state, which silently deleted both the only
+ * `mode: "working"` draft (nothing staged) and the only draft path during a
+ * conflict or plain pause. The counts are per region because an edit stop
+ * legitimately renders the entry twice — banner and Changes group — and both
+ * post the same message.
+ */
+test("the draft-only entry appears in every state that has no other draft route", () => {
+  const view = createHarness();
+  try {
+    const draftButtons = (region: string): HTMLButtonElement[] =>
+      [...view.dom.window.document.querySelectorAll(`${region} button`)]
+        .filter((button) => (button.textContent ?? "").includes("仅生成 message")) as HTMLButtonElement[];
+
+    const files = {
+      both: [
+        { path: "src/a.ts", staged: true, unstaged: false, indexKind: "add", conflicted: false },
+        { path: "src/b.ts", staged: false, unstaged: true, worktreeKind: "modify", conflicted: false },
+      ],
+      stagedOnly: [{ path: "src/a.ts", staged: true, unstaged: false, indexKind: "add", conflicted: false }],
+      workingOnly: [{ path: "src/b.ts", staged: false, unstaged: true, worktreeKind: "modify", conflicted: false }],
+    };
+
+    const cases: {
+      name: string;
+      expectChanges: number;
+      expectBanner: number;
+      expectMode?: string;
+      extra: Record<string, unknown>;
+    }[] = [
+      // The one state where the entry duplicated Staged Changes' ✦: idle with
+      // everything staged, so nothing is added by a second draft route.
+      { name: "idle, all staged", expectChanges: 0, expectBanner: 0, extra: { hasStaged: true, hasUnstaged: false, stagedCount: 1, unstagedCount: 0, changes: files.stagedOnly } },
+      // Nothing staged: `mode: "working"` is the only draft onto the worktree.
+      { name: "idle, nothing staged", expectChanges: 1, expectBanner: 0, expectMode: "working", extra: { hasStaged: false, hasUnstaged: true, stagedCount: 0, unstagedCount: 1, changes: files.workingOnly } },
+      // Mixed idle: still offered, because the worktree has changes of its own
+      // and this is the only entry that can draft against the working side.
+      { name: "idle, mixed", expectChanges: 1, expectBanner: 0, expectMode: "staged", extra: { hasStaged: true, hasUnstaged: true, stagedCount: 1, unstagedCount: 1, changes: files.both } },
+      // A paused rebase offers only Continue/Skip/Abort in the banner, and the
+      // host's pause policy rejects every other compose entry.
+      { name: "rebase paused", expectChanges: 1, expectBanner: 0, expectMode: "staged", extra: { rebaseInProgress: true, pausedReason: "paused", hasStaged: true, hasUnstaged: false, stagedCount: 1, unstagedCount: 0, changes: files.stagedOnly } },
+      { name: "rebase paused, working only", expectChanges: 1, expectBanner: 0, expectMode: "working", extra: { rebaseInProgress: true, pausedReason: "paused", hasStaged: false, hasUnstaged: true, stagedCount: 0, unstagedCount: 1, changes: files.workingOnly } },
+      // A conflict is the state where "wait until resolved" would otherwise
+      // leave no way to draft at all. The host still refuses AI generation
+      // until the conflict is resolved, which is what its own message says.
+      { name: "conflict", expectChanges: 1, expectBanner: 0, expectMode: "staged", extra: { rebaseInProgress: true, pausedReason: "conflict", conflictCount: 1, conflictFiles: ["src/a.ts"], hasStaged: true, hasUnstaged: true, stagedCount: 1, unstagedCount: 1, changes: files.both } },
+      // An edit stop adds the banner copy on top of the Changes one.
+      { name: "edit stop", expectChanges: 1, expectBanner: 1, expectMode: "staged", extra: { rebaseInProgress: true, pausedReason: "edit", stoppedAt: a, hasStaged: true, hasUnstaged: false, stagedCount: 1, unstagedCount: 0, changes: files.stagedOnly } },
+    ];
+
+    for (const [index, item] of cases.entries()) {
+      const next = state([a], 60 + index);
+      Object.assign(next, item.extra);
+      view.postState(next);
+
+      const inChanges = draftButtons("#changes");
+      const inBanner = draftButtons("#banner");
+      assert.equal(inChanges.length, item.expectChanges, `${item.name}: Changes-group count`);
+      assert.equal(inBanner.length, item.expectBanner, `${item.name}: banner count`);
+
+      if (!item.expectMode) {
+        assert.equal(inChanges.length + inBanner.length, 0, `${item.name}: no draft entry anywhere`);
+        continue;
+      }
+      inChanges[0].click();
+      const posted = JSON.parse(JSON.stringify(view.messages.at(-1)));
+      assert.equal(posted.type, "openCompose", `${item.name}: opens the compose panel`);
+      assert.equal(posted.mode, item.expectMode, `${item.name}: drafts against the right side`);
+      assert.equal(posted.messageOnly, true, `${item.name}: never writes to Git`);
+      assert.equal(posted.ai, true, `${item.name}: it is the AI draft route`);
+
+      if (item.expectBanner === 1) {
+        inBanner[0].click();
+        assert.deepEqual(
+          JSON.parse(JSON.stringify(view.messages.at(-1))),
+          posted,
+          `${item.name}: the banner and Changes copies post the same request`
+        );
+      }
+    }
+  } finally {
+    view.close();
+  }
+});
+
+/**
+ * The panel's group key is `staged`/`unstaged`; the host's restore vocabulary
+ * is `staged`/`working` (`restoreWorktreeChange`). Posting the group key through
+ * unchanged made every Changes-side restore fail host validation with
+ * 缺少要恢复的文件状态, which is what clicking the untracked file's ⌫ reported.
+ * These three actions are the whole surface that reaches `restoreFile`.
+ */
+test("every restore action posts the host's side vocabulary", () => {
+  const view = createHarness();
+  try {
+    const next = state([a], 5);
+    Object.assign(next, {
+      hasStaged: true,
+      hasUnstaged: true,
+      stagedCount: 1,
+      unstagedCount: 2,
+      changes: [
+        { path: "src/staged.ts", staged: true, unstaged: false, indexKind: "add", conflicted: false },
+        { path: "src/modified.ts", staged: false, unstaged: true, worktreeKind: "modify", conflicted: false },
+        { path: "tmp/untracked.bin", staged: false, unstaged: true, worktreeKind: "untracked", conflicted: false },
+      ],
+    });
+    view.postState(next);
+    const details = view.dom.window.document.querySelector(".changes-more") as HTMLDetailsElement;
+    details.open = true;
+
+    const actionFor = (path: string, label: string): HTMLButtonElement => {
+      const row = [...view.dom.window.document.querySelectorAll(".change-file")]
+        .find((candidate) => candidate.querySelector(".file-open")?.getAttribute("title") === path);
+      assert.ok(row, `row for ${path} exists`);
+      const action = [...row.querySelectorAll(".file-action")]
+        .find((candidate) => candidate.getAttribute("aria-label") === label);
+      assert.ok(action, `${label} exists on ${path}`);
+      return action as HTMLButtonElement;
+    };
+
+    // ↶ in Changes: restore the working-tree half.
+    actionFor("src/modified.ts", "恢复此文件的工作区改动").click();
+    assert.deepEqual(JSON.parse(JSON.stringify(view.messages.at(-1))), {
+      type: "restoreFile", path: "src/modified.ts", side: "working", deleteUntracked: false, source: "webview:worktree-mutation",
+    });
+
+    // ⌫ on an untracked file: the delete is the working-side restore plus the flag.
+    actionFor("tmp/untracked.bin", "删除未跟踪文件").click();
+    assert.deepEqual(JSON.parse(JSON.stringify(view.messages.at(-1))), {
+      type: "restoreFile", path: "tmp/untracked.bin", side: "working", deleteUntracked: true, source: "webview:worktree-mutation",
+    });
+
+    // ↶ in Staged Changes: unstage, which is the one side that stays `staged`.
+    actionFor("src/staged.ts", "撤销此文件的暂存").click();
+    assert.deepEqual(JSON.parse(JSON.stringify(view.messages.at(-1))), {
+      type: "restoreFile", path: "src/staged.ts", side: "staged", deleteUntracked: false, source: "webview:worktree-mutation",
+    });
   } finally {
     view.close();
   }
@@ -331,11 +480,36 @@ test("locked run summary is compact and removes the expanded long rail", () => {
     view.postState(next);
     const run = view.dom.window.document.querySelector(".locked-run") as HTMLDetailsElement;
     const summary = run.querySelector("summary")!;
-    assert.match(summary.textContent ?? "", /^🔒 :3 lock · no push · la ×1 · sa ×1 · yu ×1$/);
+    assert.match(summary.textContent ?? "", /^🔒 : 3 lock · no push · la ×1 · sa ×1 · yu ×1$/);
     assert.doesNotMatch(summary.textContent ?? "", /[a-f0-9]{8}/i);
     assert.match(summary.getAttribute("aria-label") ?? "", /lawrence_lv/);
     run.open = true;
     assert.equal(run.hasAttribute("open"), true, "CSS removes the long rail only while expanded");
+  } finally {
+    view.close();
+  }
+});
+
+test("a locked run holding a not-yet-replayed commit says so after the author list", () => {
+  const view = createHarness();
+  try {
+    const next = state([a, b, c], 5);
+    const commits = next.commits as Array<Record<string, unknown>>;
+    commits.forEach((commit, index) => { commit.locked = true; commit.author = ["lawrence_lv", "sally_peng", "yucheng_xiang"][index]; });
+    // `b` is pending: Git has not replayed it yet, so the run must not look stable.
+    Object.assign(next, { collapseLockedRuns: true, pendingHashes: [b] });
+    view.postState(next);
+    const summary = (view.dom.window.document.querySelector(".locked-run summary"))!;
+    assert.match(
+      summary.textContent ?? "",
+      /^🔒 : 3 lock · no push · la ×1 · sa ×1 · yu ×1 · replay$/,
+      "the replay suffix follows the authors, separated by the same dot"
+    );
+    // The accessible name must carry the same fact; the row labels already say
+    // 待重放, so the run summary dropping it silently was a real gap.
+    const aria = summary.getAttribute("aria-label") ?? "";
+    assert.match(aria, /尚未重放/, "the accessible name says the run is not fully replayed");
+    assert.match(aria, /不会(被)?推送/, "and keeps the existing 'will not be pushed' fact");
   } finally {
     view.close();
   }
@@ -386,6 +560,97 @@ test("actual webview disables generated Diff for a non-contiguous batch", () => 
     assert.match(generatedDiff.getAttribute("aria-description") ?? "", /仅支持连续 commit/);
     generatedDiff.click();
     assert.equal(view.messages.some((message) => message.type === "bulkGenerateDiff"), false);
+  } finally {
+    view.close();
+  }
+});
+
+test("a state without a commit list renders the banner and the reason instead of throwing", () => {
+  // Four provider sites post `{type:"state", error}` with no `commits` at all:
+  // no workspace folder, not a git repository, a failed `resolveRange`, and a
+  // failed `getCommits` (the last one now also carries `...presentation`). The
+  // render order is banner → context → changes → list, so the user already sees
+  // the error and the upstream note when the list previously threw
+  // `Cannot read properties of undefined (reading 'map')` — a half-rendered
+  // screen plus a console error.
+  const view = createHarness();
+  try {
+    const errors: unknown[] = [];
+    view.dom.window.addEventListener("error", (event) => errors.push((event as ErrorEvent).error ?? "error"));
+
+    view.postState({
+      type: "state",
+      error: "git rev-list origin/master...HEAD failed (128): fatal: ... is corrupt",
+      rebaseInProgress: false,
+      branchName: "master",
+      upstreamRef: "origin/master",
+      aheadCount: 0,
+      behindCount: 0,
+      upstreamNote: "无法计算与 origin/master 的领先/落后（fatal: ... is corrupt）",
+      rangeLabel: "范围：upstream..HEAD",
+    });
+
+    const banner = view.dom.window.document.getElementById("banner")!;
+    assert.match(banner.textContent ?? "", /git rev-list origin\/master\.\.\.HEAD failed/, "the reason is on screen");
+    const context = view.dom.window.document.getElementById("context-text")!;
+    assert.match(context.textContent ?? "", /↑\? ↓\?/, "the context bar rendered too");
+    // The whole point: rendering completed rather than aborting in `renderList`.
+    const list = view.dom.window.document.getElementById("list")!;
+    assert.equal(list.querySelector(".empty")?.textContent, "没有可显示的 commit。", "the list renders its empty state, not a throw");
+    assert.deepEqual(errors, [], "no uncaught error escaped render()");
+
+    // The `rebaseInProgress` variant is strictly worse and must be covered too:
+    // `renderBanner` reads `state.commits` to find the stopped commit, and it is
+    // the first thing render() does — so the throw happens before the error text
+    // is painted, leaving an empty banner. `resolveRange` / `getCommits` post
+    // exactly this shape while a rebase is paused.
+    view.postState({
+      type: "state",
+      error: "git rev-list origin/master...HEAD failed (128): fatal: ... is corrupt",
+      rebaseInProgress: true,
+      branchName: "master",
+      upstreamRef: "origin/master",
+      aheadCount: 0,
+      behindCount: 0,
+      upstreamNote: "无法计算与 origin/master 的领先/落后（fatal: ... is corrupt）",
+      rangeLabel: "范围：upstream..HEAD",
+    });
+    // During a paused rebase the banner is the rebase banner, which does not
+    // carry `error` (pre-existing precedence, unchanged here). The failure is
+    // still visible through the context note, and the point of this half is that
+    // neither the banner nor the list throws before painting.
+    assert.match(banner.textContent ?? "", /变基进行中/, "the rebase banner painted");
+    assert.match(context.textContent ?? "", /↑\? ↓\?/, "the note still reaches the context bar");
+    assert.equal(list.querySelector(".empty")?.textContent, "没有可显示的 commit。", "and still renders a list");
+    assert.deepEqual(errors, [], "no uncaught error escaped either render()");
+  } finally {
+    view.close();
+  }
+});
+
+test("actual webview replaces the ahead/behind arrows with the reason when the range cannot be computed", () => {
+  const view = createHarness();
+  try {
+    // `upstreamNote` and the real counts are mutually exclusive by construction.
+    // Rendering "↑0 ↓0" next to "cannot compute the range" is the defect: 0/0
+    // is indistinguishable from "in sync", so the note would lose.
+    view.postState({ ...state([a, b, c], 2), branchName: "master", upstreamRef: "-evil/master", aheadCount: 0, behindCount: 0, rangeLabel: "范围：upstream..HEAD" });
+    const text = () => view.dom.window.document.getElementById("context-text")!.textContent ?? "";
+    assert.match(text(), /↑0 ↓0/, "the healthy shape still shows the real counts");
+
+    view.postState({
+      ...state([a, b, c], 3),
+      branchName: "master",
+      upstreamRef: "-evil/master",
+      aheadCount: 0,
+      behindCount: 0,
+      upstreamNote: "无法计算与 -evil/master 的领先/落后（usage: git rev-list …）",
+      rangeLabel: "范围：upstream..HEAD",
+    });
+    const shown = text();
+    assert.equal(/↑0 ↓0/.test(shown), false, "the misleading zeroes are gone; saw " + shown);
+    assert.match(shown, /↑\? ↓\?/, "the counts are marked unknown; saw " + shown);
+    assert.match(shown, /无法计算与 -evil\/master 的领先\/落后/, "the reason is visible; saw " + shown);
   } finally {
     view.close();
   }

@@ -1,4 +1,4 @@
-import { runGit } from "./gitRunner";
+import { runGit, withPositionals } from "./gitRunner";
 
 export interface UndoRecord {
   id: string;
@@ -74,7 +74,15 @@ export class UndoJournal {
     };
     // `update-ref` is an intentional private safety checkpoint. Never use
     // ORIG_HEAD: unrelated Git commands are allowed to change it.
-    const result = await runGit(["update-ref", record.beforeRef, record.beforeTip], { cwd });
+    //
+    // `beforeTip` is a 40-hex hash read from `rev-parse HEAD`; the marker keeps
+    // it that way, because `update-ref` accepts options in this position and a
+    // future caller passing a ref name should not be able to turn the safety
+    // checkpoint into a `-d` (delete) or an option of any other kind.
+    const result = await runGit(
+      withPositionals(["update-ref"], [record.beforeRef, record.beforeTip]),
+      { cwd }
+    );
     if (result.code !== 0) {
       throw new Error(`无法建立 Undo 安全引用：${result.stderr.trim()}`);
     }
@@ -114,7 +122,9 @@ export class UndoJournal {
     }
     await Promise.all([...evicted.values()].map(async (item) => {
       try {
-        await runGit(["update-ref", "-d", item.beforeRef], { cwd: item.repository });
+        await runGit(withPositionals(["update-ref", "-d"], [item.beforeRef]), {
+          cwd: item.repository,
+        });
       } catch {
         // A repository may have been removed since this global journal entry.
       }

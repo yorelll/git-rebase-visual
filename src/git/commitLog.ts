@@ -1,4 +1,4 @@
-import { C_LOCALE, git, runGit, splitNul } from "./gitRunner";
+import { C_LOCALE, git, runGit, splitNul, withPositionals } from "./gitRunner";
 import { getWorktreeChanges, summarizeWorktreeChanges } from "./worktreeChanges";
 
 export interface Commit {
@@ -89,6 +89,36 @@ export async function checkGitFeature(
 }
 
 /**
+ * The argv a display range expands to, already separated into the two kinds of
+ * argument `git log` sees.
+ *
+ * They are two fields rather than one space-joined string because they belong on
+ * opposite sides of `--end-of-options`: options must come *before* the marker,
+ * positionals *after* it. A single string cannot express that — the previous
+ * `recentN` shape `"-n 20 HEAD"` put `-n` after the marker and Git rejected the
+ * whole command (`fatal: option '-n' must come before non-option arguments`),
+ * which blanked the commit list for anyone using the documented `recentN`
+ * setting. Keeping the fields apart means a future range kind cannot reintroduce
+ * that by string concatenation; it has to decide which side each argument is on.
+ */
+export interface RangeArgv {
+  /** Command options; placed before `--end-of-options`. Never user data. */
+  options: string[];
+  /** Revisions/paths; placed after `--end-of-options`. May be user data. */
+  positionals: string[];
+}
+
+/**
+ * A stable string identity for a range, for callers that need to compare ranges
+ * rather than execute one (the canonical snapshot key). Deliberately the same
+ * text the fields used to be stored as, so snapshot identity does not shift
+ * just because the argv is now typed.
+ */
+export function rangeArgvKey(range: RangeArgv): string {
+  return [...range.options, ...range.positionals].join(" ");
+}
+
+/**
  * Resolves the git rev-range expression for the configured display range.
  * Returns undefined when the range cannot be resolved (e.g. no upstream set).
  */
@@ -96,34 +126,51 @@ export async function resolveRange(
   cwd: string,
   cfg: RangeConfig,
   tipRef: string = "HEAD"
-): Promise<{ revRange: string; hasBase: boolean } | { error: string }> {
+): Promise<{ revRange: RangeArgv; hasBase: boolean } | { error: string }> {
   switch (cfg.kind) {
     case "upstream": {
       const res = await runGit(
-        [
-          "rev-parse",
-          "--abbrev-ref",
-          "--symbolic-full-name",
-          `${tipRef}@{upstream}`,
-        ],
+        withPositionals(
+          ["rev-parse", "--abbrev-ref", "--symbolic-full-name"],
+          [`${tipRef}@{upstream}`]
+        ),
         { cwd }
       );
       if (res.code !== 0) {
         return { error: "No upstream branch is configured for the current branch." };
       }
-      return { revRange: `${tipRef}@{upstream}..${tipRef}`, hasBase: true };
+      return { revRange: { options: [], positionals: [`${tipRef}@{upstream}..${tipRef}`] }, hasBase: true };
     }
     case "mainBranch": {
-      const res = await runGit(["rev-parse", "--verify", "--quiet", cfg.mainBranch], { cwd });
+      // `mainBranch` is a workspace setting, so it reaches Git as user data.
+      // `git rev-parse` and `git log` both keep parsing options after a
+      // positional, so a value such as `HEAD --output=<file>` would write that
+      // file instead of resolving a base — the same shape as the push refspec
+      // finding. The marker is not cosmetic here: with it, `--output=…` becomes
+      // a revision that cannot resolve, and the caller reports a bad base
+      // branch instead of truncating a file.
+      const res = await runGit(
+        withPositionals(["rev-parse", "--verify", "--quiet"], [cfg.mainBranch]),
+        { cwd }
+      );
       if (res.code !== 0) {
         return { error: `Base branch '${cfg.mainBranch}' not found.` };
       }
-      return { revRange: `${cfg.mainBranch}..${tipRef}`, hasBase: true };
+      return {
+        revRange: { options: [], positionals: [`${cfg.mainBranch}..${tipRef}`] },
+        hasBase: true,
+      };
     }
     case "recentN":
-      return { revRange: `-n ${Math.max(1, cfg.count)} ${tipRef}`, hasBase: false };
+      // `-n` is an option, so it belongs before the marker; only the tip is a
+      // positional. `cfg.count` is a `number` from settings, never a string that
+      // could carry an option.
+      return {
+        revRange: { options: ["-n", String(Math.max(1, cfg.count))], positionals: [tipRef] },
+        hasBase: false,
+      };
     case "all":
-      return { revRange: tipRef, hasBase: false };
+      return { revRange: { options: [], positionals: [tipRef] }, hasBase: false };
   }
 }
 
@@ -163,18 +210,25 @@ export async function rebasingBranch(cwd: string): Promise<string | undefined> {
   return undefined;
 }
 
-/** Returns commits newest-first for the given resolved range. */
+/**
+ * Returns commits newest-first for the given resolved range.
+ *
+ * `range` keeps options and positionals apart (see `RangeArgv`) so the marker
+ * lands between them: every command option first, `--end-of-options`, then only
+ * revisions. `mainBranch` is settings-controlled and `git log` keeps parsing
+ * options after a positional, so a base of `HEAD --output=<file>` would
+ * otherwise write that file; with this ordering it is a revision that cannot
+ * resolve and the caller reports a bad base branch.
+ */
 export async function getCommits(
   cwd: string,
-  revRange: string
+  range: RangeArgv
 ): Promise<Commit[]> {
   const format = ["%H", "%h", "%s", "%an", "%ae", "%ad"].join(SEP) + REC;
-  const args = [
-    "log",
-    "--date=short",
-    `--pretty=format:${format}`,
-    ...revRange.split(" "),
-  ];
+  const args = withPositionals(
+    ["log", "--date=short", `--pretty=format:${format}`, ...range.options],
+    range.positionals
+  );
   const out = await git(args, { cwd });
   if (!out) {
     return [];
@@ -311,14 +365,28 @@ export async function repoRoot(cwd: string): Promise<string | undefined> {
   return res.code === 0 ? res.stdout.trim() : undefined;
 }
 
-/** Returns the full commit message (subject + body) for a commit. */
+/**
+ * Returns the full commit message (subject + body) for a commit.
+ *
+ * The marker is not decorative: `git log -1 --pretty=format:%B --output=<file>`
+ * treats the value as an option and truncates/writes that file (measured), and
+ * `hash` here is caller-supplied — the `copyMessage` webview message passes one
+ * that has been gated by `requiresCurrentCommitHash` + `isCurrentCommitHash`,
+ * but the argument must be safe on its own rather than by that coupling.
+ */
 export async function fullMessage(cwd: string, hash: string): Promise<string> {
-  return git(["log", "-1", "--pretty=format:%B", hash], { cwd });
+  return git(withPositionals(["log", "-1", "--pretty=format:%B"], [hash]), { cwd });
 }
 
 /**
  * True when `ancestor` is an ancestor of (or equal to) `descendant`.
  * `merge-base --is-ancestor` exits 0 when the relationship holds.
+ *
+ * Both arguments can be revisions that start with `-`: `descendant` is literally
+ * `"@{upstream}"` at two call sites and `ancestor` is a 40-hex hash (never
+ * option-shaped), but a branch name that begins with `-` is reachable through
+ * `git push origin HEAD:refs/heads/-foo` even though the *shorthand* `-foo`
+ * cannot be created locally. The marker keeps both on the revision side.
  */
 export async function isAncestor(
   cwd: string,
@@ -326,7 +394,7 @@ export async function isAncestor(
   descendant: string
 ): Promise<boolean> {
   const res = await runGit(
-    ["merge-base", "--is-ancestor", ancestor, descendant],
+    withPositionals(["merge-base", "--is-ancestor"], [ancestor, descendant]),
     { cwd }
   );
   return res.code === 0;
@@ -385,14 +453,26 @@ export function summarizeNumstat(numstat: string[]): string {
   return parts.join(", ");
 }
 
-/** Fetches rich details for a commit, used for the hover tooltip. */
+/**
+ * Fetches rich details for a commit, used for the hover tooltip.
+ *
+ * All three `git show` calls below put `hash` after `--end-of-options`. The
+ * caller (`requestDetail`) gates it with `requiresCurrentCommitHash` +
+ * `isCurrentCommitHash`, and that gate is what the `sendDetail` comment
+ * documents — but the argument has to be safe without relying on it:
+ * `git show -s --pretty=%s HEAD --output=<file>` writes that file (measured),
+ * so a future relaxation of the gate would otherwise become a file write.
+ */
 export async function commitDetail(cwd: string, hash: string): Promise<CommitDetail> {
   // `%ar` is the relative date, rendered through Git's message catalog and shown
   // in the hover. It is display text, never parsed, so the locale is deliberately
   // left alone here: pinning C would change what every user sees in the tooltip.
   const fmt = ["%an", "%ae", "%ar", "%ad", "%B"].join("\x1f");
   const meta = await git(
-    ["show", "-s", "--date=format:%Y-%m-%d %H:%M", `--pretty=format:${fmt}`, hash],
+    withPositionals(
+      ["show", "-s", "--date=format:%Y-%m-%d %H:%M", `--pretty=format:${fmt}`],
+      [hash]
+    ),
     { cwd }
   );
   const [author, email, relDate, absDate, message] = meta.split("\x1f");
@@ -402,7 +482,7 @@ export async function commitDetail(cwd: string, hash: string): Promise<CommitDet
   // parsing the localized `--shortstat` prose. `--format=%H` keeps the header
   // minimal (a bare hash the summarizer skips).
   const numstat = await runGit(
-    ["show", "--numstat", "--format=%H", "--no-color", hash],
+    withPositionals(["show", "--numstat", "--format=%H", "--no-color"], [hash]),
     { cwd }
   );
   const statLine = summarizeNumstat(numstat.stdout.split("\n"));
@@ -414,7 +494,7 @@ export async function commitDetail(cwd: string, hash: string): Promise<CommitDet
   // pinned to keep the filter below matching; the primary `--numstat` path above
   // is locale-independent and is what normally answers.
   const statRes = await runGit(
-    ["show", "--shortstat", "--oneline", "--no-color", hash],
+    withPositionals(["show", "--shortstat", "--oneline", "--no-color"], [hash]),
     { cwd, env: C_LOCALE }
   );
   const shortstatLine =
@@ -495,8 +575,13 @@ export async function patchId(cwd: string, hash: string): Promise<string | undef
     return patchIdCache.get(key);
   }
   // `--root` includes root commits (whose parent-less diff-tree output is
-  // otherwise empty); it is harmless on non-root commits.
-  const diff = await runGit(["diff-tree", "-p", "--no-color", "--root", hash], { cwd });
+  // otherwise empty); it is harmless on non-root commits. The marker keeps
+  // `hash` a revision: it is a 40-hex value from `this.commits` at every call
+  // site today, but `diff-tree` parses options after a positional too.
+  const diff = await runGit(
+    withPositionals(["diff-tree", "-p", "--no-color", "--root"], [hash]),
+    { cwd }
+  );
   if (diff.code !== 0 || !diff.stdout.trim()) {
     patchIdCache.set(key, undefined);
     return undefined;

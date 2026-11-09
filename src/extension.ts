@@ -58,8 +58,14 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("gitRebaseVisual.refresh", () =>
       provider.refreshFromCommand()
     ),
+    // `pushBranch` throws for cancellation and for failures it has not already
+    // reported. The command registration is fire-and-forget, so without this the
+    // throw surfaces as an unhandled rejection in the extension host log. The
+    // user-facing message is produced inside the provider; this only records it.
     vscode.commands.registerCommand("gitRebaseVisual.push", () =>
-      provider.pushBranch()
+      provider.pushBranch().catch((error: unknown) => {
+        warnDiagnostic("push", String((error as any)?.message ?? error));
+      })
     ),
     vscode.commands.registerCommand("gitRebaseVisual.stash", () =>
       provider.stashChanges()

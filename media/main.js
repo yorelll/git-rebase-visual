@@ -84,7 +84,13 @@
     if (!state.branchName) { contextEl.classList.add("hidden"); return; }
     // Keep the stable branch text in a child: the toast is an absolute overlay,
     // not a sibling inserted before the list, so document flow never changes.
-    contextTextEl.textContent = `${state.branchName} · ${state.upstreamRef} · ↑${state.aheadCount || 0} ↓${state.behindCount || 0} · ${state.rangeLabel || ""}`;
+    // `upstreamNote` replaces the arrow counts rather than sitting beside them.
+    // Showing "↑0 ↓0" next to "cannot compute the range" is the defect this
+    // note exists to remove: 0/0 reads as "in sync" and would win.
+    const counters = state.upstreamNote
+      ? `↑? ↓? · ${state.upstreamNote}`
+      : `↑${state.aheadCount || 0} ↓${state.behindCount || 0}`;
+    contextTextEl.textContent = `${state.branchName} · ${state.upstreamRef} · ${counters} · ${state.rangeLabel || ""}`;
     contextEl.classList.remove("hidden");
   }
   function showInlineToast(message, duration) {
@@ -123,7 +129,12 @@
       else bannerEl.classList.add("hidden");
       return;
     }
-    const stopped = state.commits.find((c) => c.hash === state.stoppedAt);
+    // `state.commits ?? []` for the same reason as in `renderList`: the
+    // `rebaseInProgress` error states from `resolveRange` / `getCommits` carry no
+    // commit list. This one is worse than the list throwing — the banner is
+    // painted last, so a throw here leaves the user looking at an empty banner
+    // with no error at all.
+    const stopped = (state.commits ?? []).find((c) => c.hash === state.stoppedAt);
     const isConflict = state.conflictCount > 0;
     const isEditStop = state.pausedReason === "edit" && stopped;
     bannerEl.className = "banner rebase" + (isConflict ? " conflict" : "");
@@ -218,8 +229,15 @@
     // The extension host owns the authoritative modal after a fresh porcelain
     // read. Avoid a second webview confirm: it previously made action clicks look
     // inert and could race with a status refresh before the host received them.
-    const untracked = side === "unstaged" && change.worktreeKind === "untracked";
-    vscode.postMessage({ type: "restoreFile", path: change.path, side, deleteUntracked: untracked });
+    //
+    // `side` here is this panel's group key ("staged"/"unstaged"); the host's
+    // vocabulary is "staged"/"working" (restoreWorktreeChange). Posting the
+    // group key unchanged made the host reject every Changes-side restore with
+    // 缺少要恢复的文件状态, so translate at the message boundary rather than
+    // teaching the host a second alias.
+    const restoreSide = side === "staged" ? "staged" : "working";
+    const untracked = restoreSide === "working" && change.worktreeKind === "untracked";
+    vscode.postMessage({ type: "restoreFile", path: change.path, side: restoreSide, deleteUntracked: untracked });
   }
   function renderChanges() {
     changesEl.innerHTML = "";
@@ -237,9 +255,23 @@
     more.addEventListener("toggle", () => { changesMoreOpen = more.open; persistUi(); });
     const summary = document.createElement("summary"); summary.textContent = atEditStop ? "本次 edit stop 的文件" : "更多提交选项"; more.appendChild(summary);
     appendChangeFiles(more, state.changes || []);
-    if (!atEditStop) {
-      if (state.llmConfigured) more.appendChild(button("仅生成 message（不提交）", () => vscode.postMessage({ type: "openCompose", mode: state.hasStaged ? "staged" : "working", ai: true, thenEdit: false, messageOnly: true })));
-    } else {
+    // `messageOnly` is the only compose entry that produces a message without
+    // writing to Git — every other entry (Staged Changes' ✦, Amend, 新建
+    // commit, the commit context menu) ends in a commit, and the compose panel
+    // hides 复制 message unless messageOnly. So it is rendered in every state
+    // that has no other draft route:
+    //   - any paused rebase (edit stop, conflict, plain pause): the banner
+    //     offers only Continue/Skip/Abort, and the host's pause policy rejects
+    //     every other compose target;
+    //   - whenever anything is unstaged: `mode: "working"` when nothing is
+    //     staged is the only draft onto the worktree at all.
+    // The single omission is idle with everything staged — the case the user
+    // described as redundant. Note this is a stated preference, not a provable
+    // redundancy: even there the entry is the only no-write path, and ✦ would
+    // commit. Removing it everywhere (an earlier attempt) additionally deleted
+    // the only working-mode draft and the only draft path while paused.
+    const omitDraftEntry = !state.rebaseInProgress && state.hasStaged && !state.hasUnstaged;
+    if (!omitDraftEntry) {
       const draftMode = state.hasStaged ? "staged" : "working";
       more.appendChild(button("AI 仅生成 message（不提交）", () => vscode.postMessage({ type: "openCompose", mode: draftMode, ai: true, thenEdit: false, messageOnly: true }), { disabled: !state.llmConfigured, title: state.llmConfigured ? "仅生成草稿，不执行提交" : "请先配置 LLM。" }));
     }
@@ -266,7 +298,9 @@
       return [c.shortHash, c.hash, c.subject, c.author, c.authorEmail, c.date].join(" ").toLowerCase().includes(term.value);
     });
   }
-  function filteredCommits() { return state.commits.filter((c) => queryMatch(c, filterText)); }
+  // `?? []` for the same reason as in `renderList`: a state carrying only an
+  // error has no commit list, and the filter controls are still reachable.
+  function filteredCommits() { return (state.commits ?? []).filter((c) => queryMatch(c, filterText)); }
   function isFilterActive() { return filterText.trim().length > 0; }
   function commitIsPending(c) { return (state.pendingHashes || []).some((hash) => c.hash.startsWith(hash) || hash.startsWith(c.hash)); }
   function commitIsStopped(c) { return state.pausedReason === "edit" && state.stoppedAt === c.hash; }
@@ -304,22 +338,33 @@
     commits.forEach((c) => authors.set(c.author, (authors.get(c.author) || 0) + 1));
     const authorText = [...authors].map(([name, count]) => `${compactAuthor(name)} ×${count}`).join(" · ");
     const pending = commits.some(commitIsPending) ? " · replay" : "";
-    return `🔒 :${commits.length} lock · no push${authorText ? ` · ${authorText}` : ""}${pending}`;
+    return `🔒 : ${commits.length} lock · no push${authorText ? ` · ${authorText}` : ""}${pending}`;
   }
   function runSummaryAria(commits) {
     const authors = new Map();
     commits.forEach((c) => authors.set(c.author || "未知作者", (authors.get(c.author || "未知作者") || 0) + 1));
-    return `已锁定 ${commits.length} 个 commit，不会被推送；${[...authors].map(([name, count]) => `${name} ${count} 个`).join("，")}`;
+    // The compact text carries " · replay" for a not-yet-replayed commit, and
+    // the individual row labels already announce 待重放; the run's accessible
+    // name must not be the one place that drops the fact.
+    const pending = commits.some(commitIsPending) ? "；其中包含尚未重放的 commit" : "";
+    return `已锁定 ${commits.length} 个 commit，不会被推送${pending}；${[...authors].map(([name, count]) => `${name} ${count} 个`).join("，")}`;
   }
 
   function renderList() {
     listEl.innerHTML = "";
-    const known = new Set(state.commits.map((c) => c.hash));
+    // A state posted with an `error` and nothing else — no workspace folder, not
+    // a git repo, a failed range/compose query — has no `commits` key at all.
+    // Rendering order is banner → context → changes → list, so without this the
+    // user sees the banner and then a half-rendered panel plus an uncaught
+    // `Cannot read properties of undefined`. Coercing here states the truth: we
+    // know of no commits, we did not fail to show any.
+    const commits = state.commits ?? [];
+    const known = new Set(commits.map((c) => c.hash));
     selectedHashes = new Set([...selectedHashes].filter((h) => known.has(h)));
-    if (!state.commits.length) { const empty = document.createElement("div"); empty.className = "empty"; empty.textContent = "没有可显示的 commit。"; listEl.appendChild(empty); return; }
+    if (!commits.length) { const empty = document.createElement("div"); empty.className = "empty"; empty.textContent = "没有可显示的 commit。"; listEl.appendChild(empty); return; }
     const visible = filteredCommits();
     listEl.setAttribute("role", "listbox");
-    listEl.setAttribute("aria-label", `Commit 时间轴，共 ${state.commits.length} 个 commit，显示 ${visible.length} 个，顶部较早，底部较新`);
+    listEl.setAttribute("aria-label", `Commit 时间轴，共 ${commits.length} 个 commit，显示 ${visible.length} 个，顶部较早，底部较新`);
     const controls = document.createElement("div"); controls.className = "list-controls";
     const search = document.createElement("input"); search.type = "search"; search.className = "commit-search"; search.placeholder = "搜索 hash、message、作者"; search.value = filterText;
     search.setAttribute("aria-label", "过滤 commit；过滤时禁用重排。支持 author:、hash:、msg:；hash:0x 前缀可省略。");
