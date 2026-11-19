@@ -3,18 +3,23 @@
  *
  * Why this enumerates in Node instead of using a glob in package.json:
  *
- * 1. CI pins Node 20 (`.github/workflows/release.yml`, `node-version: 20`), and
- *    `node --test` only started accepting glob patterns in Node 22. On Node 20 a
- *    quoted glob argument is a literal path: it matches no files, so the suite
- *    would report zero tests or fail outright. This is the reason that matters —
- *    a glob command would break the release gate in CI.
- * 2. Shell expansion of `*` and `**` differs between bash and cmd.exe, so the
+ * 1. Shell expansion of `*` and `**` differs between bash and cmd.exe, so the
  *    command would not mean the same thing on every platform. Enumerating here
  *    makes the file list identical everywhere and needs no shell features.
- * 3. An empty enumeration is reported as an error instead of a green zero-test
+ * 2. An empty enumeration is reported as an error instead of a green zero-test
  *    run.
+ * 3. Nothing below `test/` is silently skipped: a nested `*.test.ts` or a
+ *    symlinked directory aborts the run instead of being walked past.
  *
- * Historical note: an earlier version of this repository had
+ * Historical note, so this is not "simplified" back into a broken gate: CI used
+ * to pin Node 20 (`.github/workflows/release.yml`), and `node --test` only
+ * started accepting glob patterns in Node 22 — on Node 20 a quoted glob is a
+ * literal path that matches nothing. That is no longer the constraint: CI and
+ * local development both run Node 24 now (see `.nvmrc` and the workflow), so a
+ * glob argument would work. Enumeration is kept for reasons 1-3 above, not for
+ * the Node version.
+ *
+ * A second historical note: an earlier version of this repository had
  * `test/index.test.ts`, an aggregator that imported every other test file. With
  * that file present a glob matched the aggregator *and* the files it imported,
  * so the whole suite ran twice — measured at `tests 550` for a 275-test suite.

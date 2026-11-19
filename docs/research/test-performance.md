@@ -1,7 +1,7 @@
 # 测试性能分析（2026-10-30）
 
 > **⚠️ 已被取代（superseded，2026-11-03）。** 本报告是实施**之前**的只读分析，其中的方案**不要照抄**。
-> 实际实施的是：`package.json` 的 `test` / `test:coverage` 指向 `scripts/run-tests.js`，由该脚本在 Node 内**枚举** `test/*.test.ts` 后交给 `node:test` 按文件调度（`--test-concurrency=3`），**没有**采用本文 §候选 B 的 `tsx --test "test/**/*.test.ts"` glob 形式。原因：CI 固定 `node-version: 20`（`.github/workflows/release.yml`），而 `node --test` 接受 glob 参数是 Node 22 起才有的能力（Node 20 的 `doc/api/test.md` 完全没有 glob 语义，会把 `test/**/*.test.ts` 当字面路径）；另外 shell 对 `*`/`**` 的展开规则在 bash、cmd.exe 之间不一致。改回 glob 会让发布门禁在 CI 上失败。
+> 实际实施的是：`package.json` 的 `test` / `test:coverage` 指向 `scripts/run-tests.js`，由该脚本在 Node 内**枚举** `test/*.test.ts` 后交给 `node:test` 按文件调度（`--test-concurrency=3`），**没有**采用本文 §候选 B 的 `tsx --test "test/**/*.test.ts"` glob 形式。原因：**当时代码与 CI 都固定在 Node 20**，而 `node --test` 接受 glob 参数是 Node 22 起才有的能力（Node 20 的 `doc/api/test.md` 完全没有 glob 语义，会把 `test/**/*.test.ts` 当字面路径）。**这一条已经不再成立**：CI 与本地开发现在都是 Node 24（见 `.nvmrc` 与 `.github/workflows/release.yml`），glob 参数可用。仍然保留枚举，是因为另外两个理由仍然有效——shell 对 `*`/`**` 的展开规则在 bash、cmd.exe 之间不一致，枚举让文件列表处处一致；以及空枚举会被当成错误而不是一次“零用例全绿”。
 > 另有两处数字已过时：本文的 217 个测试是旧树；当前测试数与文件数以 `scripts/run-tests.js` 的实时枚举为准（不再在此处写死数字，否则这份“纠正过时数字”的横幅自己也会过时）。`pendingRecovery.integration.test.ts` 已拆为 **3 个文件共 60 个测试**。
 > 本文的**测量方法和结论**（进程启动是主要成本、拆分收益、并发取 3 而非 6）仍然有效，值得保留。
 
@@ -289,7 +289,7 @@ single process (--test-isolation=none)           wall=7.4s  pass=117 fail=0
 
 ### 候选 B：去掉聚合器，让 Node 按文件调度
 
-> **已实施，但命令不是下面这条。** 实际实现见 `scripts/run-tests.js`：枚举文件后调用 `node:test`，不向 `tsx`/`node` 传 glob。**不要**把 `package.json` 改回 `tsx --test "test/**/*.test.ts"`——CI 是 Node 20，不把 glob 参数当模式，发布门禁会失败。详见文首横幅。
+> **已实施，但命令不是下面这条。** 实际实现见 `scripts/run-tests.js`：枚举文件后调用 `node:test`，不向 `tsx`/`node` 传 glob。**不要**把 `package.json` 改回 `tsx --test "test/**/*.test.ts"`——保留枚举的理由是跨 shell 一致性与“空枚举即错误”，与 Node 版本无关（CI 与本地现在都是 Node 24，glob 本身可用）。详见文首横幅。
 
 **依据**：见 §3.4 的对照表，700.4 s（并发 3，全绿）。当前 1,269.7 s。
 
