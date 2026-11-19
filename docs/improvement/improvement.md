@@ -291,6 +291,41 @@
   * **0.9.0 的候选路线**：升到 Node 22（支持到 2027-04-30）或 24（到 2028-04-30）。升到 22+ 后 `node --test 'test/*.test.ts'` 才可能（glob 自 Node 22 起支持），但**是否切回 glob 是另一个决定**——枚举还能保证 bash 与 cmd.exe 的语义一致，并让"顶层枚举会不会静默漏跑"这件事有个显式的检查点。切换前应先确认 `docs/research/test-performance.md` 的并发策略仍成立。**这一条不阻塞本次提交。**
 * **非缺陷观察（有意保留，不加断言）**：`NOTE_DETAIL_LIMIT` 的**值**不被任何断言钉住——改成 139 或 145 后仍然全绿，因为所有断言都相对该常量书写。140 是**排版选择**（上下文栏 29px 单行），不是正确性常量，所以不锁。若将来有人要改它，改完跑一遍 UI 截图比断言更有用。
 
+### P3-11. 0.8.3 成功通知持有 mutation lock 的回归（用户日志 `session-2026-11-17T03-20-59-712Z-327414.log`）
+
+> 来源：用户提供的扩展日志 `session-2026-11-17T03-20-59-712Z-327414.log`。日志显示一次改写成功后，后续所有操作持续被 busy 拒绝；看门狗随后报“操作 … 已超过 Ns 未完成”（回归用例复现的挂起时长为 156 s）。这不是评审发现，而是用户实际使用中的阻塞缺陷。
+
+* **根因**：`onMessage` 在 mutation 消息外层 `try` 持有写锁，`finally` 才释放；`reportRewrite` 却用 `await vscode.window.showInformationMessage(..., "Undo")` 等待一个**非模态**通知。非模态通知的 promise 只在用户主动 dismiss（点 Undo 或关闭）时才 settle，用户忽略它时永远 pending，于是 `finally` 永不执行，锁永不释放。
+* **回归历史**：`4c76d62`（`feat: implement UI review improvements`）原本用 `toast(...)` 发成功提示，`toast` 对 info 是 fire-and-forget 且 8 秒自动消失；`ff26066`（`feat: implement 0.6 rebase experience`）为了提供 Undo，把它改成 awaited `showInformationMessage(..., "Undo")`，从此把“用户是否关闭通知”变成了锁的生命周期。Undo 本身并不需要通知按钮，视图标题按钮与 `gitRebaseVisual.undo` 命令一直可用。
+* **修复（`src/ui/rebaseViewProvider.ts`）**：
+  * `reportRewrite`：成功文案改为纯通知，无 `Undo` 按钮，`void showInformationMessage(...)` 不等待；返回值改为“是否已由缺锁告警报告本次改写”，告警已显示时不再叠加“已完成”。
+  * `warnMissingLockedPatches`：保留 `Undo`，但改为 `void showWarningMessage(message, "Undo").then(...)`；选择 Undo 后通过 `withMutationLock("undo", "撤销改写", "notify", () => this.undoLatest(cwd, undoRecord.id))` 重新取锁，避免在旧锁回调里重入。回调记录两种失败：锁仍被占用（`withMutationLock` 返回 `undefined`，且 `undoing` 保持 false）与 `undoLatest` 拒绝，二者都只写日志，不产生 unhandled rejection。
+  * `runRebase`：改写完成后无条件 `await this.refresh()`，不再依赖通知是否已关闭或是否显示了成功文案；数据库/历史变化必须立即反映到视图。
+  * `appendStagedToCommit`：使用 `reportRewrite` 的返回值；缺锁告警已报告时直接返回，避免“告警 + 追加成功”两条互相矛盾的通知。
+  * 在成功通知与缺锁告警两个站点各加 invariant 注释：非模态通知的 promise 只在用户 dismiss 时 settle，因此持有 mutation lock 期间绝不能 await 它。
+* **Undo 保留路径**：视图标题按钮与 `gitRebaseVisual.undo` 命令不变；告警里的 Undo 仍可用，只是在通知自己的回调里取一把新锁。`toast()` 未改：info 仍进侧栏 inline toast 或 fire-and-forget 系统通知，warn/error 仍 fire-and-forget；`announceSettled` 等所有 `toast` 调用保持不等待。
+* **回归测试**：`test/helpers/vscodeStub.ts` 新增 `pendingMessages` 模式（默认 `false`，`resetStub` 复位），只有显式开启且通知不是 `{ modal: true }` 时才返回永不 settle 的 promise；15 个模态确认框仍按 `stub.choice` 立即结算，既有用例行为不变。新增 `test/reportRewriteNotification.integration.test.ts` 两条：
+  * 真实 provider + 真实临时仓库走一次 `drop` 改写，`pendingMessages = true` 模拟用户忽略成功通知；断言 mutation 在超时内 settle、`mutations.isBusy() === false`、成功消息 `items` 为空（无 Undo），且 HEAD 已变为保留的 commit。
+  * 缺锁告警路径：真实 undo 记录 + 把 HEAD 移回 baseline 制造“锁定 patch 缺失”，手工持锁后调用 `reportRewrite`；断言告警 promise 在用户忽略时仍 settle 且返回 `true`、锁已释放、告警 `items` 为 `["Undo"]`、没有叠加“已完成”。
+  * **红/绿证据**：在基线实现上两条都红，失败断言分别为 `an ignored notification must not keep the mutation unsettled (the reported 156 s hang)`（`actual: undefined`, `expected: true`）与 `the warning must settle even though the user ignores the non-modal notification`（`actual: undefined`, `expected: true`）；恢复修复后 **2/2 绿**。
+* **重新审计 `src/` 的非模态 await**：15 个 `{ modal: true }` 确认框全部未改；三处成功后通知已改；`watchdog` 的告警本来就是 `void ...then(...)`，`toast` 全部 fire-and-forget，`extension.ts` 的日志提示也未 await。另有 4 处 `await showQuickPick` / `showInputBox`：`showUndoHistory` 的历史选择（约 1372 行，mutation 内）、`pushBranchInternal` 的推送方式与自定义 refspec（约 3168/3184 行，push 锁内）、`openCommitDiff` 的多文件选择（约 2889 行，只读路径）。它们与成功通知不同：都是**写操作开始前必须取得用户输入的前台选择器**，值必须返回后才能继续；`showUndoHistory` 不是重写后通知，选择后执行的撤销本身还要重新校验。把它们改成 fire-and-forget 会让调用方拿不到选择结果，移出锁又会放开“确认到写入之间”的状态竞态，故本轮不改，保留现状并在报告中说明。
+* **验证**：两个类型检查零输出；受影响 8 个套件 **80/80** 绿；完整套件 **326 项 / 48 个文件**全绿、0 失败、0 跳过，从确认没有遗留测试进程的进程表运行（此前 324/47，本轮新增 2 条）。VSIX 从删除后的 `dist-vsix/` 重建，仍为 12 个条目并通过白名单校验；包内 `dist/extension.js` 与现场 `node esbuild.js` 的 sha256 一致。三处计数已同步：`docs/summary/summary.md`、`RELEASE.md`、`docs/release-notes/0.8.3.md`。
+
+### P3-12. `code-review-0-8-24.md` 的 P4-1 至 P4-3 收尾
+
+> 来源：`code-review-0-8-24.md` 第四节。该轮批准了 0.8.3 成功通知持锁回归的修复，另留三条不阻塞的 P4。本轮只改这三项，不改动 B 判定为正确的“告警已显示则抑制成功 toast”决策，也不触碰两条既有 observation（命令路径的 Undo 不取锁、`showUndoHistory` 的 QuickPick 在锁内）。
+
+* **\[x] P4-1（用户反馈）——告警的 Undo 被忙锁拒绝时只有日志。** `warnMissingLockedPatches` 的 `!undoing` 分支除日志外，再发一条 `toast("warn", "撤销未执行：另一个操作正在进行。请稍后从视图标题 Undo 或运行 gitRebaseVisual.undo 重试。")`。`toast` 是模块级 fire-and-forget，warn 走 `void showWarningMessage(...)`；没有新增被 await 的通知，也没有把通知回调重新变成锁的生命周期。
+  * 红/绿：删掉该 toast → `Undo on the missing-lock warning is refused with a user-visible warning while the lock is busy` 超时变红（`timed out waiting for the user-visible busy warning`）；恢复后绿。
+* **\[x] P4-2（测试缺口）——Undo 回调的三条分支没有持久测试。** 在 `test/reportRewriteNotification.integration.test.ts` 新增三条，全部用真实 provider + 真实临时仓库，设 `stub.choice = "Undo"` 让真实的 `showWarningMessage(message, "Undo")` 回调跑起来：忙锁（工作不执行、日志与 toast 出现、锁仍属于原来的 owner、无 unhandled rejection）、`undoLatest` 拒绝（`Undo 失败：probe-boom` 被记录、新锁释放、无 unhandled rejection 逃逸、不误报忙锁）、成功（`undoLatest` 恰好一次、两条失败日志都不出现、锁释放）。未处理的 rejection 用 `process.on("unhandledRejection")` 收集，用例结束时移除监听。
+  * 红/绿（逐条破坏对应行为，均在恢复前实测）：
+    * 忙锁：删掉 P4-1 的 toast → 该用例红。
+    * 失败：去掉 `.then` 的 rejection 处理 → 该用例红（`Error: probe-boom` 以 unhandled rejection 逃逸）。
+    * 成功：删掉 work 内的 `await this.undoLatest(...)` → 该用例红（`timed out waiting for the undo work to run`）。
+* **\[x] P4-3（告警文案）——缺锁告警不点名是哪次改写。** `warnMissingLockedPatches` 增加 `operation` 参数，`reportRewrite` 把已有的 `operation` 传入；两种文案（有 / 无 Undo 检查点）都改为 `${operation}：改写后未找到 …`，其余措辞与含义不变。Append 路径的“告警已显示则抑制成功 toast”判断保持不变（`code-review-0-8-24.md` 判定该取舍正确）。
+  * 红/绿：把 `operation` 前缀从告警文案中去掉 → 既有告警用例的新断言 `the warning names which rewrite lost the locked patch` 变红（`actual` 以 `改写后未找到` 开头）；恢复后绿。
+* **验证**：两个类型检查零输出；受影响套件 5 + 22 + 20 + 17 + 1 = **65/65** 绿；完整套件 **329 项 / 48 个文件，pass 329 / fail 0 / skipped 0，runner 退出码 0**（此前 326，本轮 +3）。VSIX 从删除后的 `dist-vsix/` 重建，仍为 12 个条目并通过白名单校验；包内 `dist/extension.js` 与现场 `node esbuild.js` 的 sha256 均为 `9c7731d3…`。三处计数已同步：`docs/summary/summary.md`、`RELEASE.md`、`docs/release-notes/0.8.3.md`。
+
 ## 验收原则
 所有后续历史改写功能应满足：
 

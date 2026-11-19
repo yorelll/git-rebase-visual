@@ -30,6 +30,14 @@ export interface StubState {
   quickPick?: unknown;
   /** Value returned by `window.showInputBox`; `undefined` models a dismissal. */
   inputBox?: string;
+  /**
+   * When true, every non-modal `show*Message` still records the call but returns
+   * a promise that never settles, modelling a notification the user ignores.
+   * Modal confirmations (`{ modal: true }`) still resolve with `choice`, since
+   * the user is expected to answer them. Default `false` preserves the
+   * historical resolved-with-`choice` behaviour for every call.
+   */
+  pendingMessages?: boolean;
 }
 
 export const stub: StubState = {
@@ -41,6 +49,7 @@ export const stub: StubState = {
   config: {},
   quickPick: undefined,
   inputBox: undefined,
+  pendingMessages: false,
 };
 
 function memoryMemento() {
@@ -58,6 +67,21 @@ function memoryMemento() {
 
 function disposable() {
   return { dispose() {} };
+}
+
+/**
+ * Resolves a message call the way VS Code would when the user answers a modal
+ * confirmation, or never resolves it for a passive notification the user
+ * ignores. `pendingMessages` only affects the latter: a `{ modal: true }` call
+ * is expected to be answered and keeps the historical resolved-with-`choice`
+ * behaviour, which lets a test drive a real rewrite through its dialogs.
+ */
+function settleMessage(items: any[]): Promise<string | undefined> | string | undefined {
+  const modal = items.some((item) => item !== null && typeof item === "object" && item.modal === true);
+  if (stub.pendingMessages && !modal) {
+    return new Promise<string | undefined>(() => undefined);
+  }
+  return stub.choice;
 }
 
 const vscodeStub = {
@@ -108,17 +132,17 @@ const vscodeStub = {
       reveal: () => undefined,
       dispose: () => undefined,
     }),
-    showWarningMessage: async (text: string, ...items: string[]) => {
+    showWarningMessage: async (text: string, ...items: any[]) => {
       stub.messages.push({ level: "warn", text, items });
-      return stub.choice;
+      return settleMessage(items);
     },
-    showInformationMessage: async (text: string, ...items: string[]) => {
+    showInformationMessage: async (text: string, ...items: any[]) => {
       stub.messages.push({ level: "info", text, items });
-      return stub.choice;
+      return settleMessage(items);
     },
-    showErrorMessage: async (text: string, ...items: string[]) => {
+    showErrorMessage: async (text: string, ...items: any[]) => {
       stub.messages.push({ level: "error", text, items });
-      return stub.choice;
+      return settleMessage(items);
     },
     showQuickPick: async () => stub.quickPick,
     showInputBox: async () => stub.inputBox,
@@ -179,6 +203,7 @@ export function resetStub(): void {
   stub.config = {};
   stub.quickPick = undefined;
   stub.inputBox = undefined;
+  stub.pendingMessages = false;
 }
 
 /** Memento pair plus a fake extension context. */

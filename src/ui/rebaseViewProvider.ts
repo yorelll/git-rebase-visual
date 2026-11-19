@@ -1983,9 +1983,13 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
    * its hash changes while its patch-id remains locked. If a direct or indirect
    * rewrite loses a locked patch instead, keep the original persisted lock and
    * make the existing private-ref Undo checkpoint immediately actionable.
+   *
+   * Returns true when a warning was raised. The warning is fire-and-forget; its
+   * Undo action acquires the mutation lock only if the user actually chooses it.
    */
   private async warnMissingLockedPatches(
     cwd: string,
+    operation: string,
     root: string,
     beforeTip: string | undefined,
     undoRecord?: UndoRecord
@@ -2031,20 +2035,54 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     }
     const short = missing.map((patchId) => patchId.slice(0, 10)).join("、");
     this.log("lock", `改写后未找到 ${missing.length} 个锁定 patch-id：${short}`);
+    // Name the operation in both shapes: the user must be able to tell whether
+    // the rewrite that lost a locked patch was a drop, a reorder, an append or
+    // an edit. The rest of each message is unchanged.
     const message = undoRecord
-      ? `改写后未找到 ${missing.length} 个锁定 patch（${short}）。原锁定记录已保留，避免该改动被静默解锁。请确认结果，或使用 Undo 恢复改写前历史。`
-      : `改写后未找到 ${missing.length} 个锁定 patch（${short}）。原锁定记录已保留，避免该改动被静默解锁；此操作没有自动 Undo 检查点，请确认结果。`;
-    const choice = undoRecord
-      ? await vscode.window.showWarningMessage(message, "Undo")
-      : await vscode.window.showWarningMessage(message);
-    if (choice === "Undo" && undoRecord) {
-      await this.undoLatest(cwd, undoRecord.id);
-      return true;
+      ? `${operation}：改写后未找到 ${missing.length} 个锁定 patch（${short}）。原锁定记录已保留，避免该改动被静默解锁。请确认结果，或使用 Undo 恢复改写前历史。`
+      : `${operation}：改写后未找到 ${missing.length} 个锁定 patch（${short}）。原锁定记录已保留，避免该改动被静默解锁；此操作没有自动 Undo 检查点，请确认结果。`;
+    // INVARIANT: a non-modal notification's promise settles only when the user
+    // dismisses it, so it must never be awaited while the mutation lock is held.
+    // The Undo action therefore runs from the notification's own callback, under
+    // a fresh lock; this method only reports that the warning was raised.
+    let undoing = false;
+    if (undoRecord) {
+      void vscode.window.showWarningMessage(message, "Undo").then((choice) => {
+        if (choice !== "Undo") return;
+        void this.withMutationLock("undo", "撤销改写", "notify", async () => {
+          undoing = true;
+          await this.undoLatest(cwd, undoRecord.id);
+        }).then(
+          () => {
+            // `withMutationLock` returns undefined when the lock is busy, in
+            // which case `work` never ran. Record it instead of silently
+            // dropping the user's Undo.
+            if (!undoing) {
+              this.log("mutation", "Undo 未执行：操作锁仍被占用（撤销改写）。");
+              // The notification is already dismissed by the click, so the log
+              // line alone would leave the user believing history was rolled
+              // back. `toast` is fire-and-forget and never blocks the lock.
+              toast("warn", "撤销未执行：另一个操作正在进行。请稍后从视图标题 Undo 或运行 gitRebaseVisual.undo 重试。");
+            }
+          },
+          (error) => {
+            // Never let a failed undo become an unhandled rejection.
+            this.log("mutation", `Undo 失败：${String((error as any)?.message ?? error)}`);
+          }
+        );
+      });
+    } else {
+      void vscode.window.showWarningMessage(message);
     }
-    return false;
+    return true;
   }
 
-  /** Records a completed rewrite without offering an unsafe ORIG_HEAD reset. */
+  /**
+   * Records a completed rewrite without offering an unsafe ORIG_HEAD reset.
+   * Returns true when the missing-lock warning was raised (the caller must not
+   * add a second success message), false otherwise. Neither notification is
+   * awaited; see the invariant at each call site.
+   */
   private async reportRewrite(
     cwd: string,
     operation: string,
@@ -2060,18 +2098,21 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     if (undoRecord) await this.undo.complete(undoRecord, newTip);
     const details = `${operation}; 范围 ${affectedCount} 个 commit; old tip ${oldTip ?? "unknown"}; new tip ${newTip}`;
     this.log("rebase", `完成 ${details}`);
-    const undone = await this.warnMissingLockedPatches(cwd, this.root!, oldTip, undoRecord);
-    if (undone) {
+    const warned = await this.warnMissingLockedPatches(cwd, operation, this.root!, oldTip, undoRecord);
+    if (warned) {
+      // The data-integrity warning already reports the outcome; a second
+      // "已完成" notification for the same event would only be noise.
       return true;
     }
-    const choice = await vscode.window.showInformationMessage(
-      `${operation} 已完成：${oldTip?.slice(0, 10) ?? "unknown"} → ${newTip?.slice(0, 10) ?? "unknown"}（${affectedCount} 个 commit）。`,
-      "Undo"
+    // INVARIANT: a non-modal notification's promise settles only when the user
+    // dismisses it, so it must never be awaited while the mutation lock is held.
+    // A user who ignores the notification would otherwise wedge every later
+    // action as busy. Success is therefore a pure notification: no action items,
+    // no await. Undo remains available from the view-title button and the
+    // `gitRebaseVisual.undo` command.
+    void vscode.window.showInformationMessage(
+      `${operation} 已完成：${oldTip?.slice(0, 10) ?? "unknown"} → ${newTip?.slice(0, 10) ?? "unknown"}（${affectedCount} 个 commit）。`
     );
-    if (choice === "Undo") {
-      await this.undoLatest(cwd, undoRecord?.id);
-      return true;
-    }
     return false;
   }
 
@@ -2207,16 +2248,17 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
       }
       const newTip = await this.headTip(cwd);
       if (oldTip !== newTip) {
-        const undone = await this.reportRewrite(
+        await this.reportRewrite(
           cwd,
           plan.operation ?? "变基",
           oldTip,
           plan.affectedCount ?? plan.items.length,
           undoRecord
         );
-        if (undone) {
-          await this.refresh();
-        }
+        // A rewrite changed history regardless of whether a warning replaced
+        // the success notification, so always refresh. The old "user chose
+        // Undo" return value no longer exists as a refresh signal.
+        await this.refresh();
       } else {
         await this.undo.mark(undoRecord, "aborted");
         this.log("rebase", `${plan.operation ?? "变基"} 未改变 HEAD；未报告历史改写。`);
@@ -2373,14 +2415,15 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
       const pending = this.pendingRewrite;
       this.pendingRewrite = undefined;
       if (pending) {
-        const undone = await this.reportRewrite(
+        const warned = await this.reportRewrite(
           cwd,
           pending.operation,
           pending.oldTip,
           pending.affectedCount,
           pending.undoRecord
         );
-        if (undone) {
+        if (warned) {
+          // The missing-lock warning already reports this rewrite.
           return;
         }
       }
