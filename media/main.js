@@ -157,8 +157,7 @@
       const amendLabel = `追加到 ${short(stopped.hash)} (amend)…`;
       editActions.append(
         button(amendLabel, () => vscode.postMessage({ type: "openCompose", mode: "commit", hash: stopped.hash, ai: false, thenEdit: true, editKind: "amend" }), { primary: true, disabled: !state.hasStaged, title: state.hasStaged ? "编辑 message 后 amend 当前 edit commit" : "请先在 SCM 中暂存改动。" }),
-        button("新建 commit…", () => vscode.postMessage({ type: "openCompose", mode: "staged", ai: false, thenEdit: false, editKind: "new" }), { disabled: !state.hasStaged, title: state.hasStaged ? "创建新 commit；变基暂停时不调用 AI。" : "请先在 SCM 中暂存改动。" }),
-        button("AI 仅生成 message（不提交）", () => vscode.postMessage({ type: "openCompose", mode: state.hasStaged ? "staged" : "working", ai: true, thenEdit: false, messageOnly: true }), { disabled: !state.llmConfigured, title: state.llmConfigured ? "仅生成草稿，不执行提交" : "请先配置 LLM。" })
+        button("新建 commit…", () => vscode.postMessage({ type: "openCompose", mode: "staged", ai: false, thenEdit: false, editKind: "new" }), { disabled: !state.hasStaged, title: state.hasStaged ? "创建新 commit；变基暂停时不调用 AI。" : "请先在 SCM 中暂存改动。" })
       );
       bannerEl.appendChild(editActions);
     }
@@ -256,26 +255,6 @@
     more.addEventListener("toggle", () => { changesMoreOpen = more.open; persistUi(); });
     const summary = document.createElement("summary"); summary.textContent = atEditStop ? "本次 edit stop 的文件" : "更多提交选项"; more.appendChild(summary);
     appendChangeFiles(more, state.changes || []);
-    // `messageOnly` is the only compose entry that produces a message without
-    // writing to Git — every other entry (Staged Changes' ✦, Amend, 新建
-    // commit, the commit context menu) ends in a commit, and the compose panel
-    // hides 复制 message unless messageOnly. So it is rendered in every state
-    // that has no other draft route:
-    //   - any paused rebase (edit stop, conflict, plain pause): the banner
-    //     offers only Continue/Skip/Abort, and the host's pause policy rejects
-    //     every other compose target;
-    //   - whenever anything is unstaged: `mode: "working"` when nothing is
-    //     staged is the only draft onto the worktree at all.
-    // The single omission is idle with everything staged — the case the user
-    // described as redundant. Note this is a stated preference, not a provable
-    // redundancy: even there the entry is the only no-write path, and ✦ would
-    // commit. Removing it everywhere (an earlier attempt) additionally deleted
-    // the only working-mode draft and the only draft path while paused.
-    const omitDraftEntry = !state.rebaseInProgress && state.hasStaged && !state.hasUnstaged;
-    if (!omitDraftEntry) {
-      const draftMode = state.hasStaged ? "staged" : "working";
-      more.appendChild(button("AI 仅生成 message（不提交）", () => vscode.postMessage({ type: "openCompose", mode: draftMode, ai: true, thenEdit: false, messageOnly: true }), { disabled: !state.llmConfigured, title: state.llmConfigured ? "仅生成草稿，不执行提交" : "请先配置 LLM。" }));
-    }
     changesEl.appendChild(more);
   }
   function changeButton(text, ctx) {
@@ -643,7 +622,6 @@
       menuEl.append(
         menuItem({ icon: "◫", label: "打开变更…", disabled: true, disabledReason }),
         menuItem({ icon: "✎", label: "编辑 message…", disabled: true, disabledReason }),
-        menuItem({ icon: "✦", label: "AI 生成 message…", disabled: true, disabledReason }),
         menuItem({ icon: "⏸", label: "停靠在此 (edit)", disabled: true, disabledReason }),
         menuItem({ icon: "⌑", label: "合并到上一个 (squash)", disabled: true, disabledReason: "已选择多个 commit；不支持批量 squash，以避免跨越隐藏提交或合并语义不明确。" }),
         menuItem({ icon: "⌑", label: "合并到上一个，丢弃 message (fixup)", disabled: true, disabledReason })
@@ -653,7 +631,7 @@
     } else {
       menuEl.append(group("查看"));
       menuEl.append(menuItem({ icon: "⧉", label: "复制 hash", action: () => send("copyHash", c) }), menuItem({ icon: "⧉", label: "复制 message", action: () => send("copyMessage", c) }), menuItem({ icon: "◫", label: "打开变更…", action: () => send("openDiff", c) }), menuItem({ icon: "▤", label: "生成 Diff…", action: () => vscode.postMessage({ type: "generateDiff", hash: c.hash, revision: state.canonicalRevision }) }), sep(), group("变基与编辑"));
-      menuEl.append(menuItem({ icon: "✎", label: "编辑 message…", shortcut: "Enter", action: () => sendCompose(c, false) }), menuItem({ icon: "✦", label: "AI 生成 message…", disabled: !state.llmConfigured, disabledReason: "请先配置 LLM。", action: () => sendCompose(c, true) }), menuItem({ icon: "⧉", label: "追加暂存区", disabled: c.locked || !state.hasStaged || state.rebaseInProgress, disabledReason: c.locked ? "目标已锁定。" : !state.hasStaged ? "暂存区为空。" : "变基进行中。", action: () => send("appendStaged", c) }));
+      menuEl.append(menuItem({ icon: "✎", label: "编辑 message…", shortcut: "Enter", action: () => sendCompose(c, false) }), menuItem({ icon: "✦", label: "AI 生成 message…", disabled: !state.llmConfigured || state.rebaseInProgress, disabledReason: state.rebaseInProgress ? "变基进行中；如需 AI message，请先暂存改动并使用暂存区的 ✦" : "请先配置 LLM。", action: () => sendCompose(c, true) }), menuItem({ icon: "⧉", label: "追加暂存区", disabled: c.locked || !state.hasStaged || state.rebaseInProgress, disabledReason: c.locked ? "目标已锁定。" : !state.hasStaged ? "暂存区为空。" : "变基进行中。", action: () => send("appendStaged", c) }));
       const position = state.commits.indexOf(c); const predecessor = state.commits[position - 1]; const blocked = position <= 0 || c.locked || predecessor?.locked || state.rebaseInProgress;
       const reason = position <= 0 ? "第一个 commit 不能合并到前驱。" : c.locked || predecessor?.locked ? "当前 commit 或前驱已锁定。" : state.rebaseInProgress ? "变基进行中。" : "";
       menuEl.append(menuItem({ icon: "⌑", label: "合并到上一个 (squash)", disabled: blocked, disabledReason: reason, action: () => send("squash", c) }), menuItem({ icon: "⌑", label: "合并到上一个，丢弃 message (fixup)", disabled: blocked, disabledReason: reason, action: () => send("fixup", c) }), menuItem({ icon: "⏸", label: "停靠在此 (edit)", action: () => send("rebaseTo", c) }), sep(), group("保护"), menuItem(c.locked ? { icon: "🔓", label: "解除锁定", action: () => send("unlock", c) } : { icon: "🔒", label: "锁定 commit", action: () => send("lock", c) }), sep(), group("危险操作"), menuItem({ icon: "⌫", label: "删除 commit (drop)", shortcut: "Delete", danger: true, disabled: c.locked, disabledReason: c.locked ? "目标已锁定。" : "", action: () => send("drop", c) }));

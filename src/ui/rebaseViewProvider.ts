@@ -91,7 +91,6 @@ import { applyCommitBinaryStatus, commitDiffPlan, parseCommitChangedFiles } from
 import { ensureEditStopTarget, writeEditStopCommit } from "./editStopCommit";
 import { validateReorderRequest } from "./rebaseReorderState";
 import { nextCanonicalSnapshotRevision } from "./canonicalSnapshot";
-import { isDraftOnlyAiGenerationAllowedDuringRebase, isDraftOnlyComposeAllowedDuringRebase } from "./composePolicy";
 import { ComposePanel } from "./composePanel";
 import { refreshFeedback } from "./refreshFeedbackPolicy";
 import {
@@ -849,25 +848,30 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     if (cwd && (await isRebaseInProgress(cwd))) {
       // `stageFile` and `restoreFile` are explicit pause-policy entries. Their
       // mutation classification above ensures they are still serialized by busy.
-      const draftOnlyCompose =
-        m.type === "openCompose" &&
-        isDraftOnlyComposeAllowedDuringRebase(m.mode, m.messageOnly === true);
+      // Compose at a pause is limited to the two non-AI edit-stop routes plus
+      // the Staged Changes AI entry: that entry exists in every state, and is
+      // the documented way to generate a message while editing (stage first).
+      // Generation is read-only; the apply that would commit is still refused
+      // below, so the pause cannot be written through this exception.
       const activeCompose = this.compose.activeSession();
-      const draftOnlyGeneration =
-        m.type === "generate" &&
-        !!activeCompose &&
-        this.compose.acceptsActiveSession(m.sessionId, m.revision) &&
-        activeCompose.mode === m.mode &&
-        activeCompose.messageOnly === true &&
-        isDraftOnlyComposeAllowedDuringRebase(activeCompose.mode, true);
       const editStopCompose =
         m.type === "openCompose" && m.mode === "commit" && m.thenEdit === true && typeof m.hash === "string";
       const editStopNewCompose =
         m.type === "openCompose" && m.mode === "staged" && m.editKind === "new" && m.ai !== true;
-      const editStopDraftCompose =
-        m.type === "openCompose" && m.messageOnly === true && isDraftOnlyComposeAllowedDuringRebase(m.mode, true);
-      const pausedException =
-        draftOnlyCompose || draftOnlyGeneration || editStopCompose || editStopNewCompose || editStopDraftCompose;
+      const stagedAiCompose =
+        m.type === "openCompose" &&
+        m.mode === "staged" &&
+        m.ai === true &&
+        m.thenEdit !== true &&
+        m.editKind === undefined;
+      const stagedAiGeneration =
+        m.type === "generate" &&
+        m.mode === "staged" &&
+        !!activeCompose &&
+        activeCompose.mode === "staged" &&
+        activeCompose.ai === true &&
+        this.compose.acceptsActiveSession(m.sessionId, m.revision);
+      const pausedException = editStopCompose || editStopNewCompose || stagedAiCompose || stagedAiGeneration;
       // Reuse the actual gate policy: stage/restore are explicit allow-list
       // writes, while draft/edit-stop exceptions remain intentionally narrow.
       const pausedUnsafeMutation = mutationGateDecision(
@@ -1021,10 +1025,20 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
           break;
         }
         case "closeCompose":
-          // The page sends this only after its dirty-draft discard confirmation.
-          // Never let a stale retained document close a newer Compose target.
-          if (!this.compose.discardActiveDraft(m.sessionId, m.revision)) {
+          // Cancel/Escape always closes, in every state. The page does not use
+          // `window.confirm` (unsupported in webviews); a dirty draft has already
+          // been sent through `composeDraft`, and ComposePanel keeps that
+          // recovery copy, so closing loses nothing and reopening the same
+          // target restores the message. A page that refuses a target switch
+          // reports `composeRefused`, and ComposePanel moves `active` back to
+          // the session still on screen, so host and page agree here. The
+          // session check below remains for a stale *retained* document: it is
+          // not the displayed page and must not close a newer Compose target.
+          if (m.sessionId !== undefined && !this.compose.acceptsActiveSession(m.sessionId, m.revision)) {
             return;
+          }
+          if (m.dirty === true) {
+            toast("info", "Compose 已关闭；未应用的草稿已保留，重新打开同一目标可恢复。");
           }
           this.compose.close();
           break;
@@ -1032,7 +1046,7 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
           this.generationCancel?.abort();
           break;
         case "openCompose":
-          await this.openCompose(cwd!, m.mode, m.hash, m.thenEdit === true, m.ai === true, m.messageOnly === true, m.editKind);
+          await this.openCompose(cwd!, m.mode, m.hash, m.thenEdit === true, m.ai === true, m.editKind);
           break;
         case "appendStaged":
           await this.appendStagedToCommit(cwd!, m.hash);
@@ -2481,7 +2495,6 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     hash: string | undefined,
     thenEdit: boolean,
     ai: boolean,
-    messageOnly = false,
     editKind?: unknown
   ): Promise<void> {
     if (ai && !isLlmConfigured()) {
@@ -2496,14 +2509,16 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     const normalizedEditKind = editKind === "amend" || editKind === "new" ? editKind : undefined;
     let stoppedHash: string | undefined;
     if (await isRebaseInProgress(cwd)) {
-      // AI is permitted only in the explicitly draft-only surface. It produces
-      // text, never a Git write; amend/new routes remain guarded below.
-      if (ai && !messageOnly) {
-        throw new Error("变基进行中：AI 仅可在“仅生成 message，不提交”模式中生成草稿。 ");
+      // There is no separate AI entry at an edit stop, but the Staged Changes
+      // entry is still the documented route: stage first, then generate. That
+      // session may only produce text; `apply` refuses every paused write below.
+      const aiStaged = ai && mode === "staged" && !thenEdit && normalizedEditKind === undefined;
+      if (ai && !aiStaged) {
+        throw new Error("变基进行中：仅 Staged Changes 的 AI 入口可以生成 message。请先 Continue 或 Abort。 ");
       }
       const editStopAmend = mode === "commit" && thenEdit === true && typeof hash === "string" && normalizedEditKind === "amend";
       const editStopNew = mode === "staged" && normalizedEditKind === "new" && ai === false;
-      if (!isDraftOnlyComposeAllowedDuringRebase(mode, messageOnly) && !editStopAmend && !editStopNew) {
+      if (!aiStaged && !editStopAmend && !editStopNew) {
         throw new Error("变基进行中：不能打开 Compose 或生成 message。请先 Continue 或 Abort。 ");
       }
       if (editStopAmend || editStopNew) {
@@ -2559,7 +2574,6 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
       hash,
       thenEdit,
       ai,
-      messageOnly,
       original: body,
       trailers,
       subject,
@@ -2608,12 +2622,17 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
       targetHash = target;
     }
     if (await isRebaseInProgress(cwd)) {
+      // The Staged Changes AI entry remains reachable at an edit stop (and at a
+      // conflict pause, where its own entry is visible). It may generate text,
+      // but apply is refused below; nothing here writes Git. Other AI sessions
+      // (a commit reword) cannot have been opened during the pause at all.
       const active = this.compose.activeSession();
       const hasConflicts = (await conflictedFiles(cwd)).length > 0;
-      if (!active || active.mode !== mode || !isDraftOnlyAiGenerationAllowedDuringRebase(active.mode, active.messageOnly === true, hasConflicts)) {
-        throw new Error(hasConflicts
-          ? "变基存在冲突：改动尚不稳定，不能生成 commit message 草稿。请先解决冲突。 "
-          : "变基进行中：仅可为当前 staged/working 的“仅生成 message，不提交”草稿生成 AI message。 ");
+      if (!active || active.mode !== "staged" || active.ai !== true || mode !== "staged") {
+        throw new Error("变基进行中：仅 Staged Changes 的 AI 入口可以生成 message。请先 Continue 或 Abort。 ");
+      }
+      if (hasConflicts) {
+        throw new Error("变基存在冲突：改动尚不稳定，不能生成 commit message 草稿。请先解决冲突。 ");
       }
     }
     await vscode.window.withProgress(
@@ -3167,10 +3186,6 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     // shown next to `→ （无法确定目标分支）` for the same push.
     const remotes = await this.remoteNames(cwd);
     let refspec = resolveRefspec(up, "HEAD", "");
-    // The confirmation names the destination this refspec writes, resolved the
-    // same way as the notification; `up.ref` would name a branch a review or
-    // custom push never touches. It is recomputed after the kind is chosen.
-    let label = `推送到 ${pushDestination(up.remote, refspec, remotes)}`;
     let kind: PushKind = "normal";
     if (template.trim()) {
       const choice = await vscode.window.showQuickPick(
@@ -3187,7 +3202,6 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
       if ((choice as any).kind === "review") {
         kind = "review";
         refspec = resolveRefspec(up, "HEAD", template);
-        label = `评审推送到 ${pushDestination(up.remote, refspec, remotes)}`;
       } else if ((choice as any).kind === "custom") {
         const input = await vscode.window.showInputBox({
           prompt: "输入 refspec（可用 ${tip} / ${branch} 占位符，${tip} 解析为 HEAD）",
@@ -3198,17 +3212,7 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
         }
         kind = "custom";
         refspec = resolveRefspec(up, "HEAD", input);
-        label = `自定义推送到 ${pushDestination(up.remote, refspec, remotes)}`;
       }
-    }
-
-    const confirm = await vscode.window.showWarningMessage(
-      `${label}？（${refspec}）`,
-      { modal: true },
-      "Push"
-    );
-    if (confirm !== "Push") {
-      return;
     }
 
     // The destination comes from the resolved refspec, not `up.ref`: a review
@@ -3248,6 +3252,20 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     }
     const subject = subjectResult?.stdout.trim() ?? "";
     const described = deletion ? describeDeletion(kind, target) : describePush(kind, subject, target);
+
+    // The confirmation carries the same three facts as the progress title and
+    // the result toast: the kind of push, the commit message being published
+    // (never a hash), and the destination. The raw refspec follows as the
+    // precise "what exactly will be sent" detail; it is unreadable on its own,
+    // so it must not be the only thing the dialog shows.
+    const confirm = await vscode.window.showWarningMessage(
+      `${described}（refspec：${refspec}）`,
+      { modal: true },
+      "Push"
+    );
+    if (confirm !== "Push") {
+      return;
+    }
 
     const outcome = await vscode.window.withProgress(
       {

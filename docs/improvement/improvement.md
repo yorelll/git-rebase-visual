@@ -326,6 +326,41 @@
   * 红/绿：把 `operation` 前缀从告警文案中去掉 → 既有告警用例的新断言 `the warning names which rewrite lost the locked patch` 变红（`actual` 以 `改写后未找到` 开头）；恢复后绿。
 * **验证**：两个类型检查零输出；受影响套件 5 + 22 + 20 + 17 + 1 = **65/65** 绿；完整套件 **329 项 / 48 个文件，pass 329 / fail 0 / skipped 0，runner 退出码 0**（此前 326，本轮 +3）。VSIX 从删除后的 `dist-vsix/` 重建，仍为 12 个条目并通过白名单校验；包内 `dist/extension.js` 与现场 `node esbuild.js` 的 sha256 均为 `9c7731d3…`。三处计数已同步：`docs/summary/summary.md`、`RELEASE.md`、`docs/release-notes/0.8.3.md`。
 
+### P3-13. 用户反馈：AI 入口收敛、Compose 取消无法关闭、推送确认缺少三要素
+
+> 来源：用户报告，基线 `1e463f35dbf3b1874e5dcaa2abe8a11eb07235cd`（`1e463f3`，`main`）之上的未提交工作树。两个问题都不是评审发现：一个是入口重复与 webview 不支持的 `confirm`，一个是 0.8.3 已统一的三要素文案漏掉了确认框。
+
+* **问题 1a（AI 入口与 `messageOnly`）**——AI 入口只保留两个，和用户实际操作路径一致：
+  1. commit 右键 `AI 生成 message…`（`media/main.js` 的 `sendCompose(c, true)`）；
+  2. Staged Changes 中 restore 旁的 `✦ AI 生成 message 并提交暂存区`。
+
+  edit-stop 的 `AI 仅生成 message（不提交）` 与 `更多提交选项` 内的同名入口已删除；`messageOnly` 随之从 `ComposePayload`、会话身份、Compose HTML、标题和 `apply` 分支中整体删除，`src/ui/composePolicy.ts` 与 `test/composePolicy.test.ts` 一并删除。暂停中的 rebase gate 保留原有非 AI edit-stop amend/new 语义，并新增 staged AI `openCompose` / `generate` 例外，使“编辑中先暂存、再用 Staged Changes 入口生成”这条唯一路径可用；冲突存在时生成仍按既有语义被拒绝（改动尚不稳定），所有暂停状态下的 `apply` 都被拒绝。
+* **问题 1b（生成与写入严格分离）**——`generate` 只把模型输出填进编辑器，不执行任何 Git 写操作；只有 `apply` 才使用**用户编辑后的** message。staged 入口走 `commitIndex`（`git commit -s -m`），commit 入口走既有 reword 路径。`test/composeAiFlow.test.ts` 用真实 provider + 真实临时仓库 + mock SSE 覆盖 3 条：staged 生成后不产生 commit、编辑后 apply 的新 commit 正文精确等于编辑内容且带 `Signed-off-by`、index 干净；commit 生成后不启动 rebase/不重写、apply 后旧生成文本不出现；edit-stop 中 staged AI 可生成但 HEAD 不变、`apply` 返回 `applyFailed`。
+* **问题 1c（取消/Escape 不关闭）**——根因是 `src/ui/composePanel.ts` 的 inline script：
+  ```js
+  $('close').onclick=()=>{if(dirty&&!confirm('放弃未保存的 message 草稿？'))return;post('closeCompose',…)}
+  ```
+  `window.confirm` 在 VS Code webview 中不受支持，调用即返回 false，dirty 状态（生成后、编辑后）永远到不了 `post`；Escape 也经由 `$('close').click()`。现在关闭按钮无论 dirty 与否都发送一次 `closeCompose`。安全性由宿主侧保证：`closeCompose` 保留 recovered draft，`onDidDispose` 不丢弃；dirty 时额外发一条 info toast 说明草稿已保留。`test/composePanelClose.test.ts` 加载真实 ComposePanel HTML 与 inline script，在 idle / dirty / generating / generated / edited 五种状态断言取消与 Escape 各发送恰好一次 `closeCompose`，并断言关闭后重开仍收到原草稿。
+  * **红/绿**：把 close handler、两个 draft-only 入口和推送确认文案一起改回基线形态后，`composePanelClose` 的 `edited: Cancel posts exactly one closeCompose` 失败（actual 0 / expected 1），`webviewDom` 的“no draft-only entry in Changes/更多提交选项”失败；恢复后全绿。
+* **问题 2（推送确认框只有目的地）**——确认框现在与进度标题、结果 toast 使用同一份 `describePush(kind, subject, target)` 三要素文案，并把原始 refspec 作为精确细节放在其后：`${described}（refspec：${refspec}）`。`target` / 删除判定 / `pushSource` / `git log`（`withPositionals`）全部移到确认框之前；源端不可解析时在弹框和推送之前可见地中止。`test/pushNotification.test.ts` 对 review / normal / custom / `HEAD~1:refs/heads/older` / 删除 refspec 断言完整确认文本，并新增“不可解析源端不弹框、不推送、远端无 ref”用例。
+  * **红/绿**：把确认框改回旧的 `label？（refspec）` 形态后，各用例得到旧文案，例如 `推送到 origin/master？（HEAD:refs/heads/master）`、`评审推送到 origin:refs/for/master？（HEAD:refs/for/master）`、`自定义推送到 origin/hotfix？（HEAD:refs/heads/hotfix）`、`自定义推送到 origin/older？（HEAD~1:refs/heads/older）`、`自定义推送到 origin/obsolete？（:refs/heads/obsolete）`；恢复后全部按三要素+refspec 通过。另把确认框移回 subject 计算之前（旧顺序）后，“不可解析源端”用例变红：`no confirmation is shown for a push that cannot be described`，actual 为 `[{ level: "warn", text: "推送到 origin/never？（definitely-not-a-ref:refs/heads/never）" }]`、expected `[]`；恢复后通过。
+* **验证**：两个类型检查零输出；完整套件 **333 项 / 49 个文件，pass 332 / fail 0 / skipped 1，runner 退出码 0**（此前 329/48；新增 `composeAiFlow` 3 条与 `composePanelClose` 2 条，净增 4，另 1 条为无 `sh` 环境下既有的 POSIX round-trip 跳过）。三处计数与行为说明已同步：`docs/summary/summary.md`、`RELEASE.md`、`docs/release-notes/0.8.3.md`，`README.md` 同步入口/取消语义。VSIX 从删除后的 `dist-vsix/` 重建，白名单仍为 12 个条目；本机 PATH 没有 `unzip`，`package-vsix.js` 在打包成功后于校验步骤报 `ENOENT`，因此用 .NET `ZipFile` 只读核对了同一份 `expectedEntries`（12/12，无缺失、无多余），并确认包内 `extension/dist/extension.js` 与现场 `node esbuild.js` 的 sha256 均为 `1fbeb46100ff4b314b36f58b63fd3e8b6d473b7ed0c1e5be928525c1a7cff073`。未改版本号，未提交、未打 tag、未推送。
+
+### P3-14. `code-review-0-8-25.md` 跟进：P2-1 与三项观察
+
+> 来源：`code-review-0-8-25.md` 第四节。该轮确认 P3-13 的入口收敛、staged 端到端流程、推送确认三要素、注入保护与 `composePolicy` 删除均正确；只有 P2-1 阻塞，另有 P4-1 文档失真和三项观察。本次按任务分配修复 P2-1、P4-1、观察 1、观察 3、观察 4；观察 2（确认框前的 subject 读取在锁内）按任务明确不在本轮范围。
+
+* **\[x] P2-1（阻塞）——脏草稿面板被新目标顶替后，取消/Escape 无法关闭。** 根因是宿主与页面各自保留了不同的 active 会话：`ComposePanel.open(B)` 无条件把宿主 `active` 切到 B，页面因脏草稿拒绝覆盖并继续显示 A，取消时页面发送 A 的 session，`closeCompose` 的 `acceptsActiveSession` 对 B 返回 false。修复选择**让宿主跟随页面的拒绝**，而不是在 `closeCompose` 里加特例：页面在显示“目标 commit 已变化”警告时发送 `composeRefused`（携带仍显示的 A 与刚刚被拒的 B），`ComposePanel` 校验被拒的确实是当前 active 后才把 `active` 和 delivery 恢复为页面仍显示的 A。这样宿主与页面在源头上重新一致，取消、Escape、应用都继续针对用户眼前的目标；若只给 `closeCompose` 开口子，`apply`/`generate` 仍会在 A 的页面与 B 的 active 之间错位。旧/保留文档不能关闭较新目标的保护**原样保留**：`composeRefused` 只有在被拒提议仍等于当前 active 时才生效，晚到的拒绝不会撤销已经接受的新目标。
+  * 新测试 `test/composeTargetSwitch.test.ts`（真实 provider + 单个真实 ComposePanel + 两个 commit 目标）：在 A 输入脏草稿 → 打开 B → 断言页面出现警告且宿主 active 仍为 A → 点击取消 → 断言面板 `dispose`；随后重开 A，断言 `openCompose.draft` 精确等于原草稿。第二例在干净页面接受 B 后，用 A 的旧 session 调 `closeCompose`，断言面板未 dispose、B 仍是 active。
+  * 红/绿：修复前第一例在“宿主跟随页面拒绝”断言处变红（actual 为 B 的 session、expected 为 A 的 session，随后旧 `closeCompose` 会在会话校验处直接 return）；临时删掉页面发送的 `composeRefused` 后同一断言再次变红，证明“页面报告拒绝”是生效链路的一部分；临时删掉 `closeCompose` 的 `acceptsActiveSession` 校验后第二例变红（旧 session 真的 dispose 了新目标）。恢复后两例均绿。
+* **\[x] P4-1（文档）——`copyText` 路径被误写成已删除。** 实际删除的只有 draft-only 的“复制 message”按钮/分支；commit 详情 tooltip 的“复制完整 message”仍使用 `copyText`（read 白名单与宿主 `case "copyText"` 保留）。`RELEASE.md` 与 `docs/release-notes/0.8.3.md` 已改为准确表述，避免下一轮按文档误删真实功能。
+* **\[x] 观察 1——暂停 rebase 时 commit 右键仍提供会被宿主拒绝的 AI 项。** `media/main.js` 的单 commit 菜单在 `state.rebaseInProgress` 时把 **AI 生成 message…** 置为 disabled，并给出“变基进行中；如需 AI message，请先暂存改动并使用暂存区的 ✦”的可读理由；其它状态保持可用。`webviewDom` 的七态矩阵在三个暂停状态断言 disabled、理由文本与“点击不发送任何消息”。
+* **\[x] 观察 3——没有页面级“应用”按钮测试。** `test/composePanelClose.test.ts` 新增 JSDOM 用例：先收到 `genResult` 让模型文本填入两个字段，再手写修改 subject 与 body，点击 **应用**，断言只发送一条 `apply`，`message` 精确等于 `feat: edited subject\n\nedited body`（不含生成文本）且携带当前 session/revision。
+* **\[x] 观察 4——多选菜单残留禁用 AI 占位项。** 从 `media/main.js` 的多选菜单删除该占位项（其它 disabled 项保留）；`webviewDom` 的多选用例新增断言 `menuText` 完全不含“AI 生成 message”。
+* **\[ ] P4-1（测试覆盖，既有，不阻塞）——剩余 `copyText` 只有协议分类断言。** `test/webviewProtocolState.test.ts:68` 只断言它是 `read` intent；没有任何用例断言“点击复制完整 message → 写入剪贴板并提示”。代码路径完整（宿主 `case "copyText"`、read 白名单、tooltip 调用均在），但若将来误删 handler 或调用点，现有测试不会变红。建议下一轮补一条宿主级用例（stub 记录 `clipboard.writeText` 入参）或 webview 用例（断言 tooltip 发出的 `copyText.text` 等于该 commit 的完整 message）。
+* **\[ ] P4-2（交互文案，新路径残留，不阻塞）——宿主跟随拒绝后页面警告未清除。** 脏草稿拒绝新目标、宿主把 `active` 恢复为页面仍显示的 A 之后，“目标 commit 已变化；当前草稿未被覆盖。请确认后重新打开目标。”仍留在页面上，而该提示此时已不成立（应用/取消都针对 A）。功能无误，只是文案误导。建议宿主恢复后回发一条确认消息清除或改写该警告。
+* **验证**：两个类型检查零输出；受影响 7 个套件合计 **68/68** 绿（`composeTargetSwitch` 2 + `composePanelClose` 3 + `composePanelState` 9 + `webviewDom` 13 + `composeAiFlow` 3 + `pushNotification` 21 + `pushIsolation` 17）；完整套件 **336 项 / 50 个文件，pass 336 / fail 0 / skipped 0，runner 退出码 0**（本机 Git Bash 的 PATH 提供 `sh`，既有 `rebaseEngine` POSIX 往返用例也执行并通过；在没有 `sh` 的 PATH 上该用例会自动跳过）。VSIX 从删除后的 `dist-vsix/` 重建，仍为 12 个条目并通过白名单校验；包内 `extension/dist/extension.js` 的 sha256 为 `483dc41c282c9e294f4775563d353b7fcbf70df0de4e28691b10afa376cb13f3`，与现场重新执行 `node esbuild.js` 的产物逐字节相同，`media/main.js`、`readme.md`、`package.json` 也与工作区逐字节相同。未改版本号，未提交、未打 tag、未推送。
+
 ## 验收原则
 所有后续历史改写功能应满足：
 

@@ -197,6 +197,9 @@ test("actual webview context menus reconcile selection with their pointer target
     assert.match(menuText, /已选择 2 个 commit/);
     assert.match(menuText, /批量删除 commit/);
     assert.match(menuText, /编辑 message/);
+    // AI exists in exactly two executable places; the batch menu has no entry
+    // at all, not even a disabled placeholder.
+    assert.doesNotMatch(menuText, /AI 生成 message/, "the batch menu has no AI entry");
     const edit = [...view.dom.window.document.querySelectorAll<HTMLButtonElement>("#menu button")].find((button) => button.textContent?.includes("编辑 message"));
     assert.ok(edit?.classList.contains("disabled"), "single-commit action is disabled for a retained batch");
     const bulkGeneratedDiff = [...view.dom.window.document.querySelectorAll<HTMLButtonElement>("#menu button")]
@@ -322,24 +325,34 @@ test("actual webview worktree rows expose paths at rest and route file and secti
 });
 
 /**
- * `messageOnly` is the only compose entry that produces a message without
- * writing to Git; every other entry ends in a commit. It must therefore exist
- * wherever the panel offers no other draft route, and may be omitted only where
- * it is genuinely redundant.
+ * The user asked for AI-generated commit messages in exactly two places:
  *
- * This matrix is the regression guard for a real defect: the entry was once
- * removed from every non-edit-stop state, which silently deleted both the only
- * `mode: "working"` draft (nothing staged) and the only draft path during a
- * conflict or plain pause. The counts are per region because an edit stop
- * legitimately renders the entry twice — banner and Changes group — and both
- * post the same message.
+ *   1. a commit's context menu — `AI 生成 message…`; and
+ *   2. the Staged Changes group — `✦ AI 生成 message 并提交暂存区`, next to
+ *      unstage.
+ *
+ * The old draft-only entry (`AI 仅生成 message（不提交）`) is gone from both the
+ * edit-stop banner and 更多提交选项. This matrix keeps the per-state coverage the
+ * old draft-entry test provided (idle with all/none/mixed staged, paused,
+ * conflict, edit stop) but now asserts the absence of that entry and the exact
+ * payloads of the two allowed ones. It is deliberately per region: a paused edit
+ * stop must not grow a banner AI action while the normal Staged Changes entry
+ * stays available.
  */
-test("the draft-only entry appears in every state that has no other draft route", () => {
+test("only the two allowed AI compose entries exist in every UI state", () => {
   const view = createHarness();
   try {
-    const draftButtons = (region: string): HTMLButtonElement[] =>
+    // Icon buttons (`✦`, `↶`) carry their meaning in `aria-label`, not
+    // textContent, so search both. Do not search `title`: ordinary buttons use
+    // it for tooltip prose (the edit-stop 新建 commit tooltip mentions AI)
+    // without being an AI entry.
+    const buttonLabel = (button: HTMLButtonElement): string =>
+      [button.textContent ?? "", button.getAttribute("aria-label") ?? ""].join(" ");
+    const textButtons = (region: string, predicate: (text: string) => boolean): HTMLButtonElement[] =>
       [...view.dom.window.document.querySelectorAll(`${region} button`)]
-        .filter((button) => (button.textContent ?? "").includes("仅生成 message")) as HTMLButtonElement[];
+        .filter((button) => predicate(buttonLabel(button as HTMLButtonElement))) as HTMLButtonElement[];
+    const draftButtons = (region: string) => textButtons(region, (text) => text.includes("仅生成 message"));
+    const aiButtons = (region: string) => textButtons(region, (text) => text.includes("AI"));
 
     const files = {
       both: [
@@ -352,29 +365,16 @@ test("the draft-only entry appears in every state that has no other draft route"
 
     const cases: {
       name: string;
-      expectChanges: number;
-      expectBanner: number;
-      expectMode?: string;
+      expectStagedEntry: number;
       extra: Record<string, unknown>;
     }[] = [
-      // The one state where the entry duplicated Staged Changes' ✦: idle with
-      // everything staged, so nothing is added by a second draft route.
-      { name: "idle, all staged", expectChanges: 0, expectBanner: 0, extra: { hasStaged: true, hasUnstaged: false, stagedCount: 1, unstagedCount: 0, changes: files.stagedOnly } },
-      // Nothing staged: `mode: "working"` is the only draft onto the worktree.
-      { name: "idle, nothing staged", expectChanges: 1, expectBanner: 0, expectMode: "working", extra: { hasStaged: false, hasUnstaged: true, stagedCount: 0, unstagedCount: 1, changes: files.workingOnly } },
-      // Mixed idle: still offered, because the worktree has changes of its own
-      // and this is the only entry that can draft against the working side.
-      { name: "idle, mixed", expectChanges: 1, expectBanner: 0, expectMode: "staged", extra: { hasStaged: true, hasUnstaged: true, stagedCount: 1, unstagedCount: 1, changes: files.both } },
-      // A paused rebase offers only Continue/Skip/Abort in the banner, and the
-      // host's pause policy rejects every other compose entry.
-      { name: "rebase paused", expectChanges: 1, expectBanner: 0, expectMode: "staged", extra: { rebaseInProgress: true, pausedReason: "paused", hasStaged: true, hasUnstaged: false, stagedCount: 1, unstagedCount: 0, changes: files.stagedOnly } },
-      { name: "rebase paused, working only", expectChanges: 1, expectBanner: 0, expectMode: "working", extra: { rebaseInProgress: true, pausedReason: "paused", hasStaged: false, hasUnstaged: true, stagedCount: 0, unstagedCount: 1, changes: files.workingOnly } },
-      // A conflict is the state where "wait until resolved" would otherwise
-      // leave no way to draft at all. The host still refuses AI generation
-      // until the conflict is resolved, which is what its own message says.
-      { name: "conflict", expectChanges: 1, expectBanner: 0, expectMode: "staged", extra: { rebaseInProgress: true, pausedReason: "conflict", conflictCount: 1, conflictFiles: ["src/a.ts"], hasStaged: true, hasUnstaged: true, stagedCount: 1, unstagedCount: 1, changes: files.both } },
-      // An edit stop adds the banner copy on top of the Changes one.
-      { name: "edit stop", expectChanges: 1, expectBanner: 1, expectMode: "staged", extra: { rebaseInProgress: true, pausedReason: "edit", stoppedAt: a, hasStaged: true, hasUnstaged: false, stagedCount: 1, unstagedCount: 0, changes: files.stagedOnly } },
+      { name: "idle, all staged", expectStagedEntry: 1, extra: { hasStaged: true, hasUnstaged: false, stagedCount: 1, unstagedCount: 0, changes: files.stagedOnly } },
+      { name: "idle, nothing staged", expectStagedEntry: 0, extra: { hasStaged: false, hasUnstaged: true, stagedCount: 0, unstagedCount: 1, changes: files.workingOnly } },
+      { name: "idle, mixed", expectStagedEntry: 1, extra: { hasStaged: true, hasUnstaged: true, stagedCount: 1, unstagedCount: 1, changes: files.both } },
+      { name: "rebase paused", expectStagedEntry: 1, extra: { rebaseInProgress: true, pausedReason: "paused", hasStaged: true, hasUnstaged: false, stagedCount: 1, unstagedCount: 0, changes: files.stagedOnly } },
+      { name: "rebase paused, working only", expectStagedEntry: 0, extra: { rebaseInProgress: true, pausedReason: "paused", hasStaged: false, hasUnstaged: true, stagedCount: 0, unstagedCount: 1, changes: files.workingOnly } },
+      { name: "conflict", expectStagedEntry: 1, extra: { rebaseInProgress: true, pausedReason: "conflict", conflictCount: 1, conflictFiles: ["src/a.ts"], hasStaged: true, hasUnstaged: true, stagedCount: 1, unstagedCount: 1, changes: files.both } },
+      { name: "edit stop", expectStagedEntry: 1, extra: { rebaseInProgress: true, pausedReason: "edit", stoppedAt: a, hasStaged: true, hasUnstaged: false, stagedCount: 1, unstagedCount: 0, changes: files.stagedOnly } },
     ];
 
     for (const [index, item] of cases.entries()) {
@@ -382,29 +382,55 @@ test("the draft-only entry appears in every state that has no other draft route"
       Object.assign(next, item.extra);
       view.postState(next);
 
-      const inChanges = draftButtons("#changes");
-      const inBanner = draftButtons("#banner");
-      assert.equal(inChanges.length, item.expectChanges, `${item.name}: Changes-group count`);
-      assert.equal(inBanner.length, item.expectBanner, `${item.name}: banner count`);
+      // The draft-only entry is gone everywhere, including 更多提交选项 and the
+      // edit-stop banner.
+      assert.deepEqual(draftButtons("#changes"), [], `${item.name}: no draft-only entry in Changes/更多提交选项`);
+      assert.deepEqual(draftButtons("#banner"), [], `${item.name}: no draft-only entry in the banner`);
+      assert.deepEqual(aiButtons("#banner"), [], `${item.name}: no AI action in the banner, even at an edit stop`);
 
-      if (!item.expectMode) {
-        assert.equal(inChanges.length + inBanner.length, 0, `${item.name}: no draft entry anywhere`);
-        continue;
+      const stagedEntries = aiButtons("#changes");
+      assert.equal(stagedEntries.length, item.expectStagedEntry, `${item.name}: Staged Changes AI entry count`);
+      if (item.expectStagedEntry) {
+        assert.match(stagedEntries[0].getAttribute("aria-label") ?? "", /AI 生成 message 并提交暂存区/, `${item.name}: the staged entry keeps its label`);
+        const header = stagedEntries[0].closest(".file-group-header") as HTMLElement;
+        const headerButtons = [...header.querySelectorAll("button")];
+        assert.equal(headerButtons.indexOf(stagedEntries[0]), 1, `${item.name}: the AI entry sits next to restore/unstage`);
+        assert.equal(headerButtons[0].getAttribute("aria-label"), "撤销全部暂存", `${item.name}: its neighbour is still unstage`);
+        stagedEntries[0].click();
+        const posted = JSON.parse(JSON.stringify(view.messages.at(-1)));
+        assert.equal(posted.type, "openCompose", `${item.name}: the staged entry opens Compose`);
+        assert.equal(posted.mode, "staged", `${item.name}: it composes from the index`);
+        assert.equal(posted.ai, true, `${item.name}: it is the AI entry`);
+        assert.equal(posted.thenEdit, false, `${item.name}: it applies a commit, not an edit stop`);
+        assert.equal("messageOnly" in posted, false, `${item.name}: the removed draft-only mode is not sent`);
       }
-      inChanges[0].click();
-      const posted = JSON.parse(JSON.stringify(view.messages.at(-1)));
-      assert.equal(posted.type, "openCompose", `${item.name}: opens the compose panel`);
-      assert.equal(posted.mode, item.expectMode, `${item.name}: drafts against the right side`);
-      assert.equal(posted.messageOnly, true, `${item.name}: never writes to Git`);
-      assert.equal(posted.ai, true, `${item.name}: it is the AI draft route`);
 
-      if (item.expectBanner === 1) {
-        inBanner[0].click();
-        assert.deepEqual(
-          JSON.parse(JSON.stringify(view.messages.at(-1))),
-          posted,
-          `${item.name}: the banner and Changes copies post the same request`
+      // The other allowed entry is the commit context menu: executable outside
+      // a pause, disabled with an explanation once a rebase is in progress.
+      view.row(a).dispatchEvent(mouseEvent(view.dom.window, "contextmenu", { clientX: 10, clientY: 10 }));
+      assert.deepEqual(draftButtons("#menu"), [], `${item.name}: no draft-only entry in the context menu`);
+      const menuAi = textButtons("#menu", (text) => text.includes("AI 生成 message…"));
+      assert.equal(menuAi.length, 1, `${item.name}: the single-commit menu has the one AI entry`);
+      if (item.extra.rebaseInProgress) {
+        assert.ok(menuAi[0].classList.contains("disabled"), `${item.name}: the AI entry is disabled during a paused rebase`);
+        assert.equal(
+          menuAi[0].title,
+          "变基进行中；如需 AI message，请先暂存改动并使用暂存区的 ✦",
+          `${item.name}: and points at the staged route`
         );
+        view.messages.length = 0;
+        menuAi[0].click();
+        assert.deepEqual(view.messages, [], `${item.name}: a disabled AI entry posts nothing`);
+      } else {
+        assert.equal(menuAi[0].classList.contains("disabled"), false, `${item.name}: the AI entry stays enabled normally`);
+        menuAi[0].click();
+        const fromMenu = JSON.parse(JSON.stringify(view.messages.at(-1)));
+        assert.equal(fromMenu.type, "openCompose", `${item.name}: the menu opens Compose`);
+        assert.equal(fromMenu.mode, "commit", `${item.name}: it composes for the commit`);
+        assert.equal(fromMenu.hash, a, `${item.name}: it targets the right-clicked commit`);
+        assert.equal(fromMenu.ai, true, `${item.name}: it is the AI entry`);
+        assert.equal(fromMenu.thenEdit, false, `${item.name}: it rewrites the message`);
+        assert.equal("messageOnly" in fromMenu, false, `${item.name}: the removed draft-only mode is not sent`);
       }
     }
   } finally {

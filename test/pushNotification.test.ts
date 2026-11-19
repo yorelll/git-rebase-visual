@@ -151,6 +151,13 @@ test("the progress title and success toast carry kind, subject and branch", asyn
   assert.doesNotMatch(harness.titles.at(-1)!, HASH);
   assert.doesNotMatch(harness.toasts.at(-1)!.text, HASH);
   assert.doesNotMatch(harness.toasts.at(-1)!.text, new RegExp(head.slice(0, 7)), "not even the short hash");
+  // The dialog used to show only the refspec, e.g. `推送到 origin/master？（HEAD:refs/heads/master）`.
+  // It must carry the same three facts as the other two surfaces, with the raw
+  // refspec kept afterwards as the precise detail.
+  const confirm = stub.messages.filter((entry) => entry.level === "warn").at(-1);
+  assert.ok(confirm, "the push was confirmed");
+  assert.equal(confirm!.text, `${expected}（refspec：HEAD:refs/heads/master）`, "the dialog states kind, subject and destination first");
+  assert.doesNotMatch(confirm!.text, HASH);
   assert.equal(git(cwd, ["rev-parse", "origin/master"]), head, "the push really happened");
 });
 
@@ -231,11 +238,11 @@ test("a review push reports the ref it created, not the upstream branch", async 
   assert.equal(harness.titles.at(-1), `推送中：${expected}`, "the progress title names the review ref");
   assert.equal(harness.toasts.at(-1)?.text, `已推送：${expected}`, "so does the success toast");
   assert.doesNotMatch(harness.toasts.at(-1)!.text, /origin\/master/, "the upstream branch was not touched");
-  // The confirmation shown before pushing names the same destination: it used
-  // to say `推送到 origin/master？` for a review push.
+  // The confirmation shown before pushing names the same three facts, exactly
+  // like the title and the toast; it used to say `推送到 origin/master？`.
   const confirm = stub.messages.filter((entry) => entry.level === "warn").at(-1);
   assert.ok(confirm, "the push was confirmed");
-  assert.match(confirm!.text, /评审推送到 origin:refs\/for\/master/, "the confirmation names the review ref");
+  assert.equal(confirm!.text, `${expected}（refspec：HEAD:refs/for/master）`, "the dialog names kind, subject and review ref");
   // The push really happened, and it created the review ref on the remote while
   // leaving the upstream branch where it was.
   const head = git(cwd, ["rev-parse", "HEAD"]);
@@ -281,8 +288,8 @@ test("a custom refspec reports the branch it actually moved", async (t) => {
   assert.doesNotMatch(harness.toasts.at(-1)!.text, /origin\/master/);
   const confirm = stub.messages.filter((entry) => entry.level === "warn").at(-1);
   assert.ok(confirm, "the push was confirmed");
-  assert.match(confirm!.text, /自定义推送到 origin\/hotfix/, "the confirmation names the branch that will move");
-  assert.doesNotMatch(confirm!.text, /推送到 origin\/master/, "not the untouched upstream branch");
+  assert.equal(confirm!.text, `${expected}（refspec：HEAD:refs/heads/hotfix）`, "the dialog names kind, subject and the branch that will move");
+  assert.doesNotMatch(confirm!.text, /origin\/master/, "not the untouched upstream branch");
   assert.equal(git(cwd, ["--git-dir", remote, "rev-parse", "refs/heads/hotfix"]), git(cwd, ["rev-parse", "HEAD"]), "hotfix really moved on the remote");
 });
 
@@ -561,7 +568,51 @@ test("a custom refspec publishing HEAD~1 names that commit, not HEAD", async (t)
   assert.equal(harness.titles.at(-1), "推送中：" + expected, "the title names the commit the refspec publishes");
   assert.equal(harness.toasts.at(-1)?.text, "已推送：" + expected);
   assert.doesNotMatch(harness.toasts.at(-1)!.text, new RegExp(headSubject), "not HEAD's subject");
+  const confirm = stub.messages.filter((entry) => entry.level === "warn").at(-1);
+  assert.ok(confirm, "the push was confirmed");
+  assert.equal(confirm!.text, `${expected}（refspec：HEAD~1:refs/heads/older）`, "the dialog also names HEAD~1's subject, not HEAD's");
+  assert.doesNotMatch(confirm!.text, new RegExp(headSubject), "and does not quote the commit HEAD points at");
   assert.equal(git(cwd, ["--git-dir", remote, "rev-parse", "refs/heads/older"]), olderSha, "and that commit really landed");
+});
+
+/**
+ * Computing the subject moved ahead of the confirmation so the dialog can show
+ * it. A source Git cannot resolve must still abort before the push and say why,
+ * not become a blank subject on a push that then goes ahead.
+ */
+test("an unparseable refspec source aborts before the push with a visible message", async (t) => {
+  const harness = createHarness(t);
+  const cwd = harness.cwd;
+  const remote = remoteFor(cwd);
+  t.after(() => removeRepo(remote));
+
+  git(cwd, ["init", "--bare", "-q", remote]);
+  commitFile(cwd, "one.txt", "one\n", "first");
+  git(cwd, ["remote", "add", "origin", remote]);
+  git(cwd, ["push", "-q", "-u", "origin", "master"]);
+  commitFile(cwd, "two.txt", "two\n", "second");
+
+  stub.config["gitRebaseVisual.push.refspecTemplate"] = "HEAD:refs/for/${branch}";
+  stub.quickPick = { label: "自定义 refspec…", kind: "custom" };
+  stub.inputBox = "definitely-not-a-ref:refs/heads/never";
+  stub.choice = "Push";
+  await harness.provider.pushBranch();
+
+  const error = stub.messages.filter((entry) => entry.level === "error").at(-1);
+  assert.ok(error, "the failure is visible to the user");
+  assert.match(error!.text, /definitely-not-a-ref/, "it names the source it could not resolve");
+  assert.match(error!.text, /未执行推送/, "and says no push happened");
+  assert.deepEqual(harness.titles, [], "the progress surface never opened");
+  assert.deepEqual(
+    stub.messages.filter((entry) => entry.level === "warn"),
+    [],
+    "no confirmation is shown for a push that cannot be described"
+  );
+  assert.notEqual(
+    gitExit(cwd, ["--git-dir", remote, "rev-parse", "--verify", "--quiet", "refs/heads/never"]),
+    0,
+    "the remote received nothing"
+  );
 });
 
 /**
@@ -593,6 +644,10 @@ test("a deletion refspec does not claim a commit it never published", async (t) 
   assert.equal(harness.toasts.at(-1)?.text, "已推送：" + expected);
   assert.doesNotMatch(harness.toasts.at(-1)!.text, new RegExp(headSubject), "HEAD's subject is not claimed");
   assert.doesNotMatch(harness.toasts.at(-1)!.text, /""/, "no empty quotes either");
+  const confirm = stub.messages.filter((entry) => entry.level === "warn").at(-1);
+  assert.ok(confirm, "the deletion was confirmed");
+  assert.equal(confirm!.text, `${expected}（refspec：:refs/heads/obsolete）`, "the dialog keeps the deletion wording instead of inventing a subject");
+  assert.doesNotMatch(confirm!.text, new RegExp(headSubject), "and never claims HEAD's commit is being sent");
   assert.notEqual(
     gitExit(cwd, ["--git-dir", remote, "rev-parse", "--verify", "--quiet", "refs/heads/obsolete"]),
     0,

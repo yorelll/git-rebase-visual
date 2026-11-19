@@ -52,13 +52,13 @@
 多选 ≥2 个 commit 后，菜单提供 **批量锁定 commit**、**批量删除 commit** 与连续区间的 **生成 Diff…**；其余单项操作会禁用并说明原因。
 
 ### 4. commit message 编辑弹窗（reword / AI）
-右键菜单的 **编辑 message…** 与 **AI 生成 message…**、顶部 **未提交的改动** 区的 **仅生成 message（不提交）**（出现条件见下一节）、以及 edit 停靠时的 **追加到 … (amend)…** / **新建 commit…** 都会打开同一个 compose 弹窗：
+右键菜单的 **编辑 message…** 与 **AI 生成 message…**、顶部 **未提交的改动** 区中 Staged Changes 分组右侧的 **✦ AI 生成 message 并提交暂存区**、以及 edit 停靠时的 **追加到 … (amend)…** / **新建 commit…** 都会打开同一个 compose 弹窗：
 
 - **原始 message**：只读、可选中复制，方便与新内容对比。
 - **补充信息给 AI**（仅 AI 模式）：可填写额外上下文（如关联的链接、Issue 号），配合 **生成 / 重新生成** 按钮多次生成。
 - **Commit message**：可编辑的结果框，AI 生成的内容会填入这里，可整体替换、也可从原始 message 复制部分内容拼接。
 - **保留的 trailer**：若原 message 结尾含 `Change-Id:` / `Signed-off-by:` 等 trailer，会被单独识别并**只读展示**；应用时自动保留、不被修改（`IPCSDK-xxxx` 之类的行仍算正文，可编辑）。
-- **应用 / 取消**：应用期间对话框保留并锁定输入，只有宿主 Git 操作成功后才关闭；失败时保留手写 message、在对话框内显示错误并可重试。支持 `Ctrl/Cmd+Enter` 应用、`Esc` 取消。
+- **应用 / 取消**：应用期间对话框保留并锁定输入，只有宿主 Git 操作成功后才关闭；失败时保留手写 message、在对话框内显示错误并可重试。支持 `Ctrl/Cmd+Enter` 应用。**取消或 `Esc` 始终关闭面板**（无论是否已经生成/编辑）；未应用的草稿会保留，重新打开同一目标时恢复。
 - 支持基础键盘/无障碍操作：提交列表、菜单和弹窗带语义与焦点环；按 `Shift+F10` 或 Menu 键可打开当前 commit 的操作菜单。
 
 ### 5. 追加暂存区（把暂存区文件添加到已有 commit）
@@ -96,7 +96,7 @@
 
 - **受控 Undo**：每次成功历史改写都会记录私有 checkpoint、操作、before/after tip；工具栏、成功结果和历史入口可撤销。Undo 会验证当前分支、HEAD、工作区、rebase 状态、checkpoint 与已推送风险，优先使用 `git reset --keep`，不会把 `ORIG_HEAD + reset --hard` 作为不安全快捷方式。
 - **rebase 状态模型**：横幅与状态栏显示步骤 `N/M`、edit/conflict/paused 原因、冲突文件与待重放数量；待重放 commit 明确提示 hash 将在 Continue 后变化。无法可靠解析的外部 rebase 会显示未知状态，而不伪造进度。
-- **停靠工作区与 Skip**：edit 停靠提供 Amend 当前 commit、新建 commit、仅生成 message；Skip 仅在冲突暂停时可用，且会确认即将丢弃的 patch。
+- **停靠工作区与 Skip**：edit 停靠提供 Amend 当前 commit 与新建 commit；需要 AI message 时先暂存文件，再使用 Staged Changes 的 **✦** 入口（生成只写草稿，暂停期间不会应用）。Skip 仅在冲突暂停时可用，且会确认即将丢弃的 patch。
 - **更完整的操作能力**：支持 squash、fixup、复制 message 和只读 diff；首项、locked 当前/前驱及 rebase 中等不安全场景会禁用并解释。
 - **编辑器区 Compose Panel**：message 编辑迁移到独立编辑器区 Panel，支持 subject/body、50/72 提示、72 列参考、折叠原 message/trailer、AI cancel/replace/append/恢复 draft。
 - **筛选与键盘**：支持搜索、Ctrl/Cmd 多选、连续 locked run 安全折叠；可用 Space、Arrow、Home/End、Alt+Arrow 和 Escape 完成键盘重排，菜单支持方向键导航。
@@ -107,12 +107,12 @@
 - 本地执行 `npm run test:coverage`：在上述测试基础上输出 Node 测试覆盖率报告。
 - 推送版本标签触发 Release 时，GitHub Actions 会依次执行类型检查、覆盖率测试、VSIX 打包、VSIX 内容检查以及 RELEASE.md 版本记录检查；任一步失败都不会创建 Release。
 
-### 9. 为未提交的改动生成 message 并提交
-当工作区有未提交改动时，面板顶部出现 **未提交的改动** 区；展开 **更多提交选项** 后提供：
-- **AI 生成 message 并提交暂存区**（Staged Changes 分组右侧的 `✦`，需先配置 LLM）：基于暂存内容生成 message，确认后提交暂存区（`git commit -s`，仅提交暂存内容）。
-- **仅生成 message（不提交）**（需先配置 LLM）：基于暂存内容（无暂存时基于工作区）生成草稿，只复制到弹窗，不执行任何 Git 写操作。这是**唯一**不写 Git 的 compose 入口：其他入口（Staged Changes 的 `✦`、Amend、**新建 commit**、提交右键菜单）最终都会提交，弹窗里的 **复制 message** 也只在 `messageOnly` 模式下才显示。
-  - **出现的位置**：edit 停靠时**横幅的编辑操作区与「更多提交选项」各出现一次**（两处发出的是同一条消息）；冲突暂停与普通暂停时只在「更多提交选项」出现一次；**未暂存任何内容时**也会出现（此时它是唯一能以 `working` 模式针对工作区起草的入口）。
-  - **唯一省略的情况**：空闲、且改动全部已暂存（无未暂存内容）——这一状态下用户认为它与 Staged Changes 的 `✦` 重复。需要说明的是，即便在这里它也仍是唯一不写 Git 的路径，省略它是遵循用户的要求，而不是因为它已被完全覆盖。
+### 9. 为暂存区生成 message 并提交
+当工作区有未提交改动时，面板顶部出现 **未提交的改动** 区。Staged Changes 分组右侧的 **✦** 是**唯一**的暂存区 AI 入口（需先配置 LLM）：
+- 点击后打开同一个 Compose 弹窗。**生成**只把模型返回的 message 填入编辑框，不执行任何 Git 写操作；你可以自由修改 subject/body。
+- 只有 **应用** 才会写入 Git：对暂存区执行 `git commit -s`，提交内容仅限已暂存文件，commit message 使用你在弹窗里最终编辑的文本（不是模型最初返回的文本），并带 `Signed-off-by` trailer；应用成功后暂存区为空。
+- 该入口在空闲、暂停 rebase、冲突暂停与 edit 停靠时都保留。普通暂停与 edit 停靠期间**生成**仍可用（只读），但**应用**会被拒绝，直到 Continue 或 Abort；冲突暂停时生成会被拒绝（改动尚不稳定，需先解决冲突），入口仍可打开面板查看原因。edit 停靠没有额外的 AI 按钮，路径就是先暂存文件、再点这个 `✦`。
+- 没有“仅生成 message（不提交）”模式：不再存在第二个不写 Git 的草稿按钮，也不存在 `messageOnly` 协议字段。生成永远不提交；提交永远只由应用触发。
 - 文件行的 `+`、`↶`、`⌫` 分别用于暂存单个文件、恢复单个文件的工作区改动或撤销其暂存、删除未跟踪文件；分组标题提供 **暂存全部更改 / 恢复全部更改** 与 **撤销全部暂存**。`⌫`（未跟踪文件）与 Changes 分组的 `↶` 走同一条恢复通道，宿主按 `working` / `staged` 两种侧别校验：未跟踪文件是工作区侧的删除，Staged Changes 的 `↶` 是暂存侧的撤销。
 
 ### 10. 变基进行中（暂停状态）
