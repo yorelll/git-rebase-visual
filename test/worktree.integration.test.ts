@@ -16,6 +16,7 @@ import {
   restoreWorktreeChange,
   unstageAllWorktreeChanges,
 } from "../src/git/worktreeChanges";
+import { GitInvocationLog, setGitInvocationObserver } from "../src/git/gitRunner";
 import { createRepo, commitFile, git, gitExit, removeRepo } from "./helpers/gitTestRepo";
 
 test("stash apply --index restores staged and unstaged changes before explicit cleanup", async (t) => {
@@ -170,6 +171,38 @@ test("an untracked glob-named path is restored from ^3 without checking out its 
     fs.readFileSync(path.join(cwd, "br[1].txt"), "utf8").replace(/\r\n/g, "\n"),
     "TARGET-UNTRACKED\n",
     "the target's content came back correctly"
+  );
+});
+
+test("restoreUntrackedHalf checks out <stash>^3 without --end-of-options", async (t) => {
+  const cwd = createRepo();
+  t.after(() => removeRepo(cwd));
+  commitFile(cwd, "base.txt", "base\n", "base");
+  fs.writeFileSync(path.join(cwd, "restored.txt"), "untracked\n", "utf8");
+  const sha = await stashPush(cwd);
+  assert.ok(sha);
+
+  const observed: GitInvocationLog[] = [];
+  setGitInvocationObserver((entry) => observed.push(entry));
+  t.after(() => setGitInvocationObserver(undefined));
+
+  const result = await stashRestoreForAmend(cwd, sha!);
+  assert.equal(result.ok, true, `the restore succeeded: ${result.message}`);
+
+  const checkouts = observed.filter((entry) => entry.args[0] === "checkout");
+  assert.deepEqual(
+    checkouts.map((entry) => entry.args),
+    [["checkout", `${sha}^3`, "--", "restored.txt"]],
+    "the checkout argv is exactly the marker-free shape"
+  );
+  assert.equal(
+    checkouts[0].args.includes("--end-of-options"),
+    false,
+    "Git 2.31-2.34 treats the marker as a second ref"
+  );
+  assert.equal(
+    fs.readFileSync(path.join(cwd, "restored.txt"), "utf8").replace(/\r\n/g, "\n"),
+    "untracked\n"
   );
 });
 

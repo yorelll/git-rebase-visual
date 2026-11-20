@@ -1,5 +1,5 @@
 import * as fs from "fs";
-import { git, withPositionals } from "../git/gitRunner";
+import { git } from "../git/gitRunner";
 import { ChatMessage, LlmConfig, LlmRequestOptions, streamChat } from "./client";
 
 const BASE_PROMPT = `You are an expert software engineer writing a git commit message.
@@ -14,13 +14,15 @@ Rules:
  *
  * `hash` reaches `git show` as a positional, and this command keeps parsing
  * options after one: `git show --no-color --format= --output=<file>` exits 0 and
- * writes that file (measured). The caller (`RebaseViewProvider.generate`) now
- * derives the hash from the session the host created, but the marker is what
- * makes the *argument* safe regardless of how the caller got it — the same
- * defence the push subject lookup got.
+ * writes that file (measured). The 40-hex assertion below is the argument-level
+ * defence: a validated commit id cannot be option-shaped, so no marker is
+ * needed.
  */
 export async function getCommitDiff(cwd: string, hash: string): Promise<string> {
-  return git(withPositionals(["show", "--no-color", "--format="], [hash]), { cwd });
+  if (!/^[0-9a-f]{40}$/i.test(hash)) {
+    throw new Error("getCommitDiff: hash must be a full 40-hex commit id");
+  }
+  return git(["show", "--no-color", "--format=", hash], { cwd });
 }
 
 /** Diff of staged changes (the index). */

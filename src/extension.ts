@@ -6,6 +6,8 @@ import { createGitContentRequestStore } from "./ui/gitDiffRequestState";
 import { createGeneratedDiffSnapshotStore } from "./ui/generatedDiffDocument";
 import { GeneratedDiffProvider, generatedDiffScheme } from "./ui/generatedDiffProvider";
 import { setGitInvocationObserver } from "./git/gitRunner";
+import { gitVersionSync } from "./git/commitLog";
+import { createActivationProbe } from "./git/capabilityProbe";
 import { FileLogger, legacyLogRoot, logDirectory } from "./diagnostics/fileLogger";
 import { setDiagnosticsLogger, warnDiagnostic } from "./diagnostics/diagnostics";
 
@@ -18,9 +20,13 @@ export function activate(context: vscode.ExtensionContext): void {
   const logger = new FileLogger({ directory: logDirectory(version) });
   // Identify the exact build. Several VSIX versions can live in the repo root,
   // and "it still reports 0.7.1" is usually the wrong VSIX being installed, so
-  // version, path and host pid are recorded before anything else runs.
+  // version, path, Git version and host pid are recorded before anything else
+  // runs. 0.8.5's checkout regression was only diagnosable by asking the user
+  // for `git --version`; that answer now sits in the first log line.
+  const detectedGitVersion = gitVersionSync();
   logger.start([
     `version=${version}`,
+    `git=${detectedGitVersion ?? "not-found"}`,
     `extensionPath=${extensionPath}`,
     `vscode=${vscode.version}`,
     `platform=${process.platform}-${process.arch}`,
@@ -120,6 +126,32 @@ export function activate(context: vscode.ExtensionContext): void {
       setDiagnosticsLogger(undefined);
     })
   );
+
+  // One read-only capability check per activation. It is deliberately
+  // fire-and-forget: `activate()` must not wait for Git, and nothing here may
+  // throw into the extension host. Message handling and `refresh()` never call
+  // it, so it cannot run once per click or per repaint.
+  const activationProbe = createActivationProbe({
+    extensionVersion: version,
+    // The probe picks the first folder that is actually a repository. In a
+    // multi-root workspace index 0 may be a plain folder, and probing only it
+    // would skip the marker checks while reporting success.
+    cwd: vscode.workspace.workspaceFolders?.map((folder) => folder.uri.fsPath),
+    notifyInfo: (message) => {
+      void vscode.window.showInformationMessage(message);
+    },
+    notifyWarning: (message) => {
+      void vscode.window.showWarningMessage(message);
+    },
+    log: (level, message) => {
+      if (level === "warn") {
+        logger.warn("activation", message);
+      } else {
+        logger.info("activation", message);
+      }
+    },
+  });
+  void activationProbe.run();
 }
 
 export function deactivate(): void {

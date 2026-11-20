@@ -99,10 +99,125 @@ export const C_LOCALE: NodeJS.ProcessEnv = { LC_ALL: "C" };
  *
  * `--end-of-options` is the only general defence: Git itself rejects the marker
  * (or treats the following argument as a revision that does not exist) instead
- * of honouring it as an option. Use `withPositionals` so every such site reads
- * the same way.
+ * of honouring it as an option. Use `withPositionals` when a positional can
+ * carry user/settings data.
+ *
+ * Not every positional needs the marker. When its provenance proves it cannot
+ * begin with `-` — a full 40-hex commit id validated at the function boundary,
+ * an internal `refs/...`/`stash@{n}` name, or an argument already after `--` —
+ * the marker adds nothing and the argv is passed directly. The static guard
+ * therefore polices the calls that *do* use `withPositionals` (and direct
+ * `runGit` argv that already carries the marker); it does not demand that
+ * every positional go through it.
  */
 export const END_OF_OPTIONS = "--end-of-options";
+
+/**
+ * Subcommands that **reject** `--end-of-options` on a Git version this
+ * extension supports, and the alternative each site must use instead.
+ *
+ * This used to be prose only, which is how 0.8.5 shipped a `git checkout`
+ * call with the marker: it works on the maintainer's Git 2.53 and fails on
+ * Git 2.34 with `fatal: only one reference expected, 2 given`. Keeping the
+ * list executable — and checked by a static test that scans every file under
+ * `src/` — makes the next such call fail on any machine, independent of the
+ * installed Git.
+ */
+export const END_OF_OPTIONS_DENIED_SUBCOMMANDS: Readonly<Record<string, string>> = {
+  checkout:
+    'git checkout does not accept --end-of-options on Git 2.31-2.34 (it reads the marker as a second ref). Put paths after a "--" separator instead.',
+  "stash store":
+    'git stash store implements its own argument parsing and rejects --end-of-options. Validate the commit as a full 40-hex sha instead.',
+};
+
+/**
+ * Git global options that take their value as the *next* argv element. Skipping
+ * the value matters when locating the subcommand: filtering out only
+ * dash-prefixed tokens would mistake `protocol.version=2` (the value of `-c`)
+ * for the subcommand and hide a following `checkout`.
+ */
+const GLOBAL_OPTIONS_WITH_SEPARATE_VALUE = new Set([
+  "-c",
+  "-C",
+  "--git-dir",
+  "--work-tree",
+  "--namespace",
+  "--exec-path",
+  "--config-env",
+]);
+
+/**
+ * `git stash` options that take their value as the *next* argv element. Like
+ * the global options above, their value must be skipped when looking for the
+ * subcommand; otherwise `git stash -m store` would read the message `store` as
+ * a subcommand and falsely deny an argv that never calls `stash store`.
+ */
+const STASH_OPTIONS_WITH_SEPARATE_VALUE = new Set(["-m", "--message"]);
+
+/**
+ * The nested subcommand of `git stash`, if any.
+ *
+ * `git stash` accepts its own options *before* its subcommand (`git stash
+ * --quiet store`, `git stash -m <message> push`). Reading the first word after
+ * `stash` as the subcommand misses the former — which is exactly the shape
+ * that would append `--end-of-options` after `stash store` — and can mistake an
+ * option's value for a subcommand. So skip stash's options first.
+ *
+ * Only `stash store` is denied; every other subcommand comes back prefixed
+ * (`stash apply`, `stash push`) merely because it is not a denial key. A bare
+ * `git stash` (with or without options) returns `stash` and is never denied.
+ */
+function stashSubcommandOf(words: string[]): string {
+  let index = 1;
+  while (index < words.length) {
+    const arg = words[index];
+    if (arg === "--") {
+      index += 1;
+      break;
+    }
+    if (STASH_OPTIONS_WITH_SEPARATE_VALUE.has(arg)) {
+      index += 2;
+      continue;
+    }
+    if (arg.startsWith("-")) {
+      index += 1;
+      continue;
+    }
+    break;
+  }
+  const subcommand = words[index];
+  return subcommand ? `stash ${subcommand}` : "stash";
+}
+
+/**
+ * The subcommand named by an `options` array. `options` normally begins with
+ * the subcommand; `stash` is the only nested form in this codebase and is
+ * resolved past stash's own options. The exception is
+ * `pushGuard.pushRefspec`, which passes `[]` because the `push` already sits in
+ * the argv it is appending to — an empty array deliberately names no denied
+ * subcommand. Exported so the static guard uses exactly this parser instead of
+ * maintaining a divergent copy.
+ */
+export function subcommandOf(options: string[]): string {
+  let index = 0;
+  while (index < options.length) {
+    const arg = options[index];
+    if (GLOBAL_OPTIONS_WITH_SEPARATE_VALUE.has(arg)) {
+      index += 2;
+      continue;
+    }
+    if (arg.startsWith("-")) {
+      index += 1;
+      continue;
+    }
+    break;
+  }
+  const words = options.slice(index);
+  if (words[0] === "stash") {
+    return stashSubcommandOf(words);
+  }
+  return words[0] ?? "";
+}
 
 /**
  * `[...options, "--end-of-options", ...positionals]`.
@@ -111,31 +226,28 @@ export const END_OF_OPTIONS = "--end-of-options";
  * option, so a flag that still belongs to the command has to be listed before
  * it. Positionals are the arguments a user or a settings file can influence.
  *
- * This is not a blanket rule — two shapes were measured and must NOT get the
- * marker (both are documented at their call sites):
+ * This is not a blanket rule. `checkout` and `stash store` reject the marker on
+ * supported Git, so they are in `END_OF_OPTIONS_DENIED_SUBCOMMANDS` and calling
+ * this function with them throws instead of producing argv that fails only on a
+ * user's older Git.
  *
- *  - `git stash store`: it implements its own argument parsing and rejects the
- *    marker outright (`"git stash store" requires one <commit> argument`,
- *    exit 1). What protects it instead is that `<commit>` is a 40-hex sha parsed
- *    out of `git stash list --format=%H`, so it cannot be option-shaped.
- *  - **bare** `git rev-parse` (no `--verify`): it does not *execute* options, it
- *    **echoes** them. `git rev-parse --end-of-options <sha>` prints
- *    `--end-of-options` followed by the sha (measured), so any caller reading
- *    stdout gets a corrupted answer. `rev-parse --verify` does not do this and
- *    is safe.
- *
- *    Note what the protection actually is, because it is not "the argument is a
- *    fixed ref name": the unsuffixed form is used both for fixed names (`HEAD`,
- *    `--show-toplevel`) and for a sha read out of a
- *    repository-internal file — `commitLog.ts` runs `rev-parse <sha>` where
- *    `<sha>` is the *content* of `.git/rebase-merge/stopped-sha`. That is not
- *    option-shaped input, but neither is it a constant: the real invariant is
- *    that bare `rev-parse` only ever echoes, never acts on, an option-shaped
- *    argument, and that every caller treats its output as a name string. A site
- *    that both passes untrusted input and parses more than the name out of
- *    stdout must use `--verify` (or another subcommand).
+ * **Bare** `git rev-parse` (no `--verify`) must not come through here either: it
+ * does not *execute* options, it **echoes** them. `git rev-parse
+ * --end-of-options <sha>` prints `--end-of-options` followed by the sha
+ * (measured), so any caller reading stdout gets a corrupted answer.
+ * `rev-parse --verify` does not do this and is safe. The bare form is used both
+ * for fixed names (`HEAD`, `--show-toplevel`) and for a sha read out of a
+ * repository-internal file — `commitLog.ts` runs `rev-parse <sha>` where `<sha>`
+ * is the *content* of `.git/rebase-merge/stopped-sha`. The real invariant there
+ * is that bare `rev-parse` only ever echoes, never acts on, an option-shaped
+ * argument, and that every caller treats its output as a name string.
  */
 export function withPositionals(options: string[], positionals: string[]): string[] {
+  const subcommand = subcommandOf(options);
+  const reason = END_OF_OPTIONS_DENIED_SUBCOMMANDS[subcommand];
+  if (reason) {
+    throw new Error(`withPositionals: "${subcommand}" cannot use ${END_OF_OPTIONS}: ${reason}`);
+  }
   return [...options, END_OF_OPTIONS, ...positionals];
 }
 

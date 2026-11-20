@@ -1,6 +1,6 @@
 # Git Rebase Visual — 功能、架构与测试总结
 
-> 当前基线：v0.8.5——写锁只覆盖 Git 写入（操作后的通知不再被 await）、AI 生成 message 只保留 commit 右键与暂存区两个入口、Compose 取消/Esc 在任何状态都能关闭、推送确认框与进度/结果提示统一为三要素；以及 0.8.3 的单文件恢复侧别协议、Push 提示与锁定 run 排版，0.8.2 的追加恢复、只删自己创建的 stash 条目与“Abort 永不删除文件”。
+> 当前基线：v0.8.6——修复 Git 2.31–2.34 上“追加暂存区”的兼容性回归（`git checkout` 不接受 `--end-of-options`），把“哪些子命令可用该标记”变成运行时拒绝表 + 静态守卫测试，并在激活时做一次只读能力检查、显示“已启用”；以及 0.8.5 的写锁只覆盖 Git 写入、AI 入口收敛为两个、Cancel/Esc 始终关闭、Push 三要素，0.8.3 的文件恢复侧别协议，0.8.2 的追加恢复与“Abort 永不删除文件”。
 
 ## 1. 项目定位
 
@@ -150,7 +150,7 @@ media/style.css                    主题语义、pending/status/高对比度 fa
 | 恢复策略 | `test/pendingRecoveryPolicy.test.ts` | 同一 `(stash sha, 原因)` 只警告一次、已装填横幅在槽位漂移后**只更新文本、不重复弹窗**、横幅关闭后保持关闭（槽位漂移也不复活）、记录清空后重置、恢复单飞与失败后释放槽位、恢复在锁内运行且锁忙时整轮跳过、同步抛出不污染单飞键 |
 | 恢复集成（结算） | `test/pendingRecovery.settle.integration.test.ts`<br>`test/pendingRecovery.append.integration.test.ts`<br>`test/pendingRecovery.residual.integration.test.ts`<br>（共用夹具 `test/helpers/pendingRecoveryFixtures.ts`） | **不变量：只删除插件自己记录的 sha 对应的槽位，从不出现 `stash pop`/`stash clear`，也从不删除用户条目**。自动 stash 恢复成功与追加恢复成功后 `git stash list` 与用户原有条目**按 sha 集合完全一致**；并发 `stash push` 使槽位被换成用户条目时拒绝并保留两条；错误删除时 `git stash store` 把该条目原样放回；pop 风格冲突恢复保留插件条目并报告；任意恢复路径都不删用户自己的两个 stash。已应用快照静默清除并删除自己的条目、手动 `stash apply --index` 后静默清除并删除自己的条目、stash 已消失的空记录静默清除、fresh snapshot 只恢复一次且条目随后删除、冲突的工作区恢复保留插件条目与用户条目、amend 落地后按 `ls-tree` mode+object 结算并删除自己的条目、未完成追加保持 pending、reset 只清孤儿记录而保留有内容的 stash；失败探测（`^1`/`^2`/`^3` 对象或 `^3` 树缺失、`git diff` 非零、stash reflog 损坏）一律保留记录与 stash；`targetHash` 被改写但 HEAD 不含快照时保持 pending；仅改文件模式且已落地可结算、chmod 未落地则保留；revert 形状的 amend + 后续编辑保留（旧 raw-log 扫描看不见）、目录重命名保留、同字节巧合保留；stash 上方压入新条目时按 sha 解析到自身槽位且不动其它条目；索引匹配但未跟踪/未暂存内容仍只存在于 stash 时补回工作区；残留的已跟踪路径只在与快照内容一致或路径缺失时才写回，已提交的更新内容不会被覆盖；keep-index 残留快照在 `amend` 之后被 `rebase --continue` 还原成 `stash^2` 内容时视为本次事务自己的内容并真实写回（结论 `restored`，不再报误冲突），两份条目随后都被删除并各自报告；`recoveryCommands` 给出 `apply --index` / `apply` / 用户自己执行的 `drop` 三条命令，且**每条打印出来的命令都会在独立临时仓库里真正执行并断言退出码为 0**（槽位可解析时三条；无法解析时只给两条 apply，不提供 Git 无法执行的 `stash drop <sha>`） |
 | 恢复（provider 级） | `test/recoveryProvider.test.ts` | 真实 provider + 真实 Git：`dismissRecoveryNotice` 写入去重状态后跨 refresh（及推送的 state）不再出现横幅、并发 `stash push` 把记录压到 `stash@{1}` 后横幅改述新槽位且不重复弹窗、关闭后槽位漂移也不复活、`resetExtensionState` 保留不可验证/未恢复的 stash 并清除真正孤儿记录、`forceReleaseMutationLock` 重读 Git 状态、恢复在 mutation 持锁期间整轮跳过、settled 未释放的 owner 被 reap、看门狗对同一 owner 只告警一次且忽略外部 disarm、显式 **Pop** 只有确认后才执行（拒绝则 stash 完好，确认后条目被删且改动已恢复）；**结算即清理自己的条目**：`restored` 与 `resolved` 都删除插件自己的槽位（自动 stash 与追加两条路径各自验证），记录结算后重复轮询不会再次弹窗；内容无法完整验证或槽位已不属于自己时保留条目并如实报告 |
-当前测试套件在 v0.8.5 中为 **336 项 / 50 个文件**（`node scripts/run-tests.js`：pass 336 / fail 0 / skipped 0、退出码 0；本机 Git Bash 提供 `sh`，既有 `rebaseEngine` 的 POSIX 往返用例也执行；在没有 `sh` 的 PATH 上该用例会自动跳过）；v0.7.1 的 UI/交互与安全裁决见 [`../ui-reivew/ui-review-0-7-1.md`](../ui-reivew/ui-review-0-7-1.md)，最终发布评审见 [`../review/code-review-0-7-4.md`](../review/code-review-0-7-4.md)。
+当前测试套件在 v0.8.6 中为 **355 项 / 52 个文件**（`node scripts/run-tests.js`：pass 355 / fail 0 / skipped 0、退出码 0；本次在 Git Bash 下运行，`sh` 可用，`rebaseEngine` 的 POSIX 往返用例实际执行；从 PowerShell 的 PATH 运行（没有 `sh`）时该用例按设计跳过，为 354 pass / 1 skip）；v0.7.1 的 UI/交互与安全裁决见 [`../ui-reivew/ui-review-0-7-1.md`](../ui-reivew/ui-review-0-7-1.md)，最终发布评审见 [`../review/code-review-0-7-4.md`](../review/code-review-0-7-4.md)。
 
 命令：
 

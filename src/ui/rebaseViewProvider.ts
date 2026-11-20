@@ -22,6 +22,7 @@ import {
   conflictedFiles,
   isAncestor,
   checkGitFeature,
+  knownGitVersion,
 } from "../git/commitLog";
 import {
   executeRebase,
@@ -203,7 +204,7 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     // from a repo checkout, so the version must be visible without scrolling.
     const buildVersion = String(ctx.extension?.packageJSON?.version ?? "0.0.0");
     this.output.appendLine(
-      `Git Rebase Visual ${buildVersion} · ${ctx.extension?.extensionPath ?? "unknown"} · vscode ${vscode.version} · pid ${process.pid}`
+      `Git Rebase Visual ${buildVersion} · git ${knownGitVersion() ?? "unknown"} · ${ctx.extension?.extensionPath ?? "unknown"} · vscode ${vscode.version} · pid ${process.pid}`
     );
     this.undo = new UndoJournal(ctx.workspaceState, ctx.globalState);
     this.statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
@@ -1339,9 +1340,11 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
       toast("warn", "没有可安全撤销的操作。 ");
       return;
     }
+    // `record.beforeRef` is an internal `refs/git-rebase-visual/...` checkpoint
+    // name, so it cannot be option-shaped.
     const [inProgress, branch, head, dirty, ref, root] = await Promise.all([
       isRebaseInProgress(cwd), currentBranch(cwd), this.headTip(cwd), isDirty(cwd),
-      runGit(withPositionals(["show-ref", "--verify", "--quiet"], [record.beforeRef]), { cwd }), repoRoot(cwd),
+      runGit(["show-ref", "--verify", "--quiet", record.beforeRef], { cwd }), repoRoot(cwd),
     ]);
     if (!root || root !== record.repository) {
       toast("warn", "Undo 记录属于另一个仓库，不能在当前仓库撤销。 ");
@@ -1361,8 +1364,9 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     );
     if (confirm !== "撤销") return;
     // --keep rejects instead of silently losing a dirty merge/worktree state.
+    // `record.beforeRef` is the same internal checkpoint ref checked above.
     const reset = await runGit(
-      withPositionals(["reset", "--keep"], [record.beforeRef]),
+      ["reset", "--keep", record.beforeRef],
       { cwd }
     );
     if (reset.code !== 0) throw new Error(reset.stderr || reset.stdout || "撤销失败；工作区未被丢弃。 ");
@@ -2016,9 +2020,11 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     // side must include all of HEAD, not just the divergent commits: Git can
     // skip an already-applied patch during rebase, leaving its equivalent patch
     // in the shared ancestry where it still correctly remains locked.
+    // `beforeTip` is the full 40-hex value `headTip` read before the rewrite;
+    // `HEAD` is fixed. Both are revisions, never options.
     const [before, after] = await Promise.all([
-      runGit(withPositionals(["rev-list"], [beforeTip]), { cwd }),
-      runGit(withPositionals(["rev-list"], ["HEAD"]), { cwd }),
+      runGit(["rev-list", beforeTip], { cwd }),
+      runGit(["rev-list", "HEAD"], { cwd }),
     ]);
     if (before.code !== 0 || after.code !== 0) {
       this.log("lock", `改写后无法枚举 commit，跳过锁定 patch 连续性检查：${before.stderr || before.stdout || after.stderr || after.stdout}`);
@@ -2186,7 +2192,7 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     if (!oldTip) throw new Error("无法读取 rewrite 前的 HEAD，已取消操作。");
     const [branch, upstream] = await Promise.all([
       currentBranch(cwd),
-      runGit(withPositionals(["rev-parse", "--verify", "--quiet"], ["@{upstream}"]), { cwd }),
+      runGit(["rev-parse", "--verify", "--quiet", "@{upstream}"], { cwd }),
     ]);
     const rewritesPushed = upstream.code === 0 && (await isAncestor(cwd, oldTip, "@{upstream}"));
     if (rewritesPushed) {
@@ -2307,8 +2313,9 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     // Rejection guard: never amend a commit that is already on the local
     // upstream. Doing so would silently rewrite already-shared history, and the
     // later --force-with-lease push would abort (remote moved on) or clobber.
+    // Fixed revision syntax, never user input; `@{upstream}` cannot be an option.
     const upstream = await runGit(
-      withPositionals(["rev-parse", "--verify", "--quiet"], ["@{upstream}"]),
+      ["rev-parse", "--verify", "--quiet", "@{upstream}"],
       { cwd }
     );
     const alreadyPushed =
@@ -2864,26 +2871,23 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
    * the shared opaque request store authorizes both virtual content sides.
    */
   private async openCommitDiff(cwd: string, hash: string): Promise<void> {
+    // The caller gate (`requiresCurrentCommitHash` + `isCurrentCommitHash`)
+    // already enforces this; re-asserting it here makes the three positionals
+    // below provably 40-hex at the point where Git receives them, so no marker
+    // is needed on `show`/`diff-tree`.
+    if (!/^[0-9a-f]{40}$/i.test(hash)) {
+      throw new Error("无法打开 Diff：commit 标识无效。 ");
+    }
     let plan = this.commitDiffCache.get(`${cwd}:${hash}`);
     if (!plan) {
-      // `hash` is gated by `requiresCurrentCommitHash` + `isCurrentCommitHash`
-      // before this runs, but all three calls below still take it after the
-      // marker: each one parses options after a positional, and the argument is
-      // the only thing standing between the gate and a file write.
       const [parentsResult, namesResult, numstatResult] = await Promise.all([
-        runGit(withPositionals(["show", "-s", "--format=%P"], [hash]), { cwd }),
+        runGit(["show", "-s", "--format=%P", hash], { cwd }),
         runGit(
-          withPositionals(
-            ["diff-tree", "--no-commit-id", "--name-status", "-z", "-M", "--root", "-r"],
-            [hash]
-          ),
+          ["diff-tree", "--no-commit-id", "--name-status", "-z", "-M", "--root", "-r", hash],
           { cwd }
         ),
         runGit(
-          withPositionals(
-            ["diff-tree", "--no-commit-id", "--numstat", "-z", "-M", "--root", "-r"],
-            [hash]
-          ),
+          ["diff-tree", "--no-commit-id", "--numstat", "-z", "-M", "--root", "-r", hash],
           { cwd }
         ),
       ]);
@@ -2946,10 +2950,9 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
     if (!commits) throw new Error("Diff 选择已失效；请刷新后重试。 ");
     const snapshot = await buildGeneratedDiffSnapshot(commits, async (commit) => {
       // `commit` comes from `generatedDiffCommits(this.commits, hashes)`, so the
-      // hash is already one of the rendered ones; the marker states that rather
-      // than relying on the reader to trace it.
+      // hash is one of the rendered full 40-hex ids; it cannot be an option.
       const result = await runGit(
-        withPositionals(["show", "--binary", "--find-renames", "--format=fuller", "--no-ext-diff"], [commit.hash]),
+        ["show", "--binary", "--find-renames", "--format=fuller", "--no-ext-diff", commit.hash],
         { cwd, maxBuffer: 4_000_000 }
       );
       if (result.code !== 0) throw new Error(result.stderr || result.stdout || `无法生成 ${commit.shortHash} 的 Diff。`);

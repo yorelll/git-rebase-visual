@@ -1,4 +1,4 @@
-import { C_LOCALE, git, LITERAL_PATHSPECS, runGit, splitNul, withPositionals } from "./gitRunner";
+import { C_LOCALE, git, LITERAL_PATHSPECS, runGit, splitNul } from "./gitRunner";
 
 export interface StashEntry {
   /** Human-readable stash name, e.g. `stash@{2}`. */
@@ -231,24 +231,36 @@ function unreadableStash(): StashRestoreResult {
  * as well (trimming would delete it).
  */
 async function diffNames(cwd: string, from: string, to: string): Promise<string[]> {
+  // Both arguments are `^1`/`^2`/stash forms derived from a full 40-hex sha
+  // read from `git stash list --format=%H`; neither can begin with `-`.
   const res = await runGit(
-    withPositionals(["diff", "--name-only", "-z", "--no-renames"], [from, to]),
+    ["diff", "--name-only", "-z", "--no-renames", from, to],
     { cwd }
   );
   return splitNul(res.stdout);
 }
 
-/** True when `rev:path` resolves to a blob in that tree. */
+/**
+ * True when `rev:path` resolves to a blob in that tree.
+ *
+ * No `--end-of-options`: `rev` is a full 40-hex sha or the fixed name `HEAD`,
+ * so the whole object name always starts with a non-option character.
+ */
 async function pathInTree(cwd: string, rev: string, path: string): Promise<boolean> {
   return (
-    await runGit(withPositionals(["cat-file", "-e"], [`${rev}:${path}`]), { cwd })
+    await runGit(["cat-file", "-e", `${rev}:${path}`], { cwd })
   ).code === 0;
 }
 
-/** True when the path exists in the current index. */
+/**
+ * True when the path exists in the current index.
+ *
+ * The leading `:` is index syntax, so this argument can never be an option and
+ * does not need `--end-of-options`.
+ */
 async function pathInIndex(cwd: string, path: string): Promise<boolean> {
   return (
-    await runGit(withPositionals(["cat-file", "-e"], [`:${path}`]), { cwd })
+    await runGit(["cat-file", "-e", `:${path}`], { cwd })
   ).code === 0;
 }
 
@@ -284,17 +296,20 @@ async function restoreUntrackedHalf(cwd: string, sha: string): Promise<string | 
   // untracked like it originally was. A path already present and untouched is
   // left alone rather than overwritten.
   if (
-    (await runGit(withPositionals(["cat-file", "-e"], [`${sha}^3`]), { cwd })).code !== 0
+    // `sha` is a full 40-hex commit id from `git stash list --format=%H`, so
+    // `${sha}^3` can never be read as an option; no marker is needed here.
+    (await runGit(["cat-file", "-e", `${sha}^3`], { cwd })).code !== 0
   ) {
     return undefined;
   }
   // `-z` + NUL-split for the same reason as `diffNames`: an untracked file with
   // a non-ASCII name is otherwise dropped silently while the function still
-  // reports success.
+  // reports success. `sha` is the full 40-hex id from `git stash list`, so
+  // `${sha}^3` cannot be option-shaped.
   const untrackedPaths = splitNul(
     (
       await runGit(
-        withPositionals(["ls-tree", "-r", "-z", "--name-only"], [`${sha}^3`]),
+        ["ls-tree", "-r", "-z", "--name-only", `${sha}^3`],
         { cwd }
       )
     ).stdout
@@ -304,8 +319,16 @@ async function restoreUntrackedHalf(cwd: string, sha: string): Promise<string | 
       // Tracked again (or already staged): not an untracked file any more.
       continue;
     }
+    // Deliberately no `--end-of-options` here. `git checkout` does not accept
+    // the marker on Git 2.31 through 2.34 — it treats it as a second ref and
+    // fails with `fatal: only one reference expected, 2 given` — and this
+    // extension supports 2.31.0+. The marker buys nothing at this site anyway:
+    // `sha` is a full 40-hex commit id read by `stashPush` from
+    // `git stash list --format=%H`, and `path` follows the `--` separator, so
+    // it can only be a pathspec. Neither a setting nor webview input reaches
+    // this argv.
     const res = await runGit(
-      [...withPositionals(["checkout"], [`${sha}^3`]), "--", path],
+      ["checkout", `${sha}^3`, "--", path],
       { cwd, env: LITERAL_PATHSPECS }
     );
     if (res.code !== 0) {
@@ -620,8 +643,10 @@ export async function stashRemoveBySha(
   // Re-read the slot at the last possible moment: a `git stash push` between the
   // lookup above and the drop below moves this entry and puts someone else's in
   // its place.
+  // `slot` is built here as `stash@{<index>}` from the stash listing, so it is
+  // an internal ref and cannot be option-shaped.
   const occupant = await runGit(
-    withPositionals(["rev-parse", "--verify", "--quiet"], [slot]),
+    ["rev-parse", "--verify", "--quiet", slot],
     { cwd }
   );
   if (occupant.code !== 0 || occupant.stdout.trim() !== sha) {

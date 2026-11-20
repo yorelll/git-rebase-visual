@@ -371,6 +371,42 @@
 * **预期收益**：`npm warn EBADENGINE`（如 `@azure/abort-controller@2.2.0` 要求 `node >=22`）应当消失。**这一条要在下一次打 tag 时才真正得到验证**：本次按要求只 push、不打 tag，发布工作流不会运行。若届时仍有 `EBADENGINE`，说明还有依赖要求更高版本，需要单独确认。
 * **本地验证**：本机 `node --version` = `v24.16.0`；两个类型检查零输出；完整套件按 Node 24 运行（见本次提交说明）。
 
+### P3-15. 用户反馈：Git 2.34.1 上“追加暂存文件”失败（`git checkout` 不接受 `--end-of-options`）
+
+> 来源：用户提供的真实命令与日志，基线 `4e51d98`（`build: run CI on Node 24 to match local development`，`main`），工作树干净。属 0.8.5 已发布版本的回归，计划以 0.8.6 补丁发布；本轮不改版本号、不提交、不打 tag。
+
+* **现象**：在 Git **2.34.1** 上把暂存文件追加到较早的 commit 时，恢复快照的未跟踪半失败：
+
+  ```text
+  git checkout --end-of-options 14ac398a…^3 -- compile_commands.json   code=128
+  appendStaged: 失败 恢复暂存区失败：恢复未跟踪文件 compile_commands.json 失败：
+                fatal: only one reference expected, 2 given.
+  ```
+
+  用户日志同时证明同一会话里的 `rev-parse`、`rev-list`、`log`、`for-each-ref`、`show`、`diff`、`diff-tree`、`ls-tree`、`cat-file`、`update-ref`、`merge-base`、`show-ref`、`reset`、`rebase -i`、`stash apply`、`push` 全部可用。**只有 `git checkout` 不接受该标记**。
+* **根因**：0.8.3 的注入加固（`783dac7`）把 `--end-of-options` 加到了 `worktree.ts` 的 `restoreUntrackedHalf`。`git checkout` 在 Git 2.31–2.34 把标记当成第二个 ref，于是报“only one reference expected, 2 given”。该站点加标记没有任何收益：`sha` 是 `stashPush` 从 `git stash list --format=%H` 读出的完整 40 位十六进制 commit id，`path` 位于 `--` 之后只能是 pathspec，设置与 webview 输入都到不了这个 argv。
+* **测试为什么没拦住**：既有的未跟踪文件恢复集成测试跑在维护者的 Git **2.53** 上，那里 `checkout` 接受标记，所以同一段代码是绿的。当时“哪些子命令不能带标记”只写在 `gitRunner.ts` 的注释里，没有任何可执行检查，也没有 Git 版本矩阵。
+* **修复**：
+  1. `restoreUntrackedHalf` 改为 `["checkout", `${sha}^3`, "--", path]`，并在代码里写明上述安全论证与“2.31–2.34 不支持”的原因。
+  2. `gitRunner.ts` 增加 `END_OF_OPTIONS_DENIED_SUBCOMMANDS`（`checkout`、`stash store`）；`withPositionals` 命中时**抛错**并指明替代方案（`--` 分隔或 40-hex 输入校验）。新增 `test/endOfOptionsGuard.test.ts`，用 TypeScript AST 扫描 `src/` 下所有 `.ts` 文件中的 `withPositionals` 调用与直接携带 `END_OF_OPTIONS` 的 `runGit` argv，能识别跨行写法、`-c` 等带独立值的全局选项，以及注释/字符串里的伪调用。**非空转证明**：临时在 `src/__guard_probe__.ts` 写入 `withPositionals(["checkout"], ["x"])`，守卫用例报红并点名 `checkout`；删除后恢复绿。该检查不依赖本机 Git 版本。
+  3. 让 Git 版本可观测：`gitVersionSync()` 在激活时同步播种缓存，会话日志头新增 `git=…`，OutputChannel 第一行新增 `git …`。此前 0.8.5 的这个问题只能靠向用户追问 `git --version` 才能定位。
+  4. **标记站点审计**（按 positional 来源分类）：`checkout` 已移除；其余可证明唯一位形安全的站点也已改为直接传 argv：`cat-file <sha>^3` / `<rev>:<path>` / `:<path>`、`ls-tree <sha>^3`、`diff --name-only <internal sha>`、`rev-list <internal sha>`、`update-ref <内部 ref> <40-hex>`、`show-ref <内部 ref>`、`reset --keep <内部 ref>`、`diff --cached/--quiet <internal sha> -- <paths>`、`stash apply <full sha>`、`rev-parse <stash@{n}>` 等。对仍然接收调用方字符串的 `commitDetail` / `patchId` / `getCommitDiff` / `openCommitDiff`，在函数入口重新断言 40-hex（`openCommitDiff` 原先已由调用方门禁校验，本轮再在函数内断言），因此 `show` / `diff-tree` 也可安全去掉标记。用户/设置数据可达的站点（`log <sourceRev>`、`push <remote> <refspec>`、`rev-parse --verify <mainBranch>`、`rev-list <upstream..tip>`、`for-each-ref <branch>`、`fullMessage` 的调用方 hash 等）继续保留标记。`gitRunner.ts` 的文档已同步说明“不是每个 positional 都需要标记”，静态守卫约束实际使用 `withPositionals` 的调用以及直接携带标记的 `runGit` argv。
+  5. **激活探测与成功通知**（只在 `activate()` 触发一次，fire-and-forget，绝不 await、绝不向宿主抛错）：先 `git --version` 解析并按 `MIN_GIT_VERSION`（2.31.0）校验；若工作区是 Git 仓库，再用 `LC_ALL=C` 只读执行 `rev-parse --verify --quiet --end-of-options HEAD`、`log -1 --pretty=%s --end-of-options HEAD`、`rev-list --count --end-of-options HEAD`、`for-each-ref --format=%(refname) --end-of-options refs/heads`。只有“标记被拒绝”的报错（含 2.34 的 `only one reference expected`）算能力失败；普通非零退出（例如空仓库的 unborn HEAD）不算。成功弹一次 `Git Rebase Visual <version> 已启用`；失败弹 `showWarningMessage` 并点名具体问题与 Git 版本；每条检查结果写入会话日志。探测实例幂等，消息处理与 `refresh()` 都不引用它。
+* **测试**：新增 `test/endOfOptionsGuard.test.ts`（3 条：运行时拒绝、探测器正例/跨行/注释反例含全局选项值、全 `src/` 扫描）与 `test/capabilityProbe.test.ts`（10 条：成功只弹一条且不含 probe/探测/自检，并逐条断言四条命令的精确 argv 与 `LC_ALL=C`；低于最低版本告警、标记被拒告警且不给出“升级到 2.31+”的错误建议、普通非零退出不算失败、runner 抛错归为 `probe-error`、非仓库/无工作区只查版本、幂等、Git 版本写入日志头与 OutputChannel、消息/刷新不引用探测）。`test/worktree.integration.test.ts` 新增 argv 形状用例，断言 `checkout` 的 argv 精确为 `["checkout", "<sha>^3", "--", path]` 且不含标记。**红/绿**：静态守卫用临时违规文件实测变红（见上）；argv 形状用例对旧写法必然在“精确 argv”与“不含标记”两处断言失败（本轮尝试把旧写法放回源码做红测时，被环境的安全策略拒绝，未实际改写源码）。
+* **验证**：两个类型检查零输出（直接以 `node ./node_modules/typescript/bin/tsc …` 运行；`npm run typecheck` 在本机 shell 下报 `'"node"' 不是内部或外部命令`，与代码无关）。完整套件 **350 项 / 52 个文件**，pass 349 / fail 0 / skipped 1，runner 退出码 0（从 PowerShell 的 PATH 启动时没有 `sh`，`rebaseEngine` 的 POSIX 往返用例按设计跳过；在 Git Bash 下单独运行 `test/rebaseEngine.test.ts` 为 4/4 通过）。VSIX 从删除后的 `dist-vsix/` 重建，12 个条目、白名单校验通过（本机 PowerShell 的 PATH 没有 `unzip`，在 Git Bash 里执行 `node scripts/package-vsix.js --verify-only` 完成校验）；包内 `extension/dist/extension.js` 的 sha256 为 `c525fa8ac30e41ec5ee4f2a9799464674ffaacf8ce863f725a7c7bb34519ebdb`，与现场重新执行 `node esbuild.js` 的产物相同。重建时 allowlist 发现 `.nvmrc` 与临时测试日志会进包，`.vscodeignore` 已补上 `.nvmrc` 与 `*.log`，最终仍是 12 个条目。未改版本号，未提交、未打 tag、未推送。
+
+### P3-16. `code-review-0-8-27.md` 的 P4-1/P4-2/P4-4/P4-5 跟进（2026-11-20）
+
+> 来源：`code-review-0-8-27.md` 第五节。该轮**批准**本轮 Git 2.34 修复（0 个 P0/P1/P2/P3 阻塞项），留 5 项 P4。本轮按任务修复前四项，P4-3 记录为 open、不改行为。基线仍为 `4e51d98`，版本仍为 `0.8.5`；未提交、未打 tag、未推送。
+
+* **\[x] P4-1（守卫覆盖面）——`stash <option> store` 不被识别。** `subcommandOf` 原先只把紧邻 `stash` 的 `store` 视为两词子命令，`["stash","--quiet","store",…]` 返回 `"stash"`，未来这种形状会把 `--end-of-options` 追加到 `stash store` 之后。现在 `subcommandOf` 在 `stash` 后先跳过 stash 自己的选项（以 `-` 开头的项，以及 `-m`/`--message` 的独立值；`--` 之后按位置参数处理），再解析嵌套子命令：`["stash","--quiet","store"]` → `"stash store"`（拒绝并抛错），`["stash","apply","--index"]` → `"stash apply"`（不拒绝），`["stash"]`、`["stash","--quiet"]`、`["stash","-m","store"]` → `"stash"`（不会被误判为 `store`）。新增运行时断言与静态守卫正例/反例。**红**：修改前的生产 `subcommandOf(["stash","--quiet","store","x"])` 实测返回 `"stash"`；**绿**：修改后返回 `"stash store"`，`withPositionals` 抛错，`stash apply --index` 正常返回 `["stash","apply","--index","--end-of-options","HEAD"]`。
+* **\[x] P4-2（静态守卫覆盖面）——`git([...])` 未被扫描。** 静态守卫的 callee 集合由 `{withPositionals, runGit}` 扩为 `{withPositionals, runGit, git}`，并新增 `git(["checkout", END_OF_OPTIONS, …])` 正例与无标记的 `git(["checkout", …])` 反例。**红**：用旧集合扫描同一表达式返回 `[]`；**绿**：新集合返回 `["git"]`。**残余边界已写入测试注释**：导入别名、变量 argv（如 `pushGuard.pushRefspec` 构造后交给 `pushGit` 的 `args`）、spread/计算数组仍不在静态扫描内；今天 `src/` 没有别名，带标记的 argv 都始于被扫描的数组字面量，变量 argv 由被扫描的 `withPositionals` 构造。新增入口必须同时加入 `SCANNED_CALLEES`，不能假设扫描是穷尽的。
+* **\[x] P4-4（多根工作区）——只探测第一个根。** `ProbeOptions.cwd` 接受 `string | readonly string[]`；`extension.ts` 传入全部 `workspaceFolders`。探测按顺序对每个候选执行一次只读 `rev-parse --show-toplevel`，停在第一个成功者；候选全部不是仓库时只查版本并在日志中列出每个被跳过的根；某个候选 spawn 失败且没有任何候选成功时仍归为 `probe-error`。**红**：用旧的“只取 index 0”形状（`cwd: "C:/not-a-repo"`）实测 `ok=true`、只有 1 次调用、标记检查全部跳过，尽管第二个根是仓库；**绿**：`cwd: ["C:/not-a-repo","C:/repo"]` 实测先探测两个根，再在 `C:/repo` 执行 4 条标记检查（共 6 次调用），日志记录被跳过的根。新增 2 条测试（第一个根非仓库/第二个根是仓库；所有根都不是仓库）。
+* **\[x] P4-5（诊断准确性）——版本读取失败被报成“未找到 Git”。** `ProbeProblem` 新增 `version-read-failed`。只有 `readVersion` 抛出的错误带 `code === "ENOENT"`（spawn 不到 `git` 可执行文件）才归为 `git-not-found`；其他抛错（包装脚本、权限、超时）以及“命令成功但未打印版本”归为 `version-read-failed`，告警文案改为“无法读取 Git 版本（git --version 未能运行或未返回版本）；请确认 PATH 中的 git 可执行文件（可能是包装脚本）与权限，详情见日志”，不再让用户去安装 Git。`git-version` 检查的 detail 记录实际错误。新增 3 条持久测试：ENOENT → `git-not-found`；EACCES → `version-read-failed`；返回 undefined → `version-read-failed`。**红**：修改前这三条路径都返回 `git-not-found`（评审第五节原文）；**绿**：现在分别返回 `git-not-found` / `version-read-failed` / `version-read-failed`。
+* **\[ ] P4-3（激活延迟，open，按任务不改）——`gitVersionSync()` 在激活同步路径上阻塞约 0.3–0.4 秒。** B 在本机实测 **305–368 ms**（`execFileSync("git", ["--version"], { timeout: 2000 })`，最坏受 2 s 超时约束），换来会话日志头与 OutputChannel 第一行的 Git 版本。这是**有意的取舍**：0.8.5 的回归只能靠向用户追问 `git --version` 才能定位，版本作为会话第一行有直接诊断价值。本轮**不**改成异步；后续可考虑“异步播种后回填日志”或缩短超时，但需先证明诊断价值不下降。保留为 open follow-up。
+
+* **验证**：两个类型检查零输出（`node node_modules/typescript/bin/tsc --noEmit` 与 `node node_modules/typescript/bin/tsc -p tsconfig.test.json --noEmit`，退出码均为 0）。完整套件 `node scripts/run-tests.js` 从 Git Bash 启动并从确认干净的进程表运行：**355 项 / 52 个文件**，pass 355 / fail 0 / cancelled 0 / skipped 0 / todo 0，runner 退出码 **0**，`duration_ms` 828038.94（约 13.8 分钟；从 PowerShell 的 PATH 运行缺少 `sh` 时为 354 pass / 1 skip）。受影响套件 `test/endOfOptionsGuard.test.ts test/capabilityProbe.test.ts` 共 18 条全绿。VSIX 从**删除后的** `dist-vsix/` 重建：12 个条目、`--verify-only` 白名单校验通过；包内 `extension/dist/extension.js` 的 sha256 为 `031c0471bfb7f5aee1166e44fbb766f52ac7e6fa69a745da9f1611f71a4b5351`，与随后现场重新执行 `node esbuild.js` 的产物逐字节相同（`cmp` 退出码 0）。未改版本号（仍为 `0.8.5`），未提交、未打 tag、未推送。打包时本机 Git Bash 的 PATH 没有 `npm`，改用 PowerShell 执行 `node scripts/package-vsix.js`，再用 Git Bash 执行 `--verify-only`（`unzip` 只在 Git Bash 的 PATH 中）。
+
 ## 验收原则
 所有后续历史改写功能应满足：
 

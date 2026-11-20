@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { C_LOCALE, git, runGit, splitNul, withPositionals } from "./gitRunner";
 import { getWorktreeChanges, summarizeWorktreeChanges } from "./worktreeChanges";
 
@@ -49,14 +50,59 @@ export const MIN_GIT_VERSION = [2, 31, 0] as const;
 
 let cachedGitVersion: string | undefined;
 
+/** The session's already-probed Git version, if any. */
+export function knownGitVersion(): string | undefined {
+  return cachedGitVersion;
+}
+
+/** Extracts `major.minor[.patch]` from `git --version`'s output. */
+export function parseGitVersion(output: string): string | undefined {
+  return output.match(/\d+(?:\.\d+)+/)?.[0];
+}
+
+/** True when `version` is at least `MIN_GIT_VERSION`. */
+export function isSupportedGitVersion(version: string | undefined): boolean {
+  if (!version) {
+    return false;
+  }
+  const parsed = version.split(".").map((n) => Number(n) || 0);
+  return !(
+    parsed[0] < MIN_GIT_VERSION[0] ||
+    (parsed[0] === MIN_GIT_VERSION[0] &&
+      (parsed[1] < MIN_GIT_VERSION[1] ||
+        (parsed[1] === MIN_GIT_VERSION[1] && (parsed[2] ?? 0) < MIN_GIT_VERSION[2])))
+  );
+}
+
 /** Returns `git --version`'s version string, or undefined when git is missing. */
 export async function gitVersion(cwd: string): Promise<string | undefined> {
   if (cachedGitVersion !== undefined) {
     return cachedGitVersion;
   }
   const res = await runGit(["--version"], { cwd });
-  const match = res.stdout.match(/\d+(?:\.\d+)+/);
-  cachedGitVersion = match?.[0] ?? undefined;
+  cachedGitVersion = parseGitVersion(res.stdout);
+  return cachedGitVersion;
+}
+
+/**
+ * Seeds the same cache synchronously so activation can print the Git version
+ * in the session header and the OutputChannel's first line. The async probe is
+ * still the normal path; this only exists because `activate()` is synchronous.
+ */
+export function gitVersionSync(): string | undefined {
+  if (cachedGitVersion !== undefined) {
+    return cachedGitVersion;
+  }
+  try {
+    const output = execFileSync("git", ["--version"], {
+      encoding: "utf8",
+      timeout: 2_000,
+      windowsHide: true,
+    });
+    cachedGitVersion = parseGitVersion(output);
+  } catch {
+    cachedGitVersion = undefined;
+  }
   return cachedGitVersion;
 }
 
@@ -73,13 +119,7 @@ export async function checkGitFeature(
   if (!version) {
     return { ok: false, message: "Git not found. Install Git and reopen this panel." };
   }
-  const parsed = version.split(".").map((n) => Number(n) || 0);
-  const tooOld =
-    parsed[0] < MIN_GIT_VERSION[0] ||
-    (parsed[0] === MIN_GIT_VERSION[0] &&
-      (parsed[1] < MIN_GIT_VERSION[1] ||
-        (parsed[1] === MIN_GIT_VERSION[1] && (parsed[2] ?? 0) < MIN_GIT_VERSION[2])));
-  if (tooOld) {
+  if (!isSupportedGitVersion(version)) {
     return {
       ok: false,
       message: `Git ${version} is too old for ${feature}. Git ${MIN_GIT_VERSION.join(".")} or newer is required.`,
@@ -456,23 +496,23 @@ export function summarizeNumstat(numstat: string[]): string {
 /**
  * Fetches rich details for a commit, used for the hover tooltip.
  *
- * All three `git show` calls below put `hash` after `--end-of-options`. The
- * caller (`requestDetail`) gates it with `requiresCurrentCommitHash` +
- * `isCurrentCommitHash`, and that gate is what the `sendDetail` comment
- * documents — but the argument has to be safe without relying on it:
- * `git show -s --pretty=%s HEAD --output=<file>` writes that file (measured),
- * so a future relaxation of the gate would otherwise become a file write.
+ * The caller (`requestDetail`) gates `hash` with `requiresCurrentCommitHash` +
+ * `isCurrentCommitHash`, and this function re-asserts the 40-hex shape before
+ * handing it to Git. That makes the argument provably option-free, so the three
+ * `git show` calls can pass it positionally without `--end-of-options`; the
+ * marker is only needed when the revision string is caller-supplied and not
+ * validated.
  */
 export async function commitDetail(cwd: string, hash: string): Promise<CommitDetail> {
+  if (!/^[0-9a-f]{40}$/i.test(hash)) {
+    throw new Error("commitDetail: hash must be a full 40-hex commit id");
+  }
   // `%ar` is the relative date, rendered through Git's message catalog and shown
   // in the hover. It is display text, never parsed, so the locale is deliberately
   // left alone here: pinning C would change what every user sees in the tooltip.
   const fmt = ["%an", "%ae", "%ar", "%ad", "%B"].join("\x1f");
   const meta = await git(
-    withPositionals(
-      ["show", "-s", "--date=format:%Y-%m-%d %H:%M", `--pretty=format:${fmt}`],
-      [hash]
-    ),
+    ["show", "-s", "--date=format:%Y-%m-%d %H:%M", `--pretty=format:${fmt}`, hash],
     { cwd }
   );
   const [author, email, relDate, absDate, message] = meta.split("\x1f");
@@ -482,7 +522,7 @@ export async function commitDetail(cwd: string, hash: string): Promise<CommitDet
   // parsing the localized `--shortstat` prose. `--format=%H` keeps the header
   // minimal (a bare hash the summarizer skips).
   const numstat = await runGit(
-    withPositionals(["show", "--numstat", "--format=%H", "--no-color"], [hash]),
+    ["show", "--numstat", "--format=%H", "--no-color", hash],
     { cwd }
   );
   const statLine = summarizeNumstat(numstat.stdout.split("\n"));
@@ -494,7 +534,7 @@ export async function commitDetail(cwd: string, hash: string): Promise<CommitDet
   // pinned to keep the filter below matching; the primary `--numstat` path above
   // is locale-independent and is what normally answers.
   const statRes = await runGit(
-    withPositionals(["show", "--shortstat", "--oneline", "--no-color"], [hash]),
+    ["show", "--shortstat", "--oneline", "--no-color", hash],
     { cwd, env: C_LOCALE }
   );
   const shortstatLine =
@@ -569,17 +609,20 @@ export function clearPatchIdCache(): void {
  * (tests do this between cases).
  */
 export async function patchId(cwd: string, hash: string): Promise<string | undefined> {
+  if (!/^[0-9a-f]{40}$/i.test(hash)) {
+    throw new Error("patchId: hash must be a full 40-hex commit id");
+  }
   const root = (await repoRoot(cwd)) ?? cwd;
   const key = `${root}:${hash}`;
   if (patchIdCache.has(key)) {
     return patchIdCache.get(key);
   }
   // `--root` includes root commits (whose parent-less diff-tree output is
-  // otherwise empty); it is harmless on non-root commits. The marker keeps
-  // `hash` a revision: it is a 40-hex value from `this.commits` at every call
-  // site today, but `diff-tree` parses options after a positional too.
+  // otherwise empty); it is harmless on non-root commits. The 40-hex assertion
+  // above makes `hash` provably a revision, not an option, so no marker is
+  // needed here.
   const diff = await runGit(
-    withPositionals(["diff-tree", "-p", "--no-color", "--root"], [hash]),
+    ["diff-tree", "-p", "--no-color", "--root", hash],
     { cwd }
   );
   if (diff.code !== 0 || !diff.stdout.trim()) {
