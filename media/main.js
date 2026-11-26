@@ -26,6 +26,11 @@
   const directionEl = document.getElementById("direction");
 
   let state = { commits: [], rebaseInProgress: false, llmConfigured: false, canonicalOrder: [] };
+  // `state.commits` starts as the bootstrap default [], which is indistinguishable
+  // from a repo that genuinely has no commits. The host's first refresh awaits a
+  // dozen Git calls, so that window is seconds long on a real repo: say "loading",
+  // not "no commits", until the first state message actually arrives.
+  let stateLoaded = false;
   let drag = null;
   let dragHint = "";
   let filterText = "";
@@ -57,15 +62,20 @@
   function short(hash) { return (hash || "").slice(0, 8); }
   function setDragHint(message) { dragHint = message; renderDirection(); }
   function clearDragHint() { dragHint = ""; renderDirection(); }
-  // The idle copy must not claim reordering is available when the very same
-  // checks that gate a drag say it is not. Priority mirrors canStartDrag():
-  // a live drag hint always wins, then the rebase lock, then the filter, then
-  // an empty timeline.
+  // The copy must not claim reordering is available when the conditions that
+  // gate a drag say it is not, and must not claim an empty timeline before the
+  // first state arrives. Priority: a live drag hint wins, then the pre-state
+  // loading copy, then the rebase lock, then an empty timeline (renderList()
+  // returns before rendering the search controls, so an empty list must not
+  // point at them), then an active filter, then the discovery copy.
+  // canStartDrag() gates the drag itself; this copy also has to stay truthful
+  // before any state exists, which canStartDrag() never has to consider.
   function directionHint() {
     if (dragHint) return dragHint;
+    if (!stateLoaded) return "正在加载 commit…";
     if (state.rebaseInProgress) return "变基进行中 · 重排已禁用";
-    if (isFilterActive()) return "过滤中无法重排 · 清空搜索后可用 ⋮⋮";
     if (!(state.commits ?? []).length) return "没有可重排的 commit";
+    if (isFilterActive()) return "过滤中无法重排 · 清空搜索后可用 ⋮⋮";
     return "拖动 ⋮⋮ 重排 · Alt+↑↓ 移动一位";
   }
   function renderDirection() {
@@ -708,6 +718,10 @@
   window.addEventListener("message", (event) => {
     const m = event.data;
     if (m.type === "state") {
+      // Any state message proves the host's first refresh finished, even when it
+      // is deferred behind a drag session. recoveryNotice is not a state: it only
+      // merges one field into whatever we already had.
+      stateLoaded = true;
       // A refresh must not destroy a native or pointer drag session. It is
       // applied after the shared session ends, preserving its revision guard.
       if (drag) { deferredState = m; return; }

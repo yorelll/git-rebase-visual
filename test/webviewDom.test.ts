@@ -164,13 +164,18 @@ test("actual webview keeps the direction row resident across the drag lifecycle"
     // behavioural assertion below still passed.
     assert.equal(direction.nextElementSibling, list, "#direction is the immediate previous sibling of #list");
     assert.equal(direction.classList.contains("hidden"), false, "the row is visible after ready");
-    // At ready no state has arrived yet, so the truthful copy is "nothing to
-    // reorder" — not the actionable hint for a list that does not exist.
-    assert.match(direction.textContent ?? "", /没有可重排的 commit/, "startup copy does not promise a draggable list");
+    // At ready no state has arrived yet. The bootstrap default is commits: [],
+    // which must not be mistaken for a genuinely empty timeline: show a neutral
+    // one-line loading copy, never "", which would collapse the row's height and
+    // move the list again when the first state lands.
+    const beforeState = direction.textContent ?? "";
+    assert.match(beforeState, /正在加载 commit/, "startup copy says loading, not 'no commits'");
+    assert.equal(beforeState.length > 0, true, "the loading copy is not empty, so the row height stays constant");
     assert.equal(direction.getAttribute("aria-live"), "off", "the idle discovery copy is silent");
 
     view.postState(state([a, b, c], 7));
-    assert.match(direction.textContent ?? "", /Alt\+↑↓/, "with commits the idle text is the static drag hint");
+    assert.match(direction.textContent ?? "", /Alt\+↑↓/, "the first state switches from loading to the static drag hint");
+    assert.doesNotMatch(direction.textContent ?? "", /正在加载 commit/, "the loading copy is gone once state arrived");
     assert.equal(direction.getAttribute("aria-live"), "off", "the static hint stays out of the live region");
 
     const sourceGrip = view.row(c).querySelector(".grip") as HTMLElement;
@@ -230,6 +235,31 @@ test("the direction row states why reordering is unavailable instead of promisin
     view.postState({ ...state([a, b, c], 3), rebaseInProgress: true });
     assert.match(direction().textContent ?? "", /变基进行中 · 重排已禁用/, "a running rebase disables reordering");
     assert.equal(direction().getAttribute("aria-live"), "off", "the disabled copy is not a live announcement");
+  } finally {
+    view.close();
+  }
+});
+
+test("an empty timeline never points at the filter controls it does not render", () => {
+  const view = createHarness();
+  try {
+    const doc = view.dom.window.document;
+    const direction = () => doc.getElementById("direction")!;
+    view.postState(state([a, b, c], 1));
+    const search = doc.querySelector("#list .commit-search") as HTMLInputElement;
+    search.value = "persisted-filter";
+    search.dispatchEvent(new view.dom.window.Event("input", { bubbles: true }));
+    assert.match(direction().textContent ?? "", /过滤中无法重排/, "an active filter is reported while its controls exist");
+
+    // The filter lives in the webview's saved UI state, so a refresh can return
+    // an empty commit list while it is still active. renderList() returns before
+    // building the search input or its clear button; the copy must not send the
+    // user to a control that is not on screen.
+    view.postState(state([], 2));
+    assert.match(direction().textContent ?? "", /没有可重排的 commit/, "an empty timeline wins over the stale filter copy");
+    assert.doesNotMatch(direction().textContent ?? "", /清空搜索后可用/, "the copy does not point at a missing clear button");
+    assert.equal(doc.querySelector("#list .commit-search"), null, "the empty list really renders no search input");
+    assert.equal([...doc.querySelectorAll("#list button")].some((b) => b.textContent === "清除"), false, "and no clear button");
   } finally {
     view.close();
   }
