@@ -360,7 +360,7 @@ button, .grip, .dot, .lock-icon, .stopped-badge {
   border: 1px solid var(--vscode-editorHoverWidget-border, var(--vscode-panel-border));
   border-radius: 5px;
   padding: 8px 10px;
-  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.4);
+  box-shadow: 0 3px 10px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.36));
   font-size: 12px;
 }
 
@@ -536,7 +536,11 @@ button, .grip, .dot, .lock-icon, .stopped-badge {
   line-height: 1;
   color: var(--vscode-editor-background);
   background: var(--author-color, var(--vscode-charts-blue));
-  border: 1px solid var(--vscode-contrastBorder, var(--vscode-focusBorder));
+  /* A transparent 1px border keeps the content box 17x17 and the baseline
+     unchanged. --vscode-contrastBorder only exists in High Contrast themes;
+     everywhere else it fell back to --vscode-focusBorder, so every author dot
+     wore a focus-blue ring. High contrast is handled by the media queries below. */
+  border: 1px solid transparent;
 }
 
 /* Same-initial author labels use two characters. Let their text fit without
@@ -626,7 +630,7 @@ button, .grip, .dot, .lock-icon, .stopped-badge {
   border: 1px solid var(--vscode-menu-border, var(--vscode-panel-border));
   border-radius: 5px;
   padding: 4px 0;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+  box-shadow: 0 2px 8px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.36));
 }
 
 .menu-header {
@@ -818,7 +822,11 @@ button, .grip, .dot, .lock-icon, .stopped-badge {
 }
 
 .btn:hover:not(:disabled) {
-  opacity: 0.9;
+  background: var(--vscode-button-secondaryHoverBackground, var(--vscode-button-secondaryBackground));
+}
+
+.btn.primary:hover:not(:disabled) {
+  background: var(--vscode-button-hoverBackground, var(--vscode-button-background));
 }
 
 .btn:disabled {
