@@ -1,5 +1,8 @@
 :root {
   color-scheme: light dark;
+  /* VS Code's built-in ease curves are too weak for UI feedback; this batch
+     uses only this one strong ease-out. */
+  --grv-ease-out: cubic-bezier(0.23, 1, 0.32, 1);
 }
 
 body {
@@ -486,6 +489,9 @@ button, .grip, .dot, .lock-icon, .stopped-badge {
 .commit.dragging {
   cursor: grabbing;
   opacity: 0.5;
+  outline: 1px dashed var(--vscode-descriptionForeground);
+  outline-offset: -1px;
+  transition: opacity 120ms ease;
 }
 
 .commit.drop-before {
@@ -514,6 +520,7 @@ button, .grip, .dot, .lock-icon, .stopped-badge {
   letter-spacing: -3px;
   opacity: 0.7;
   user-select: none;
+  transition: color 120ms ease, opacity 120ms ease;
 }
 
 .commit:hover .grip,
@@ -814,6 +821,11 @@ button, .grip, .dot, .lock-icon, .stopped-badge {
   cursor: pointer;
   color: var(--vscode-button-secondaryForeground);
   background: var(--vscode-button-secondaryBackground);
+  transition: transform 160ms var(--grv-ease-out);
+}
+
+.btn:active:not(:disabled) {
+  transform: scale(0.97);
 }
 
 .btn.primary {
@@ -854,4 +866,18 @@ button, .grip, .dot, .lock-icon, .stopped-badge {
   padding: 16px 10px;
   color: var(--vscode-descriptionForeground);
   font-size: 12px;
+}
+
+/* This batch introduces the project's first transform/transition, so it also
+   ships the reduced-motion opt-out. The full version (menu/tooltip/toast/banner
+   fades) lands in batch 4 together with those animations. */
+@media (prefers-reduced-motion: reduce) {
+  .btn:active:not(:disabled) {
+    transform: none;
+  }
+  .btn,
+  .commit.dragging,
+  .commit .grip {
+    transition-duration: 0ms;
+  }
 }
