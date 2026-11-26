@@ -266,6 +266,12 @@ button, .grip, .dot, .lock-icon, .stopped-badge {
 .direction {
   border-bottom: 1px solid var(--vscode-panel-border);
   background: var(--vscode-sideBarSectionHeader-background, transparent);
+  /* The row is permanently visible so a drag never moves the list. Its height
+     must therefore not depend on the hint text: keep it to one clipped line
+     even at narrow sidebar widths (~300px) where the drag copy would wrap. */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .timeline-end {
@@ -336,11 +342,11 @@ button, .grip, .dot, .lock-icon, .stopped-badge {
 }
 
 .locked-run.drop-before {
-  border-top: 2px solid var(--vscode-focusBorder);
+  box-shadow: inset 0 2px 0 var(--vscode-focusBorder);
 }
 
 .locked-run.drop-after {
-  border-bottom: 2px solid var(--vscode-focusBorder);
+  box-shadow: inset 0 -2px 0 var(--vscode-focusBorder);
 }
 
 .tooltip {
@@ -483,11 +489,14 @@ button, .grip, .dot, .lock-icon, .stopped-badge {
 }
 
 .commit.drop-before {
-  border-top: 2px solid var(--vscode-focusBorder);
+  /* Both .commit and .locked-run are content-box and had no top/bottom border.
+     A real border grew the row by 2px mid-drag and shifted every row below it;
+     an inset shadow paints the same line without touching layout. */
+  box-shadow: inset 0 2px 0 var(--vscode-focusBorder);
 }
 
 .commit.drop-after {
-  border-bottom: 2px solid var(--vscode-focusBorder);
+  box-shadow: inset 0 -2px 0 var(--vscode-focusBorder);
 }
 
 .commit .grip {

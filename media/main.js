@@ -58,8 +58,13 @@
   function setDragHint(message) { dragHint = message; renderDirection(); }
   function clearDragHint() { dragHint = ""; renderDirection(); }
   function renderDirection() {
-    directionEl.textContent = dragHint;
-    directionEl.classList.toggle("hidden", !dragHint);
+    // The hint row sits between #changes and #list and stays in the document
+    // flow. Showing it for the first time on pointerdown used to push the whole
+    // commit list down, so the row under the cursor changed at the instant the
+    // drag started. Keep it resident and swap only its text; the static copy is
+    // the empty-state discovery hint that used to be blank space.
+    directionEl.textContent = dragHint || "拖动 ⋮⋮ 重排 · Alt+↑↓ 移动一位";
+    directionEl.classList.remove("hidden");
   }
 
   function captureSearchFocus() {

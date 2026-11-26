@@ -134,6 +134,49 @@ test("actual webview pointer and native drop preserve the original session acros
   }
 });
 
+/**
+ * `#direction` sits between #changes and #list and stays in the document flow.
+ * The old implementation hid the row at idle and un-hid it on the first
+ * pointerdown, which pushed the whole commit list down ~24px exactly when the
+ * drag began — moving the row under the cursor and changing what
+ * elementFromPoint resolved to. The row must be resident from ready onward, and
+ * only its text may change between idle, dragging, and idle again.
+ */
+test("actual webview keeps the direction row resident across the drag lifecycle", () => {
+  const view = createHarness();
+  try {
+    // The fixture still starts with class="hidden" (the real template's first
+    // paint); renderDirection() runs on startup and must make it visible.
+    const direction = view.dom.window.document.getElementById("direction")!;
+    assert.equal(direction.classList.contains("hidden"), false, "the row is visible after ready");
+    assert.match(direction.textContent ?? "", /Alt\+↑↓/, "idle text is the static drag hint");
+
+    view.postState(state([a, b, c], 7));
+    const sourceGrip = view.row(c).querySelector(".grip") as HTMLElement;
+    const target = view.row(a);
+    Object.defineProperty(view.dom.window.document, "elementFromPoint", { configurable: true, value: () => target });
+    Object.defineProperty(target, "getBoundingClientRect", { configurable: true, value: () => ({ top: 10, height: 20 }) });
+
+    sourceGrip.dispatchEvent(pointerEvent(view.dom.window, "pointerdown", { pointerId: 4, clientY: 0 }));
+    assert.equal(direction.classList.contains("hidden"), false, "pointerdown never toggles the row's visibility");
+    assert.match(direction.textContent ?? "", /正在移动/, "pointerdown swaps in the live grab hint");
+    assert.doesNotMatch(direction.textContent ?? "", /Alt\+↑↓/, "the static hint is replaced while dragging");
+
+    sourceGrip.dispatchEvent(pointerEvent(view.dom.window, "pointermove", { pointerId: 4, clientY: 0 }));
+    assert.equal(direction.classList.contains("hidden"), false, "pointermove keeps the row resident");
+    assert.match(direction.textContent ?? "", /移动到/, "pointermove shows the live insertion target");
+
+    // Back to no hit target so pointerup takes the endDrag path rather than
+    // posting a reorder; the visible regression is the hint, not the payload.
+    Object.defineProperty(view.dom.window.document, "elementFromPoint", { configurable: true, value: () => null });
+    sourceGrip.dispatchEvent(pointerEvent(view.dom.window, "pointerup", { pointerId: 4, clientY: 0 }));
+    assert.equal(direction.classList.contains("hidden"), false, "drag end keeps the row resident instead of re-hiding it");
+    assert.match(direction.textContent ?? "", /Alt\+↑↓/, "drag end restores the static hint");
+  } finally {
+    view.close();
+  }
+});
+
 test("actual webview author dots show a two-character label for same-initial authors", () => {
   const view = createHarness();
   try {
