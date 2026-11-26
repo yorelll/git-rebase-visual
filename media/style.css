@@ -490,8 +490,10 @@ button, .grip, .dot, .lock-icon, .stopped-badge {
 
 .commit.drop-before {
   /* Both .commit and .locked-run are content-box and had no top/bottom border.
-     A real border grew the row by 2px mid-drag and shifted every row below it;
-     an inset shadow paints the same line without touching layout. */
+     A real border grew the row mid-drag and shifted every row below it; an
+     inset shadow paints the marker without affecting layout. It is clipped to
+     the padding box, so unlike the old border-top it does not run through the
+     3px left border strip — visually cleaner, but not pixel-identical. */
   box-shadow: inset 0 2px 0 var(--vscode-focusBorder);
 }
 

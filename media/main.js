@@ -57,13 +57,32 @@
   function short(hash) { return (hash || "").slice(0, 8); }
   function setDragHint(message) { dragHint = message; renderDirection(); }
   function clearDragHint() { dragHint = ""; renderDirection(); }
+  // The idle copy must not claim reordering is available when the very same
+  // checks that gate a drag say it is not. Priority mirrors canStartDrag():
+  // a live drag hint always wins, then the rebase lock, then the filter, then
+  // an empty timeline.
+  function directionHint() {
+    if (dragHint) return dragHint;
+    if (state.rebaseInProgress) return "变基进行中 · 重排已禁用";
+    if (isFilterActive()) return "过滤中无法重排 · 清空搜索后可用 ⋮⋮";
+    if (!(state.commits ?? []).length) return "没有可重排的 commit";
+    return "拖动 ⋮⋮ 重排 · Alt+↑↓ 移动一位";
+  }
   function renderDirection() {
-    // The hint row sits between #changes and #list and stays in the document
-    // flow. Showing it for the first time on pointerdown used to push the whole
-    // commit list down, so the row under the cursor changed at the instant the
-    // drag started. Keep it resident and swap only its text; the static copy is
-    // the empty-state discovery hint that used to be blank space.
-    directionEl.textContent = dragHint || "拖动 ⋮⋮ 重排 · Alt+↑↓ 移动一位";
+    // The row sits between #changes and #list and stays in the document flow.
+    // Showing it for the first time on pointerdown used to push the whole commit
+    // list down, so the row under the cursor changed at the instant the drag
+    // started. Keep it resident and swap only its text.
+    //
+    // The template gives this element role="status" and aria-live="polite". The
+    // idle copy is discovery text, not a status update: leaving it live would
+    // make endDrag() announce the static copy again, on top of the #live
+    // completion announcement, and could announce it on startup too. An explicit
+    // aria-live="off" overrides the implicit polite of role="status"; turn it
+    // back on only for the duration of a drag, where target changes must speak.
+    const live = dragHint ? "polite" : "off";
+    if (directionEl.getAttribute("aria-live") !== live) directionEl.setAttribute("aria-live", live);
+    directionEl.textContent = directionHint();
     directionEl.classList.remove("hidden");
   }
 
@@ -337,6 +356,12 @@
   }
 
   function renderList() {
+    // Every path that can change whether reordering is available funnels through
+    // here: a state message calls render() → renderList(), while filter edits,
+    // row selection and the clear-search button call renderList() directly. A
+    // single choke point at the top keeps the idle copy truthful after both; it
+    // must run before the empty-list early return below.
+    renderDirection();
     listEl.innerHTML = "";
     // A state posted with an `error` and nothing else — no workspace folder, not
     // a git repo, a failed range/compose query — has no `commits` key at all.

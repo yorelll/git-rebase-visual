@@ -44,11 +44,16 @@ function state(commits: string[], revision: number): Record<string, unknown> {
 }
 
 function createHarness(): Harness {
+  // Keep the fixture's element order identical to the real template
+  // (src/ui/rebaseViewProvider.ts): #changes → #direction → #list. An older
+  // fixture put #list first, so it could not catch a regression that moved
+  // #direction below or inside the list — the very shift this row exists to
+  // prevent.
   const dom = new JSDOM(`<!doctype html><body>
-    <div id="list"></div><div id="banner"></div><div id="context"></div>
-    <span id="context-text"></span><div id="inline-toast"></div><div id="changes"></div>
-    <div id="menu" class="hidden"></div><div id="tooltip" class="hidden"></div>
-    <div id="direction" class="hidden"></div><div id="live"></div>
+    <div id="banner"></div><div id="context"></div>
+    <span id="context-text"></span><div id="inline-toast"></div>
+    <div id="changes"></div><div id="direction" class="hidden"></div><div id="list"></div>
+    <div id="menu" class="hidden"></div><div id="tooltip" class="hidden"></div><div id="live"></div>
   </body>`, { runScripts: "outside-only", url: "https://webview.test/" });
   const messages: any[] = [];
   const { window } = dom;
@@ -141,37 +146,127 @@ test("actual webview pointer and native drop preserve the original session acros
  * drag began — moving the row under the cursor and changing what
  * elementFromPoint resolved to. The row must be resident from ready onward, and
  * only its text may change between idle, dragging, and idle again.
+ *
+ * The fixture deliberately gives the row class="hidden", which is stricter than
+ * the real template: src/ui/rebaseViewProvider.ts renders #direction without
+ * `hidden`. Keeping the stricter initial state forces this test to prove which
+ * code makes the row visible rather than passing on the template's own markup;
+ * it is not evidence that the real first frame hides the row.
  */
 test("actual webview keeps the direction row resident across the drag lifecycle", () => {
   const view = createHarness();
   try {
-    // The fixture still starts with class="hidden" (the real template's first
-    // paint); renderDirection() runs on startup and must make it visible.
-    const direction = view.dom.window.document.getElementById("direction")!;
+    const doc = view.dom.window.document;
+    const direction = doc.getElementById("direction")!;
+    const list = doc.getElementById("list")!;
+    // Document order is load-bearing: a regression that moved #direction below
+    // (or inside) #list would reintroduce a shift at drag start while every
+    // behavioural assertion below still passed.
+    assert.equal(direction.nextElementSibling, list, "#direction is the immediate previous sibling of #list");
     assert.equal(direction.classList.contains("hidden"), false, "the row is visible after ready");
-    assert.match(direction.textContent ?? "", /Alt\+↑↓/, "idle text is the static drag hint");
+    // At ready no state has arrived yet, so the truthful copy is "nothing to
+    // reorder" — not the actionable hint for a list that does not exist.
+    assert.match(direction.textContent ?? "", /没有可重排的 commit/, "startup copy does not promise a draggable list");
+    assert.equal(direction.getAttribute("aria-live"), "off", "the idle discovery copy is silent");
 
     view.postState(state([a, b, c], 7));
+    assert.match(direction.textContent ?? "", /Alt\+↑↓/, "with commits the idle text is the static drag hint");
+    assert.equal(direction.getAttribute("aria-live"), "off", "the static hint stays out of the live region");
+
     const sourceGrip = view.row(c).querySelector(".grip") as HTMLElement;
     const target = view.row(a);
-    Object.defineProperty(view.dom.window.document, "elementFromPoint", { configurable: true, value: () => target });
+    Object.defineProperty(doc, "elementFromPoint", { configurable: true, value: () => target });
     Object.defineProperty(target, "getBoundingClientRect", { configurable: true, value: () => ({ top: 10, height: 20 }) });
 
     sourceGrip.dispatchEvent(pointerEvent(view.dom.window, "pointerdown", { pointerId: 4, clientY: 0 }));
     assert.equal(direction.classList.contains("hidden"), false, "pointerdown never toggles the row's visibility");
     assert.match(direction.textContent ?? "", /正在移动/, "pointerdown swaps in the live grab hint");
     assert.doesNotMatch(direction.textContent ?? "", /Alt\+↑↓/, "the static hint is replaced while dragging");
+    assert.equal(direction.getAttribute("aria-live"), "polite", "drag changes must still be announced");
 
     sourceGrip.dispatchEvent(pointerEvent(view.dom.window, "pointermove", { pointerId: 4, clientY: 0 }));
     assert.equal(direction.classList.contains("hidden"), false, "pointermove keeps the row resident");
     assert.match(direction.textContent ?? "", /移动到/, "pointermove shows the live insertion target");
+    assert.equal(direction.getAttribute("aria-live"), "polite", "the insertion target is announced while dragging");
 
     // Back to no hit target so pointerup takes the endDrag path rather than
     // posting a reorder; the visible regression is the hint, not the payload.
-    Object.defineProperty(view.dom.window.document, "elementFromPoint", { configurable: true, value: () => null });
+    Object.defineProperty(doc, "elementFromPoint", { configurable: true, value: () => null });
     sourceGrip.dispatchEvent(pointerEvent(view.dom.window, "pointerup", { pointerId: 4, clientY: 0 }));
     assert.equal(direction.classList.contains("hidden"), false, "drag end keeps the row resident instead of re-hiding it");
     assert.match(direction.textContent ?? "", /Alt\+↑↓/, "drag end restores the static hint");
+    assert.equal(direction.getAttribute("aria-live"), "off", "returning to idle silences the row; #live owns the completion announcement");
+  } finally {
+    view.close();
+  }
+});
+
+test("the direction row states why reordering is unavailable instead of promising it", () => {
+  const view = createHarness();
+  try {
+    const doc = view.dom.window.document;
+    const direction = () => doc.getElementById("direction")!;
+
+    view.postState(state([], 1));
+    assert.match(direction().textContent ?? "", /没有可重排的 commit/, "an empty timeline has nothing to drag");
+
+    view.postState(state([a, b, c], 2));
+    assert.match(direction().textContent ?? "", /拖动 ⋮⋮ 重排/, "a draggable timeline gets the actionable hint");
+
+    // applySearch() only calls renderList(), not render(). The hint must still
+    // refresh, so renderDirection() has to hang off the list render.
+    const search = view.row(a).closest("#list")!.querySelector(".commit-search") as HTMLInputElement;
+    search.value = "no-such-commit";
+    search.dispatchEvent(new view.dom.window.Event("input", { bubbles: true }));
+    assert.match(direction().textContent ?? "", /过滤中无法重排/, "an active filter stops claiming drag is available");
+    assert.equal(direction().getAttribute("aria-live"), "off", "the unavailable copy is not a live announcement");
+
+    const clear = [...doc.querySelectorAll<HTMLButtonElement>("#list button")].find((b) => b.textContent === "清除");
+    assert.ok(clear, "the filter renders a clear button");
+    clear!.click();
+    assert.match(direction().textContent ?? "", /拖动 ⋮⋮ 重排/, "clearing the filter restores the actionable hint");
+
+    // A rebase only arrives through render(), never through the filter path.
+    view.postState({ ...state([a, b, c], 3), rebaseInProgress: true });
+    assert.match(direction().textContent ?? "", /变基进行中 · 重排已禁用/, "a running rebase disables reordering");
+    assert.equal(direction().getAttribute("aria-live"), "off", "the disabled copy is not a live announcement");
+  } finally {
+    view.close();
+  }
+});
+
+test("pointercancel and native dragstart/dragend close the drag session and its live hint", () => {
+  const view = createHarness();
+  try {
+    const doc = view.dom.window.document;
+    const direction = doc.getElementById("direction")!;
+    const reorders = () => view.messages.filter((message) => message.type === "reorder");
+    view.postState(state([a, b, c], 4));
+    const grip = () => view.row(c).querySelector(".grip") as HTMLElement;
+
+    // A cancelled pointer abandons the drag: nothing is posted and the row goes
+    // back to its silent idle copy.
+    grip().dispatchEvent(pointerEvent(view.dom.window, "pointerdown", { pointerId: 9, clientY: 0 }));
+    assert.equal(view.dom.window.__grvUiTrace().dragging, true, "pointerdown starts a drag session");
+    assert.equal(direction.getAttribute("aria-live"), "polite", "the drag session is announced");
+    grip().dispatchEvent(pointerEvent(view.dom.window, "pointercancel", { pointerId: 9, clientY: 0 }));
+    assert.equal(view.dom.window.__grvUiTrace().dragging, false, "pointercancel ends the session");
+    assert.match(direction.textContent ?? "", /Alt\+↑↓/, "pointercancel restores the idle copy");
+    assert.equal(direction.getAttribute("aria-live"), "off", "pointercancel silences the row again");
+    assert.deepEqual(reorders(), [], "pointercancel posts no reorder");
+
+    // Native HTML5 drag: dragstart opens the session and the live hint; dragend
+    // closes it even when no drop ever happened.
+    const dataTransfer = { effectAllowed: "", setData() {} };
+    grip().dispatchEvent(mouseEvent(view.dom.window, "dragstart", { dataTransfer }));
+    assert.equal(view.dom.window.__grvUiTrace().dragging, true, "native dragstart starts a drag session");
+    assert.match(direction.textContent ?? "", /正在移动/, "native dragstart shows the live grab hint");
+    assert.equal(direction.getAttribute("aria-live"), "polite", "the native drag session is announced");
+    grip().dispatchEvent(mouseEvent(view.dom.window, "dragend", { dataTransfer }));
+    assert.equal(view.dom.window.__grvUiTrace().dragging, false, "native dragend ends the session");
+    assert.match(direction.textContent ?? "", /Alt\+↑↓/, "native dragend restores the idle copy");
+    assert.equal(direction.getAttribute("aria-live"), "off", "native dragend silences the row again");
+    assert.deepEqual(reorders(), [], "an abandoned native drag posts no reorder");
   } finally {
     view.close();
   }
