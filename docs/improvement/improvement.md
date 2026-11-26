@@ -407,6 +407,12 @@
 
 * **验证**：两个类型检查零输出（`node node_modules/typescript/bin/tsc --noEmit` 与 `node node_modules/typescript/bin/tsc -p tsconfig.test.json --noEmit`，退出码均为 0）。完整套件 `node scripts/run-tests.js` 从 Git Bash 启动并从确认干净的进程表运行：**355 项 / 52 个文件**，pass 355 / fail 0 / cancelled 0 / skipped 0 / todo 0，runner 退出码 **0**，`duration_ms` 828038.94（约 13.8 分钟；从 PowerShell 的 PATH 运行缺少 `sh` 时为 354 pass / 1 skip）。受影响套件 `test/endOfOptionsGuard.test.ts test/capabilityProbe.test.ts` 共 18 条全绿。VSIX 从**删除后的** `dist-vsix/` 重建：12 个条目、`--verify-only` 白名单校验通过；包内 `extension/dist/extension.js` 的 sha256 为 `031c0471bfb7f5aee1166e44fbb766f52ac7e6fa69a745da9f1611f71a4b5351`，与随后现场重新执行 `node esbuild.js` 的产物逐字节相同（`cmp` 退出码 0）。未改版本号（仍为 `0.8.5`），未提交、未打 tag、未推送。打包时本机 Git Bash 的 PATH 没有 `npm`，改用 PowerShell 执行 `node scripts/package-vsix.js`，再用 Git Bash 执行 `--verify-only`（`unzip` 只在 Git Bash 的 PATH 中）。
 
+## UI 交互打磨（0.8.6，来源 `docs/ui-reivew/ui-review-0-8-6.md`）
+
+> 该评审把侧边栏 webview 的交互打磨拆成五批，批次划分与完整依据见原文档 §7。batch 1（拖拽提示行常驻 + 插入指示不改变盒模型）与 batch 2（圆点描边、浮层阴影、按钮 hover 改用 VS Code token）已合入 `main`；batch 3–5 尚未实施，仍以原文档为准。
+
+* **\[ ] P2 —— `.danger-btn` hover 对比度不足（batch 2 评审发现，未修）。** `Abort` / `Skip（丢弃 patch）` 使用 `--vscode-errorForeground` 配 secondary 按钮背景。这个配对在改造前就不达标：Light Modern 基态 **2.66:1**；batch 2 把 `.btn:hover` 从 `opacity: 0.9` 换成 `--vscode-button-secondaryHoverBackground` 后，hover 降到 **2.09:1**（Dark Modern 3.88 → 3.29:1），均低于 WCAG AA 4.5:1 与 UI 组件 3:1 的下限。**不改的原因**：达标需要改 danger 的红字颜色或引入专用的危险色 token，属视觉决策，应由实际体验验收后定；仅换 hover 背景无法达标（该红色在白底上也只有约 3.1:1）。**改动位置**：`media/style.css` 的 `.btn:hover:not(:disabled)` 与 `.danger-btn`，以及 `media/main.js` 中 `renderBanner()` 的两个按钮。**若后续决定修**，需同时复核 Light/Dark/High Contrast 三套主题与 disabled 态。
+
 ## 验收原则
 所有后续历史改写功能应满足：
 
