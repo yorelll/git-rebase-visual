@@ -21,7 +21,13 @@
  *
  * Usage:
  *   node scripts/ui-screenshot.mjs [--out DIR] [--theme a,b] [--only name,name]
- *                                  [--width N] [--height N] [--audit] [--debug-style]
+ *                                  [--width N] [--height N] [--audit] [--probe]
+ *                                  [--debug-style]
+ *
+ * `--probe` writes `probe.json` from the `window.__probe` object the
+ * focus-refresh / kbd-focus-loss / live-mutation / error-keyboard scenarios
+ * fill in. Those scenarios assert behaviour (focus survival, reorder count,
+ * mutation count, keyboard scrolling), which a PNG cannot show.
  *
  * Defaults to `D:\tmp\grv-ui-shots` so a render never dirties the working tree.
  */
@@ -634,6 +640,198 @@ const scenarios = {
   },
 };
 
+// ------------------------------------------------------- refresh/focus probes
+
+/**
+ * The four scenarios below measure what a screenshot cannot: whether a 1.5s
+ * refresh keeps keyboard focus, how many reorder messages two Alt+↓ presses
+ * produce, how many DOM mutations an identical poll causes, and whether the
+ * bounded error banner can be scrolled with the keyboard. `window.__probe` is
+ * read into `probe.json` when the harness is run with `--probe`.
+ */
+async function pressKey(page, key, code, vk, modifiers = 0) {
+  const event = { key, code, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk, modifiers };
+  await page.send("Input.dispatchKeyEvent", { type: "keyDown", ...event });
+  await page.send("Input.dispatchKeyEvent", { type: "keyUp", ...event });
+}
+
+const ACTIVE_SNAPSHOT = `(() => {
+  const a = document.activeElement;
+  return {
+    tag: a ? a.tagName : null,
+    id: a ? a.id : null,
+    cls: a ? (a.className || "").toString().trim().replace(/\\s+/g, ".") : null,
+    hash: a && a.dataset ? (a.dataset.hash || null) : null,
+    path: a && a.dataset ? (a.dataset.path || null) : null,
+    group: a && a.dataset ? (a.dataset.group || null) : null,
+    action: a && a.dataset ? (a.dataset.action || null) : null,
+    isBody: a === document.body,
+    hasFocus: document.hasFocus(),
+  };
+})()`;
+
+const installRecord = (page) => page.evaluate(`window.__probe = { steps: [] };
+  window.__probeRecord = (label) => window.__probe.steps.push({ label, ...${ACTIVE_SNAPSHOT} });
+  true`);
+
+scenarios["focus-refresh"] = async (page) => {
+  const state = { ...baseState };
+  await page.render(state);
+  await page.wait(150);
+  await installRecord(page);
+  // A real Tab from the third row lands on the fourth; focus() alone can leave
+  // :focus-visible false but the identity restoration is what is under test.
+  await page.tabTo(".commit", { after: "document.querySelectorAll('.commit')[2]" });
+  await page.evaluate(`window.__probeRecord("commitRowFocused"); true`);
+  // The exact defect: an identical state used to rebuild #list and drop focus.
+  await page.render(state);
+  await page.wait(120);
+  await page.evaluate(`window.__probeRecord("afterStateRefresh"); true`);
+  // A genuine list change rebuilds the rows; focus must be re-found by hash.
+  const changed = { ...state, commits: state.commits.map((commit, index) => index === 0 ? { ...commit, subject: commit.subject + " (updated)" } : commit) };
+  await page.render(changed);
+  await page.wait(120);
+  await page.evaluate(`window.__probeRecord("afterChangedStateRefresh"); true`);
+
+  // The search box keeps its own selection restore.
+  await page.evaluate(`document.querySelector(".commit-search").focus(); window.__probeRecord("searchFocused"); true`);
+  await page.render(changed);
+  await page.wait(120);
+  await page.evaluate(`window.__probeRecord("afterSameStateSearchRefresh"); true`);
+
+  // A change row and its open-diff button: identity is path + group.
+  await page.evaluate(`(() => { const more = document.querySelector("#changes details.changes-more"); if (more) { more.open = true; more.dispatchEvent(new Event("toggle")); } return true; })()`);
+  await page.wait(100);
+  await page.evaluate(`document.querySelector(".file-open").focus(); window.__probeRecord("fileOpenFocused"); true`);
+  await page.render({ ...changed, stagedCount: (changed.stagedCount || 0) + 1 });
+  await page.wait(120);
+  await page.evaluate(`window.__probeRecord("afterChangedStateFileOpenRefresh"); true`);
+
+  // A banner action survives a real banner-content change (progress advances).
+  const editState = { ...state, rebaseInProgress: true, conflictCount: 0, pausedReason: "edit", stoppedAt: commits[3].hash, totalSteps: 8, completedSteps: 3 };
+  await page.render(editState);
+  await page.wait(150);
+  await page.evaluate(`(() => { const b = [...document.querySelectorAll("#banner .btn")].find((el) => el.textContent.trim() === "Continue"); b.focus(); window.__probeRecord("bannerButtonFocused"); return true; })()`);
+  await page.render(editState);
+  await page.wait(120);
+  await page.evaluate(`window.__probeRecord("afterSameStateBannerRefresh"); true`);
+  await page.render({ ...editState, completedSteps: 4 });
+  await page.wait(120);
+  await page.evaluate(`window.__probeRecord("afterChangedStateBannerRefresh"); true`);
+};
+
+scenarios["kbd-focus-loss"] = async (page) => {
+  await page.render(baseState);
+  await page.wait(150);
+  await page.evaluate(`window.__probe = { steps: [] };
+    window.__probeSnapshot = (label) => {
+      window.__probe.steps.push({ label, ...${ACTIVE_SNAPSHOT} });
+      window.__probe.reorders = window.__hostMessages.filter((message) => message.type === "reorder")
+        .map((message) => ({ sourceHash: message.sourceHash, anchorHash: message.anchorHash, placement: message.placement }));
+    };
+    document.querySelectorAll(".commit")[4].focus();
+    true`);
+  await page.evaluate(`window.__probeSnapshot("before"); true`);
+  await pressKey(page, "ArrowDown", "ArrowDown", 40, 1);
+  await page.wait(200);
+  await page.evaluate(`window.__probeSnapshot("afterAltDown1"); true`);
+  // On the old webview the first renderList() dropped focus to <body>, so this
+  // second key press never reached a row and produced no second reorder.
+  await pressKey(page, "ArrowDown", "ArrowDown", 40, 1);
+  await page.wait(200);
+  await page.evaluate(`window.__probeSnapshot("afterAltDown2"); true`);
+  // Ctrl+Space multi-select also rerenders the list, and used to drop focus.
+  await page.evaluate(`document.querySelectorAll(".commit")[3].focus(); true`);
+  await pressKey(page, " ", "Space", 32, 2);
+  await page.wait(200);
+  await page.evaluate(`window.__probeSnapshot("afterCtrlSpace"); true`);
+};
+
+scenarios["live-mutation"] = async (page) => {
+  const state = { ...baseState, rebaseInProgress: true, conflictCount: 0, pausedReason: "edit", stoppedAt: commits[3].hash, totalSteps: 8, completedSteps: 3 };
+  await page.render(state);
+  await page.wait(150);
+  await page.evaluate(`window.__probe = {};
+    window.__probeObserve = () => {
+      window.__mutations = { banner: 0, list: 0, direction: 0, context: 0, changes: 0 };
+      const observe = (id, key) => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        new MutationObserver((records) => { window.__mutations[key] += records.length; }).observe(el, { childList: true, subtree: true, characterData: true });
+      };
+      observe("banner", "banner"); observe("list", "list"); observe("direction", "direction"); observe("context-text", "context"); observe("changes", "changes");
+    };
+    window.__probeObserve();
+    window.__probeTexts = {
+      banner: document.getElementById("banner").textContent,
+      list: document.getElementById("list").textContent,
+      direction: document.getElementById("direction").textContent,
+    };
+    true`);
+  await page.render(state);
+  await page.wait(250);
+  await page.evaluate(`window.__probe.sameState = {
+    mutations: window.__mutations,
+    textsUnchanged: {
+      banner: document.getElementById("banner").textContent === window.__probeTexts.banner,
+      list: document.getElementById("list").textContent === window.__probeTexts.list,
+      direction: document.getElementById("direction").textContent === window.__probeTexts.direction,
+    },
+    bannerLive: document.getElementById("banner").getAttribute("aria-live"),
+    bannerRole: document.getElementById("banner").getAttribute("role"),
+  }; true`);
+  // An equivalent state differs only in a field the panel does not paint. It
+  // must not churn the regions either.
+  await page.evaluate(`window.__probeObserve(); true`);
+  await page.render({ ...state, undoAvailable: !state.undoAvailable });
+  await page.wait(250);
+  await page.evaluate(`window.__probe.equivalentState = {
+    mutations: window.__mutations,
+    textsUnchanged: {
+      banner: document.getElementById("banner").textContent === window.__probeTexts.banner,
+      list: document.getElementById("list").textContent === window.__probeTexts.list,
+      direction: document.getElementById("direction").textContent === window.__probeTexts.direction,
+    },
+  }; true`);
+};
+
+scenarios["error-keyboard"] = async (page) => {
+  await page.render({ ...baseState, error: LONG_ERROR });
+  await page.wait(250);
+  await page.evaluate(`window.__probe = {};
+    window.__probeBanner = () => {
+      const banner = document.getElementById("banner");
+      const style = getComputedStyle(banner);
+      return {
+        tabIndex: banner.tabIndex,
+        hasTabIndexAttribute: banner.hasAttribute("tabindex"),
+        scrollHeight: banner.scrollHeight,
+        clientHeight: banner.clientHeight,
+        scrollTop: banner.scrollTop,
+        maxHeight: style.maxHeight,
+        overflowY: style.overflowY,
+        focusVisible: banner.matches(":focus-visible"),
+        outlineStyle: style.outlineStyle,
+        outlineWidth: style.outlineWidth,
+        outlineColor: style.outlineColor,
+        active: document.activeElement ? (document.activeElement.id || document.activeElement.tagName) : null,
+        documentScrollTop: document.scrollingElement.scrollTop,
+      };
+    };
+    window.__probe.long = window.__probeBanner();
+    true`);
+  await page.evaluate(`document.getElementById("banner").focus(); true`);
+  await page.wait(80);
+  await page.evaluate(`window.__probe.long.afterFocus = window.__probeBanner(); true`);
+  await pressKey(page, "PageDown", "PageDown", 34);
+  await page.wait(250);
+  await page.evaluate(`window.__probe.long.afterPageDown = window.__probeBanner(); true`);
+  // A short error fits: the banner must not become a tab stop.
+  await page.render({ ...baseState, error: "fatal: a short failure" });
+  await page.wait(200);
+  await page.evaluate(`window.__probe.short = window.__probeBanner(); true`);
+};
+
 /**
  * The compose / AI-message panel is driven entirely by host messages, so each
  * scenario is one `openCompose` plus the follow-up the host would send.
@@ -1019,6 +1217,7 @@ const LAYOUT_PROBE = `(() => {
 })()`;
 
 const auditResults = [];
+const probeResults = [];
 
 class Cdp {
   constructor(socket) {
@@ -1358,6 +1557,13 @@ async function renderTheme(themeName, chromePort, profile, defaults) {
       // into effectiveContrast and reports a colour the user never sees.
       await cdp.evaluate(`Promise.all(document.getAnimations().map((animation) => animation.finished.catch(() => {}))).then(() => true)`).catch(() => {});
       if (args.includes("--audit")) auditResults.push({ theme: themeName, scenario: name, elements: await cdp.evaluate(AUDIT_PROBE), interaction: await cdp.evaluate(INTERACTION_PROBE), layout: await cdp.evaluate(LAYOUT_PROBE) });
+      if (args.includes("--probe")) {
+        const probe = await cdp.evaluate("window.__probe ?? null").catch(() => null);
+        if (probe) {
+          probeResults.push({ theme: themeName, scenario: name, probe });
+          console.log(`  probe ${name}: ${JSON.stringify(probe)}`);
+        }
+      }
       if (args.includes("--debug-style") && name === "menu") {
         console.log("  menu-fit:", JSON.stringify(await cdp.evaluate(`(() => {
           const menu = document.getElementById("menu");
@@ -1407,6 +1613,9 @@ const main = async () => {
     // A fixed base port collides when two renders run at once (before/after
     // comparison, or a reviewer's harness next to ours); pick a per-process base.
     await renderTheme(themeName, portBase + index, path.join(outDir, `.chrome-profile-${themeName}`), defaults);
+  }
+  if (probeResults.length) {
+    fs.writeFileSync(path.join(outDir, "probe.json"), JSON.stringify(probeResults, null, 2));
   }
   if (auditResults.length) {
     fs.writeFileSync(path.join(outDir, "audit.json"), JSON.stringify(auditResults, null, 2));
