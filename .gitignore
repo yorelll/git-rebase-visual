@@ -14,6 +14,15 @@ dist-vsix/
 # Test source is versioned; transient fixture repositories remain ignored.
 test/tarot-flow/
 
+# docs/ is agent-facing working material: versioned review reports, review
+# responses, follow-up lists and research notes. Only the release notes and the
+# release template are shipped in the repository, so those stay versioned and
+# everything else stays local — review artefacts churn daily and would otherwise
+# turn every review round into remote history.
+docs/*
+!docs/release-notes/
+!docs/release-template.md
+
 # editor / tooling local state
 .superpowers/
 .claude/
