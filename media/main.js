@@ -33,6 +33,10 @@
   let stateLoaded = false;
   let drag = null;
   let dragHint = "";
+  // Roving tabindex: exactly one commit row is `tabIndex=0` at a time. This is
+  // the row kept as active across list rebuilds; `state.activeHash` remains the
+  // host-facing notion of the active commit, so a focused row also sets it.
+  let activeRowHash = null;
   let filterText = "";
   let selectedHashes = new Set();
   let selectionAnchor = null;
@@ -104,7 +108,15 @@
     // When it is false (the user is typing in the editor next door) a poll must
     // not pull focus into the sidebar.
     if (typeof document.hasFocus === "function" && !document.hasFocus()) return null;
-    return focusIdentityFor(document.activeElement);
+    const active = document.activeElement;
+    // A row can receive focus without going through the arrow handler (a
+    // programmatic focus, or Tab landing on the roving stop). Make it the
+    // active row here as well: the rebuild below sets `tabIndex=0` only on the
+    // active row, and `focusIfVerified()` rejects a `-1` target, so a stale
+    // active hash would drop focus to search after every refresh.
+    const focusedRow = active?.closest?.(".commit");
+    if (focusedRow?.dataset.hash) activeRowHash = focusedRow.dataset.hash;
+    return focusIdentityFor(active);
   }
   function findByData(el, key, value) {
     return [...el.querySelectorAll("[data-" + key + "]")].find((candidate) => candidate.dataset[key] === value) || null;
@@ -278,6 +290,11 @@
     const b = document.createElement("button");
     b.type = "button"; b.className = "btn" + (options.primary ? " primary" : "") + (options.danger ? " danger-btn" : "");
     b.textContent = label; b.disabled = !!options.disabled; b.title = options.title || "";
+    // An icon-only button's text content is a symbol, so `textContent` is a
+    // useless accessible name. `ariaLabel` carries the spoken action; `title`
+    // stays the pointer tooltip. Text buttons deliberately do not get one:
+    // their visible label is the name, and a title there is extra help text.
+    if (options.ariaLabel) b.setAttribute("aria-label", options.ariaLabel);
     // Stable identity for focus restoration across a refresh; the label is
     // localized copy, the action is a fixed key.
     if (options.action) b.dataset.action = options.action;
@@ -445,7 +462,12 @@
       }
       header.appendChild(groupActions); parent.appendChild(header);
       items.forEach((change) => {
-        const row = document.createElement("div"); row.className = "change-file"; row.tabIndex = 0;
+        // Deliberately not a tab stop: the row has no keyboard action of its
+        // own. `.file-open` and `.file-action` are the real controls, and
+        // `.change-file:focus-within` still reveals `.file-actions` while one
+        // of them holds focus. A row-level tab stop only added a dead Press of
+        // Tab before every file.
+        const row = document.createElement("div"); row.className = "change-file";
         // The same path can appear once per group (staged and unstaged), so the
         // focus key is path + group, never the path alone.
         row.dataset.path = change.path; row.dataset.group = side;
@@ -635,6 +657,12 @@
     // must run before the empty-list early return below.
     renderDirection();
     listEl.innerHTML = "";
+    // `#list` is a plain container, not the listbox. The search controls and
+    // the two timeline-end labels are siblings of the options, not options
+    // themselves; announcing a search input as a child of `role="listbox"` (or
+    // counting a label as an item) is the inconsistency N2 reports. The inner
+    // `.listbox` only holds options and locked-run groups.
+    listEl.removeAttribute("role");
     // A state posted with an `error` and nothing else — no workspace folder, not
     // a git repo, a failed range/compose query — has no `commits` key at all.
     // Rendering order is banner → context → changes → list, so without this the
@@ -646,8 +674,6 @@
     selectedHashes = new Set([...selectedHashes].filter((h) => known.has(h)));
     if (!commits.length) { const empty = document.createElement("div"); empty.className = "empty"; empty.textContent = "没有可显示的 commit。"; listEl.appendChild(empty); restoreFocusIdentity(focus); return; }
     const visible = filteredCommits();
-    listEl.setAttribute("role", "listbox");
-    listEl.setAttribute("aria-label", `Commit 时间轴，共 ${commits.length} 个 commit，显示 ${visible.length} 个，顶部较早，底部较新`);
     const controls = document.createElement("div"); controls.className = "list-controls";
     const search = document.createElement("input"); search.type = "search"; search.className = "commit-search"; search.placeholder = "搜索 hash、message、作者"; search.value = filterText;
     search.setAttribute("aria-label", "过滤 commit；过滤时禁用重排。支持 author:、hash:、msg:；hash:0x 前缀可省略。");
@@ -676,33 +702,144 @@
     if (filterText) controls.appendChild(button("清除", () => { filterText = ""; persistUi(); renderList(); listEl.querySelector(".commit-search")?.focus(); }, { action: "clear-filter" }));
     listEl.appendChild(controls);
     const top = document.createElement("div"); top.className = "timeline-end"; top.textContent = "↑ Base / 较早"; listEl.appendChild(top);
+    // Options (and collapsed locked-run groups) live in their own listbox.
+    // The wrapper is a plain block with no own box: margins still collapse
+    // through it exactly as they did through #list, so the rendered geometry
+    // is unchanged (proved by the layout probe).
+    const listbox = document.createElement("div"); listbox.className = "listbox";
+    listbox.setAttribute("role", "listbox");
+    // Ctrl+Space multi-select already exists, so the listbox really is
+    // multiselectable. Roving tabindex is used instead of
+    // `aria-activedescendant`: DOM focus stays on the option itself, which
+    // keeps `:focus-visible`, the per-row Alt+↑↓/Space handlers and batch A's
+    // focus-by-hash restore working. Adding activedescendant on top would
+    // announce the same row twice.
+    listbox.setAttribute("aria-multiselectable", "true");
+    listEl.appendChild(listbox);
     let pendingMarkerShown = false;
     let i = 0;
     while (i < visible.length) {
       const c = visible[i];
       if (commitIsPending(c) && !pendingMarkerShown) {
         const marker = document.createElement("div"); marker.className = "pending-boundary";
+        // The marker is explanatory copy, not an option. Each pending row's
+        // own aria-label already says 待重放, so the boundary stays out of the
+        // accessibility tree instead of masquerading as a list item.
+        marker.setAttribute("role", "presentation"); marker.setAttribute("aria-hidden", "true");
         const pendingCount = visible.slice(i).filter(commitIsPending).length;
         marker.textContent = `↓ 以下 ${pendingCount} 个 commit 待重放，Continue 后 hash 将变化`;
-        listEl.appendChild(marker); pendingMarkerShown = true;
+        listbox.appendChild(marker); pendingMarkerShown = true;
       }
       if (c.locked && !isUnsafeToCollapse(c)) {
         let end = i + 1;
         while (end < visible.length && visible[end].locked && !isUnsafeToCollapse(visible[end])) end++;
-        if (state.collapseLockedRuns && end - i >= 3) { listEl.appendChild(lockedRunRow(visible.slice(i, end))); i = end; continue; }
+        if (state.collapseLockedRuns && end - i >= 3) {
+          listbox.appendChild(lockedRunRow(visible.slice(i, end)));
+          i = end; continue;
+        }
       }
-      listEl.appendChild(commitRow(c)); i++;
+      listbox.appendChild(commitRow(c)); i++;
     }
-    if (!visible.length) { const empty = document.createElement("div"); empty.className = "empty"; empty.textContent = "无匹配 · 清空搜索以显示全部 commit。"; listEl.appendChild(empty); }
+    if (!visible.length) { const empty = document.createElement("div"); empty.className = "empty"; empty.setAttribute("role", "presentation"); empty.textContent = "无匹配 · 清空搜索以显示全部 commit。"; listbox.appendChild(empty); }
     const bottom = document.createElement("div"); bottom.className = "timeline-end"; bottom.textContent = "↓ HEAD / 较新"; listEl.appendChild(bottom);
+    updateListboxLabel(listbox);
+    applyRoving();
     restoreFocusIdentity(focus);
   }
 
+  // ------------------------------------------------------- listbox navigation
+  // Roving tabindex helpers. A row inside a closed locked run has no layout
+  // box and cannot take focus, so it is excluded from navigation and from the
+  // reachable count even though it exists in the DOM.
+  function optionRows() { return [...listEl.querySelectorAll(".commit")]; }
+  function optionIsReachable(row) {
+    const details = row.closest("details.locked-run");
+    return !details || details.open;
+  }
+  function setRovingActive(row, { focus = false } = {}) {
+    optionRows().forEach((candidate) => { candidate.tabIndex = candidate === row ? 0 : -1; });
+    if (!row) { activeRowHash = null; return; }
+    activeRowHash = row.dataset.hash;
+    // Focusing a row is also the active-row notion other features use (a
+    // locked run containing the active row must stay expanded, and Alt+↑↓ /
+    // Space act on the focused row). Keep them in sync, but never touch
+    // `selectedHashes`: moving the roving stop is not a selection change.
+    state.activeHash = row.dataset.hash;
+    if (focus) row.focus();
+  }
+  // The label's counts describe what is actually reachable in the listbox:
+  // "共 N 个" is the repository count, "显示 M 个" is options a screen reader
+  // can walk to right now. Collapsed locked runs and the filter are named
+  // rather than silently subtracted. Recomputed after a run is expanded or
+  // collapsed too, because that changes reachability without a list rebuild.
+  function updateListboxLabel(listbox) {
+    if (!listbox) return;
+    const total = (state.commits ?? []).length;
+    const filtered = filteredCommits().length;
+    const reachable = [...listbox.querySelectorAll(".commit")].filter(optionIsReachable).length;
+    const filterNote = isFilterActive() ? `，过滤后 ${filtered} 个` : "";
+    const collapsed = filtered - reachable;
+    const collapsedNote = collapsed > 0 ? `，其中 ${collapsed} 个折叠在锁定区（展开后可操作）` : "";
+    listbox.setAttribute("aria-label", `Commit 时间轴，共 ${total} 个 commit，显示 ${reachable} 个${filterNote}${collapsedNote}，顶部较早，底部较新`);
+  }
+  // After every rebuild exactly one option carries tabIndex=0. Prefer the row
+  // that held the roving stop, then the host's active commit, then the first
+  // reachable option.
+  function applyRoving() {
+    const rows = optionRows();
+    const active = rows.find((row) => row.dataset.hash === activeRowHash && optionIsReachable(row))
+      || rows.find((row) => row.dataset.hash === state.activeHash && optionIsReachable(row))
+      || rows.find(optionIsReachable)
+      || null;
+    rows.forEach((row) => { row.tabIndex = row === active ? 0 : -1; });
+    activeRowHash = active ? active.dataset.hash : null;
+    // Keep the host-facing active commit on a row that really is reachable: a
+    // hidden row must not keep a collapsed run exempt from collapsing on the
+    // next render.
+    if (active) state.activeHash = active.dataset.hash;
+  }
+  function moveActiveOption(key) {
+    const rows = optionRows().filter(optionIsReachable);
+    if (!rows.length) return;
+    let index = rows.indexOf(document.activeElement);
+    if (index < 0) index = rows.findIndex((row) => row.dataset.hash === activeRowHash);
+    if (index < 0) index = 0;
+    const next = key === "Home" ? 0
+      : key === "End" ? rows.length - 1
+      : key === "ArrowUp" ? Math.max(0, index - 1)
+      : Math.min(rows.length - 1, index + 1);
+    setRovingActive(rows[next], { focus: true });
+  }
+  // Tab can land on the roving stop without a keydown on the row. Sync the
+  // active row then, so a following refresh restores focus to it.
+  listEl.addEventListener("focusin", (event) => {
+    const row = event.target?.closest?.(".commit");
+    if (row && row.tabIndex !== 0) setRovingActive(row);
+  });
+
   function lockedRunRow(commits) {
     const key = lockedRunKey(commits); const details = document.createElement("details"); details.className = "locked-run"; details.open = expandedLockedRuns.has(key);
+    // A `<details>` inside `role="listbox"` must not be a nameless group. The
+    // label repeats the run's commit count and author breakdown so entering
+    // the run is intelligible without expanding it first.
+    details.setAttribute("role", "group");
+    details.setAttribute("aria-label", runSummaryAria(commits));
     // Stable identity for the focusable <summary> across list rebuilds.
     details.dataset.lockedRun = key;
-    details.addEventListener("toggle", () => { if (details.open) expandedLockedRuns.add(key); else expandedLockedRuns.delete(key); persistUi(); });
+    details.addEventListener("toggle", () => {
+      if (details.open) expandedLockedRuns.add(key); else expandedLockedRuns.delete(key);
+      persistUi();
+      const listbox = details.closest('[role="listbox"]');
+      // Expanding makes the run's options reachable, so the announced count and
+      // the Tab stop have to follow without waiting for the next rebuild. The
+      // first option becomes the roving stop; collapsing a run that held it
+      // falls back to the next reachable option.
+      if (details.open) {
+        const first = details.querySelector(".commit");
+        if (first) setRovingActive(first);
+      } else applyRoving();
+      updateListboxLabel(listbox);
+    });
     const summary = document.createElement("summary"); summary.textContent = runSummary(commits); summary.title = runSummaryAria(commits);
     summary.setAttribute("aria-label", `${runSummaryAria(commits)}；拖入上半部插入 run 前，拖入下半部插入 run 后`);
     summary.addEventListener("dragover", (event) => { if (!drag || drag.filter || state.rebaseInProgress) return; event.preventDefault(); const after = isAfter(event, summary); clearDropMarkers(); details.classList.toggle("drop-before", !after); details.classList.toggle("drop-after", after); setDragHint(`将 ${short(drag.sourceHash)} 移动到锁定区 ${after ? "之后" : "之前"}`); });
@@ -720,7 +857,8 @@
   function commitRow(c) {
     const row = document.createElement("div"); const pending = commitIsPending(c); const stopped = commitIsStopped(c); const selected = selectedHashes.has(c.hash); const index = state.commits.indexOf(c) + 1;
     row.className = `commit${c.locked ? " locked" : ""}${pending ? " pending" : ""}${stopped ? " stopped" : ""}${selected ? " selected" : ""}${keyboardPickup?.sourceHash === c.hash ? " keyboard-pickup" : ""}`;
-    row.dataset.hash = c.hash; row.tabIndex = 0; row.setAttribute("role", "option"); row.setAttribute("aria-selected", String(selected));
+    // `tabIndex` is assigned by applyRoving(): exactly one row is 0.
+    row.dataset.hash = c.hash; row.setAttribute("role", "option"); row.setAttribute("aria-selected", String(selected));
     row.setAttribute("aria-label", `第 ${index} 项，共 ${state.commits.length} 项，${c.subject}，${short(c.hash)}，${c.author}${c.locked ? "，已锁定" : ""}${pending ? "，待重放" : ""}${stopped ? "，变基停靠于此" : ""}。选择后可按 Alt+上/下 移动一位。`);
     const grip = document.createElement("span"); grip.className = "grip"; grip.textContent = "⋮⋮"; grip.title = isFilterActive() ? "过滤中无法重排，请先清空搜索。" : c.locked ? "已锁定的 commit 不能拖动。" : "拖拽重排；顶部较早，底部较新"; grip.setAttribute("aria-hidden", "true"); grip.draggable = !state.rebaseInProgress && !isFilterActive() && !c.locked;
     const authorDotLabel = authorLabel(c);
@@ -794,6 +932,10 @@
       selectionAnchor = c.hash;
     }
     state.activeHash = c.hash;
+    // A pointer click selects the row even when the browser did not move DOM
+    // focus (a synthetic click, or a click on a child that suppresses it). Make
+    // that row the roving stop too, so the next arrow press starts from it.
+    activeRowHash = c.hash;
     renderList();
   }
   function selectContextTarget(c) {
@@ -805,6 +947,7 @@
       selectionAnchor = c.hash;
     }
     state.activeHash = c.hash;
+    activeRowHash = c.hash;
     renderList();
   }
   function clearSelection(event) {
@@ -814,6 +957,15 @@
   function rowKeydown(event, c) {
     if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) { event.preventDefault(); selectContextTarget(c); const r = event.currentTarget.getBoundingClientRect(); openMenu(r.left + 8, r.bottom, c, event.currentTarget, { instant: true }); return; }
     if ((event.ctrlKey || event.metaKey) && event.key === " ") { event.preventDefault(); selectRow({ ctrlKey: true, target: event.currentTarget }, c); return; }
+    // Roving tabindex navigation. Distinct from Alt+↑↓ (reorder) and from
+    // Ctrl+Space (selection): arrows only move the focus/active row. These
+    // stay available during a rebase or a filter, where reordering is refused,
+    // because browsing a long list must not depend on those modes.
+    if (!event.altKey && !event.ctrlKey && !event.metaKey && ["ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) {
+      event.preventDefault();
+      moveActiveOption(event.key);
+      return;
+    }
     if (event.altKey && (event.key === "ArrowUp" || event.key === "ArrowDown")) {
       event.preventDefault();
       if (state.rebaseInProgress || isFilterActive() || c.locked) {
@@ -821,7 +973,7 @@
       }
       // Alt arrows construct a one-step intent from the key event's immutable
       // snapshot. A refresh that follows cannot change what this key meant.
-      selectedHashes.clear(); selectionAnchor = c.hash; state.activeHash = c.hash;
+      selectedHashes.clear(); selectionAnchor = c.hash; state.activeHash = c.hash; activeRowHash = c.hash;
       const session = { sourceHash: c.hash, revision: state.canonicalRevision, canonicalOrder: [...state.canonicalOrder] };
       const sourceAt = session.canonicalOrder.indexOf(c.hash); const direction = event.key === "ArrowUp" ? -1 : 1; const anchor = session.canonicalOrder[sourceAt + direction];
       if (!anchor) { announce(`已在${direction < 0 ? "最早" : "最新"}位置，不能继续移动。`); renderList(); return; }
@@ -911,12 +1063,29 @@
   function menuItem(item) {
     const el = document.createElement("button"); el.type = "button"; el.className = "item" + (item.disabled ? " disabled" : "") + (item.danger ? " danger" : ""); el.setAttribute("role", "menuitem"); el.tabIndex = -1;
     el.innerHTML = `<span class="menu-icon" aria-hidden="true">${item.icon || ""}</span><span>${item.label}</span>${item.shortcut ? `<kbd>${item.shortcut}</kbd>` : ""}`;
-    if (item.disabled) { el.title = item.disabledReason || ""; el.setAttribute("aria-description", item.disabledReason || ""); } else el.onclick = () => { closeMenu(); item.action(); };
+    // A native `disabled` menu item cannot be focused, so `menuButtons()`
+    // skipped it and both the keyboard cycle and `aria-description` were
+    // unreachable. `aria-disabled` keeps the item in the focus cycle (the
+    // canonical pattern for menus) while still describing why it is inert; the
+    // activation handler refuses to run the action and speaks the reason.
+    if (item.disabled) {
+      el.setAttribute("aria-disabled", "true");
+      el.title = item.disabledReason || "";
+      el.setAttribute("aria-description", item.disabledReason || "");
+      el.addEventListener("click", (event) => {
+        // Keep the menu (and any batch selection it represents) intact; this
+        // is an explanation, not a command.
+        event.preventDefault(); event.stopPropagation();
+        announce(item.disabledReason || "此操作当前不可用。");
+      });
+    } else el.onclick = () => { closeMenu(); item.action(); };
     return el;
   }
   function sep() { const el = document.createElement("div"); el.className = "sep"; el.setAttribute("role", "separator"); return el; }
   function group(text) { const el = document.createElement("div"); el.className = "menu-group-label"; el.textContent = text; return el; }
-  function menuButtons() { return [...menuEl.querySelectorAll("button:not(.disabled)")]; }
+  // Disabled items are focus stops too: arrow navigation must land on them so
+  // their reason is reachable with the keyboard and from a screen reader.
+  function menuButtons() { return [...menuEl.querySelectorAll("button.item")]; }
   function focusMenu(index) { const buttons = menuButtons(); if (!buttons.length) return; const next = (index + buttons.length) % buttons.length; buttons.forEach((b, i) => b.tabIndex = i === next ? 0 : -1); buttons[next].focus(); }
   function openMenu(x, y, c, origin, options = {}) {
     hideTooltip(); menuRestoreFocus = origin || document.activeElement; menuEl.innerHTML = "";
@@ -987,7 +1156,10 @@
   function showDetail(d) {
     if (d.hash !== tipHash || !tipAnchor) return; tooltipEl.innerHTML = "";
     const top = document.createElement("div"); top.className = "tip-top"; const meta = document.createElement("div"); meta.className = "tip-meta"; meta.textContent = `${d.author} · ${d.relDate} · ${d.absDate}`;
-    const actions = document.createElement("div"); actions.className = "tip-actions"; actions.append(button("⧉", () => vscode.postMessage({ type: "copyText", text: d.message }), { title: "复制完整 message" }), button("◫", () => vscode.postMessage({ type: "openDiff", hash: d.hash }), { title: "打开变更" })); top.append(meta, actions);
+    const actions = document.createElement("div"); actions.className = "tip-actions"; actions.append(
+      button("⧉", () => vscode.postMessage({ type: "copyText", text: d.message }), { title: "复制完整 message", ariaLabel: "复制完整 message" }),
+      button("◫", () => vscode.postMessage({ type: "openDiff", hash: d.hash }), { title: "打开变更", ariaLabel: "打开变更" })
+    ); top.append(meta, actions);
     const stat = document.createElement("div"); stat.className = "tip-stat"; stat.textContent = `${short(d.hash)} · ${compactStat(d.stat)}`;
     const msg = document.createElement("pre"); msg.className = "tip-msg"; msg.textContent = d.message; tooltipEl.append(top, stat, msg);
     // As with the menu, the flag must be on the element before it is revealed.

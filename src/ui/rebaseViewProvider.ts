@@ -3340,7 +3340,7 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
 <div id="context" class="branch-context hidden"><span id="context-text"></span><div id="inline-toast" class="inline-toast hidden" role="status" aria-live="polite"></div></div>
 <div id="changes" class="changes hidden"></div>
 <div id="direction" class="direction" role="status" aria-live="polite"></div>
-<div id="list" class="list" role="list"></div>
+<div id="list" class="list"></div>
 <div id="menu" class="menu hidden" role="menu" aria-label="Commit 操作菜单"></div>
 <div id="tooltip" class="tooltip hidden"></div>
 <div id="live" class="sr-only" role="status" aria-live="polite"></div>

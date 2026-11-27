@@ -1360,3 +1360,198 @@ test("the tooltip pops in from the row-facing edge and flips its origin when pla
     view.close();
   }
 });
+
+// ------------------------------------------------- N2: listbox semantics
+test("the listbox owns only options and keeps a single roving tab stop", () => {
+  const view = createHarness();
+  try {
+    const doc = view.dom.window.document;
+    view.postState(state([a, b, c], 7));
+    const listEl = doc.getElementById("list")!;
+    const listbox = listEl.querySelector('[role="listbox"]') as HTMLElement | null;
+    assert.ok(listbox, "the options live in a dedicated listbox");
+    assert.equal(listEl.hasAttribute("role"), false, "#list is a plain container, not a second listbox");
+    assert.equal(listbox!.getAttribute("aria-multiselectable"), "true", "Ctrl+Space multi-select is declared");
+    assert.match(listbox!.getAttribute("aria-label") ?? "", /共 3 个 commit，显示 3 个/, "every visible option is counted");
+    // The search field and the two timeline labels must not be listbox children.
+    assert.equal(listbox!.querySelector("input, .list-controls, .timeline-end"), null, "controls and labels are outside the listbox");
+    assert.equal(listEl.querySelector(":scope > .commit"), null, "options are not direct children of #list");
+    assert.equal(listbox!.querySelectorAll(".commit").length, 3);
+
+    // Ctrl+Space rebuilds the list, so re-query the live listbox every time.
+    const tabStops = () => [...doc.querySelector('[role="listbox"]')!.querySelectorAll<HTMLElement>(".commit")].filter((row) => row.tabIndex === 0);
+    assert.equal(tabStops().length, 1, "exactly one option is tabbable");
+    assert.equal(tabStops()[0].dataset.hash, a, "the first option is the initial roving stop");
+
+    // Ctrl+Space selects the active row without touching the roving rule.
+    const active = () => doc.activeElement as HTMLElement;
+    tabStops()[0].focus();
+    active().dispatchEvent(new view.dom.window.KeyboardEvent("keydown", { key: " ", ctrlKey: true, bubbles: true, cancelable: true }));
+    assert.deepEqual([...view.dom.window.__grvUiTrace().selectedHashes], [a], "the active row is selected");
+
+    const press = (key: string) => active().dispatchEvent(new view.dom.window.KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }));
+    press("ArrowDown");
+    assert.equal(active().dataset.hash, b, "Down moves focus to the next option");
+    assert.equal(tabStops().length, 1, "still a single roving stop");
+    assert.equal(tabStops()[0].dataset.hash, b, "the roving stop follows focus");
+    assert.deepEqual([...view.dom.window.__grvUiTrace().selectedHashes], [a], "moving focus does not change the selection");
+    assert.equal(view.dom.window.__grvUiTrace().activeHash, b, "the active row is synchronized");
+
+    press("End");
+    assert.equal(active().dataset.hash, c, "End moves to the last option");
+    press("ArrowUp");
+    assert.equal(active().dataset.hash, b, "Up moves back one option");
+    press("Home");
+    assert.equal(active().dataset.hash, a, "Home moves to the first option");
+    assert.deepEqual([...view.dom.window.__grvUiTrace().selectedHashes], [a], "navigation never mutates the selection");
+  } finally {
+    view.close();
+  }
+});
+
+test("a collapsed locked run is a named listbox group and is excluded from the reachable count", () => {
+  const view = createHarness();
+  try {
+    const doc = view.dom.window.document;
+    const lockedState = state([a, b, c, d], 7);
+    (lockedState.commits as Array<Record<string, unknown>>).slice(0, 3).forEach((commit) => { commit.locked = true; });
+    lockedState.collapseLockedRuns = true;
+    view.postState(lockedState);
+
+    const listbox = doc.querySelector('[role="listbox"]') as HTMLElement;
+    assert.ok(listbox, "the listbox wrapper exists");
+    const run = listbox.querySelector("details.locked-run") as HTMLDetailsElement;
+    assert.ok(run, "three locked commits collapse into a run");
+    assert.equal(run.getAttribute("role"), "group", "the run is a group inside the listbox");
+    const label = run.getAttribute("aria-label") ?? "";
+    assert.match(label, /已锁定 3 个 commit/, "the group names its commit count");
+    assert.match(label, /Author 1 1 个/, "the group names the author breakdown");
+    assert.equal(run.open, false, "the run really is collapsed");
+    assert.deepEqual(
+      [...listbox.children].map((child) => child.getAttribute("role")),
+      ["group", "option"],
+      "the listbox only holds the group and the one reachable option"
+    );
+    const ariaLabel = listbox.getAttribute("aria-label") ?? "";
+    assert.match(ariaLabel, /共 4 个 commit，显示 1 个/, "the reachable count excludes the folded options");
+    assert.match(ariaLabel, /其中 3 个折叠在锁定区/, "the label explains the folded options instead of silently dropping them");
+    const zero = () => [...listbox.querySelectorAll<HTMLElement>(".commit")].filter((row) => row.tabIndex === 0);
+    assert.deepEqual(zero().map((row) => row.dataset.hash), [d], "the unfolded option is the roving stop");
+
+    // Expanding the run makes its options reachable; the announced count and
+    // the roving stop must follow without a rebuild.
+    run.open = true;
+    run.dispatchEvent(new view.dom.window.Event("toggle"));
+    assert.match(listbox.getAttribute("aria-label") ?? "", /显示 4 个/, "expanding updates the reachable count");
+    assert.doesNotMatch(listbox.getAttribute("aria-label") ?? "", /折叠在锁定区/, "no folded remainder is claimed once expanded");
+    assert.deepEqual(zero().map((row) => row.dataset.hash), [a], "the first now-reachable option becomes the roving stop");
+    run.open = false;
+    run.dispatchEvent(new view.dom.window.Event("toggle"));
+    assert.match(listbox.getAttribute("aria-label") ?? "", /显示 1 个.*其中 3 个折叠在锁定区/, "collapsing restores the folded count");
+    assert.deepEqual(zero().map((row) => row.dataset.hash), [d], "the roving stop returns to a reachable option");
+  } finally {
+    view.close();
+  }
+});
+
+// ------------------------------------------------- N6: dead change-row stop
+test("change rows are not tab stops while their file controls remain reachable", () => {
+  const view = createHarness();
+  try {
+    const doc = view.dom.window.document;
+    view.postState({
+      ...state([a], 7),
+      hasStaged: true,
+      hasUnstaged: true,
+      stagedCount: 1,
+      unstagedCount: 1,
+      changes: [
+        { path: "src/staged.ts", staged: true, unstaged: false, indexKind: "add", conflicted: false },
+        { path: "src/working.ts", staged: false, unstaged: true, worktreeKind: "modify", conflicted: false },
+      ],
+    });
+    const rows = [...doc.querySelectorAll<HTMLElement>(".change-file")];
+    assert.equal(rows.length, 2);
+    for (const row of rows) {
+      assert.equal(row.hasAttribute("tabindex"), false, "a change row is not a tab stop");
+      assert.equal(row.tabIndex, -1, "a change row is not focusable");
+    }
+    // The real controls are still there: open-diff plus per-file actions.
+    const opens = [...doc.querySelectorAll<HTMLElement>(".change-file .file-open")];
+    assert.equal(opens.length, 2, "each row keeps its open-diff button");
+    assert.equal(doc.querySelectorAll(".change-file .file-action").length, 3, "the row actions remain");
+    // `:focus-within` is what reveals the action cluster when one of those
+    // controls has focus; dropping the row tabIndex must not drop this rule.
+    const style = fs.readFileSync(path.join(root, "media", "style.css"), "utf8");
+    assert.match(style, /\.change-file:focus-within \.file-actions\s*\{[^}]*opacity:\s*1/, "focus within the row still reveals its actions");
+  } finally {
+    view.close();
+  }
+});
+
+// ------------------------------------------------- N5: icon button names
+test("icon-only tooltip buttons carry their action as the accessible name", () => {
+  const view = createHarness();
+  try {
+    view.postState(state([a, b, c], 3));
+    // The tooltip only accepts detail for the row currently hovered.
+    view.row(c).dispatchEvent(mouseEvent(view.dom.window, "mouseenter"));
+    view.postState({
+      type: "detail",
+      hash: c,
+      author: "Carol",
+      relDate: "1 hour ago",
+      absDate: "today",
+      stat: "1 file changed",
+      message: "subject-c",
+    });
+    const buttons = [...view.dom.window.document.querySelectorAll<HTMLButtonElement>("#tooltip .tip-actions .btn")];
+    assert.equal(buttons.length, 2);
+    assert.deepEqual(buttons.map((button) => button.textContent), ["⧉", "◫"], "the visible content stays the symbol");
+    assert.deepEqual(buttons.map((button) => button.getAttribute("aria-label")), ["复制完整 message", "打开变更"], "the accessible name is the action, not the glyph");
+    assert.deepEqual(buttons.map((button) => button.title), ["复制完整 message", "打开变更"], "title remains the pointer tooltip");
+  } finally {
+    view.close();
+  }
+});
+
+// ------------------------------------------------- N9: disabled menu items
+test("disabled menu items stay in the arrow cycle and explain themselves on activation", () => {
+  const view = createHarness();
+  try {
+    const doc = view.dom.window.document;
+    view.postState({ ...state([a, b], 3), llmConfigured: false, hasStaged: false, hasUnstaged: false, changes: [] });
+    view.row(b).dispatchEvent(mouseEvent(view.dom.window, "contextmenu", { clientX: 10, clientY: 10 }));
+    const menu = doc.getElementById("menu")!;
+    const ai = [...menu.querySelectorAll<HTMLButtonElement>("button.item")]
+      .find((button) => button.textContent?.includes("AI 生成 message"))!;
+    assert.ok(ai, "the AI menu item exists");
+    assert.equal(ai.getAttribute("aria-disabled"), "true", "disabled is exposed as aria-disabled");
+    assert.equal(ai.hasAttribute("disabled"), false, "the native disabled attribute is gone, so the item can take focus");
+    assert.equal(ai.disabled, false, "the button property is not native-disabled either");
+    assert.match(ai.getAttribute("aria-description") ?? "", /配置 LLM/, "the reason is attached to the focusable item");
+    assert.equal(ai.title, ai.getAttribute("aria-description"), "title keeps the same reason");
+
+    // Real arrow handling is `menuEl.onkeydown`; dispatch on the focused item so
+    // the event bubbles like a key press does.
+    const visited: string[] = [];
+    for (let i = 0; i < 12; i++) {
+      const current = doc.activeElement as HTMLElement;
+      visited.push((current.textContent ?? "").trim());
+      current.dispatchEvent(new view.dom.window.KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true }));
+    }
+    assert.equal(visited.some((text) => text.includes("AI 生成 message")), true, "the disabled item is inside the focus cycle");
+    assert.equal(visited.some((text) => text.includes("追加暂存区")), true, "the other disabled item is too");
+
+    // Activation is refused: no action message, and the reason reaches the
+    // existing polite live region.
+    view.messages.length = 0;
+    ai.focus();
+    ai.click();
+    assert.equal(view.messages.some((message) => message.type === "openCompose"), false, "a disabled item never executes its action");
+    assert.match(doc.getElementById("live")?.textContent ?? "", /配置 LLM/, "the reason is announced instead");
+    assert.equal(menu.classList.contains("hidden"), false, "the explanation leaves the menu open");
+  } finally {
+    view.close();
+  }
+});
