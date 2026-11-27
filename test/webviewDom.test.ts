@@ -587,8 +587,8 @@ test("only the two allowed AI compose entries exist in every UI state", () => {
         assert.ok(menuAi[0].classList.contains("disabled"), `${item.name}: the AI entry is disabled during a paused rebase`);
         assert.equal(
           menuAi[0].title,
-          "变基进行中；如需 AI message，请先暂存改动并使用暂存区的 ✦",
-          `${item.name}: and points at the staged route`
+          "AI 生成 message… — 变基进行中；如需 AI message，请先暂存改动并使用暂存区的 ✦",
+          `${item.name}: the tooltip keeps both the action and the staged route`
         );
         view.messages.length = 0;
         menuAi[0].click();
@@ -892,8 +892,8 @@ test("every menu item keeps its full action name while its label may truncate", 
   try {
     const doc = view.dom.window.document;
     // Disable two actions so the disabled path and the normal path are both
-    // represented: a disabled item's title is its reason, so its accessible name
-    // has to carry the action instead.
+    // represented: a disabled item's pointer title carries the action and the
+    // reason, while its accessible name stays the untruncated action.
     view.postState({ ...state([a, b], 3), llmConfigured: false, hasStaged: false, hasUnstaged: false, changes: [] });
     view.row(b).dispatchEvent(mouseEvent(view.dom.window, "contextmenu", { clientX: 10, clientY: 10 }));
     const items = [...doc.querySelectorAll<HTMLButtonElement>("#menu button.item")];
@@ -905,7 +905,10 @@ test("every menu item keeps its full action name while its label may truncate", 
       assert.ok(action, "the full action is exposed as the accessible name");
       assert.equal(action, label.textContent?.trim(), "the accessible name is the untruncated action");
       if (item.getAttribute("aria-disabled") === "true") {
-        assert.equal(item.title, item.getAttribute("aria-description"), "a disabled item's title stays the reason");
+        const reason = item.getAttribute("aria-description") ?? "";
+        assert.ok(item.title.includes(action), "a disabled item's pointer tooltip still exposes the full action");
+        assert.ok(item.title.includes(reason), "a disabled item's pointer tooltip still exposes the reason");
+        assert.notEqual(item.title, reason, "the truncatable action is not replaced by the reason");
       } else {
         assert.equal(item.title, action, "a normal item's title carries the full action");
       }
@@ -1581,7 +1584,7 @@ test("disabled menu items stay in the arrow cycle and explain themselves on acti
     assert.equal(ai.hasAttribute("disabled"), false, "the native disabled attribute is gone, so the item can take focus");
     assert.equal(ai.disabled, false, "the button property is not native-disabled either");
     assert.match(ai.getAttribute("aria-description") ?? "", /配置 LLM/, "the reason is attached to the focusable item");
-    assert.equal(ai.title, ai.getAttribute("aria-description"), "title keeps the same reason");
+    assert.match(ai.title, /^AI 生成 message… — 请先配置 LLM。$/, "the pointer tooltip keeps the action and the reason");
 
     // Real arrow handling is `menuEl.onkeydown`; dispatch on the focused item so
     // the event bubbles like a key press does.

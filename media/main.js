@@ -1113,7 +1113,11 @@
     // activation handler refuses to run the action and speaks the reason.
     if (item.disabled) {
       el.setAttribute("aria-disabled", "true");
-      el.title = item.disabledReason || "";
+      // The visible label can be ellipsised at narrow widths, and a disabled item
+      // cannot be activated to reveal its full name. Keep both the action and the
+      // reason in the pointer tooltip; `aria-label` stays the action and
+      // `aria-description` stays the reason for AT.
+      el.title = item.disabledReason ? `${item.label} — ${item.disabledReason}` : item.label;
       el.setAttribute("aria-description", item.disabledReason || "");
       el.addEventListener("click", (event) => {
         // Keep the menu (and any batch selection it represents) intact; this

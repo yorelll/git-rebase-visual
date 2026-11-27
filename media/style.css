@@ -686,7 +686,10 @@ button, .grip, .dot, .lock-icon, .stopped-badge {
 .menu {
   position: fixed;
   z-index: 1000;
-  min-width: 200px;
+  /* A fixed 200px minimum wins over the viewport cap below 208px, so the
+     minimum has to respect the same bound: 200px in a normal sidebar, narrower
+     only when the viewport itself is narrower. */
+  min-width: min(200px, calc(100vw - 8px));
   /* Natural width is 322px. A 300px sidebar used to clip 26px of the menu and a
      260px sidebar 66px, taking the right-aligned shortcut with it. The menu is
      positioned with a 4px margin on both sides, so leave 8px for those margins

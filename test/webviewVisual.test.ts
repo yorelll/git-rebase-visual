@@ -197,7 +197,10 @@ test("secondary and stopped focus rings reach 3:1 against their fills", () => {
 // ---------------------------------------------------------------- K1: menu
 test("the context menu is capped to the viewport and labels truncate honestly", () => {
   const maxWidth = declaration(".menu", "max-width");
+  const minWidth = declaration(".menu", "min-width");
   assert.equal(maxWidth, "calc(100vw - 8px)", "the menu never grows wider than the webview");
+  // A fixed 200px minimum would win over the cap below a 208px viewport.
+  assert.equal(minWidth, "min(200px, calc(100vw - 8px))", "the minimum also respects a very narrow viewport");
 
   const labelMinWidth = declaration(".menu .item .menu-label", "min-width");
   const labelOverflow = declaration(".menu .item .menu-label", "overflow");
