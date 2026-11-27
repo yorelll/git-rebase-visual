@@ -447,6 +447,77 @@ const scenarios = {
     await page.render(baseState);
     await page.typeSearch("cif");
     await page.wait(150);
+    // The page renders its own 清除 button after the input. A real Tab from the
+    // focused search box proves it is still in the tab order now that the
+    // native `::-webkit-search-cancel-button` is hidden. Shift+Tab returns to
+    // the input so the screenshot still shows the typing state; the probe reads
+    // the recorded result.
+    await page.tabTo(".list-controls .btn");
+    await page.evaluate(`document.body.dataset.harnessClearTabbable = "true"`);
+    await page.tabTo(".commit-search", { after: "[...document.querySelectorAll('.list-controls .btn')][0]", shift: true });
+    // Tabbing into a text field selects its contents; collapse the selection to
+    // the end so the screenshot shows the same typing state as the other runs.
+    await page.evaluate(`(() => { const input = document.querySelector(".commit-search"); input.setSelectionRange(input.value.length, input.value.length); return true; })()`);
+    await page.wait(120);
+  },
+
+  /**
+   * The change list lives inside a collapsed `<details>`; until it is open the
+   * M/A/D/R markers are not rendered at all, so a contrast audit of the change
+   * list has to open it the way a pointer click does. The rename row is added
+   * here rather than to `baseState` so the other scenarios keep their node set.
+   */
+  "more-options": async (page) => {
+    await page.render({
+      ...baseState,
+      changes: [
+        ...baseState.changes,
+        { path: "src/cif/rate-table.ts", indexKind: "rename", worktreeKind: "rename", staged: true, unstaged: false },
+      ],
+    });
+    await page.wait(150);
+    const open = await page.evaluate(`(() => {
+      const more = document.querySelector("#changes details.changes-more");
+      if (!more) return null;
+      more.open = true;
+      more.dispatchEvent(new Event("toggle"));
+      return more.open;
+    })()`);
+    if (open !== true) throw new Error("changes-more did not open");
+    await page.wait(150);
+  },
+
+  /**
+   * C3: primary and secondary buttons under real keyboard focus. `element.focus()`
+   * alone can leave `:focus-visible` false (the browser remembers that the last
+   * interaction was a pointer), so the focus is moved with CDP `Tab` presses and
+   * the scenario fails if the target never becomes the active element.
+   */
+  "focus-btn": async (page) => {
+    await page.render({
+      ...baseState,
+      rebaseInProgress: true,
+      conflictCount: 0,
+      pausedReason: "edit",
+      stoppedAt: commits[3].hash,
+      totalSteps: 8,
+      completedSteps: 3,
+    });
+    await page.wait(200);
+    await page.tabTo(".banner .edit-actions .btn.primary");
+    await page.wait(120);
+  },
+
+  /** The secondary control lives in the tooltip, which is the tightest container. */
+  "focus-btn-secondary": async (page) => {
+    await page.render(baseState);
+    await page.hoverRow(3);
+    await page.wait(500);
+    await page.post({ type: "detail", hash: commits[3].hash, author: "lawrence", relDate: "4 hours ago", absDate: "today", stat: "3 files changed, 42 insertions(+), 7 deletions(-)", message: subjects[3] + "\n\nExplains why the boundary is where it is, and what happens\nwhen the source rate lands exactly on a tick." });
+    await page.wait(200);
+    // Start one focusable before the tooltip so a single real Tab lands on it.
+    await page.tabTo(".tooltip .tip-actions .btn", { after: "[...document.querySelectorAll('.commit')].at(-1)" });
+    await page.wait(120);
   },
 };
 
@@ -630,7 +701,101 @@ const INTERACTION_PROBE = `(() => {
   const rows = [...document.querySelectorAll(".commit")];
   const menuEl = document.getElementById("menu");
   const menuRect = menuEl && !menuEl.classList.contains("hidden") ? menuEl.getBoundingClientRect() : null;
+  // The audit above measures text contrast; a focus ring is not a text node, so
+  // the focus scenarios need the outline geometry and both of its backgrounds:
+  // the button it surrounds (C3's "same colour as the fill") and the surface it
+  // is painted onto (what the keyboard user actually sees).
+  const parse = (value) => {
+    const m = value.match(/rgba?\\(([^)]+)\\)/);
+    if (!m) return null;
+    const parts = m[1].split(",").map((p) => parseFloat(p.trim()));
+    return { r: parts[0], g: parts[1], b: parts[2], a: parts.length > 3 ? parts[3] : 1 };
+  };
+  const channel = (v) => { const s = v / 255; return s <= 0.03928 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4); };
+  const lum = (c) => 0.2126 * channel(c.r) + 0.7152 * channel(c.g) + 0.0722 * channel(c.b);
+  const ratio = (a, b) => { const l1 = lum(a), l2 = lum(b); return (Math.max(l1, l2) + 0.05) / (Math.min(l1, l2) + 0.05); };
+  const background = (el) => {
+    const layers = [];
+    for (let node = el; node && node.nodeType === 1; node = node.parentElement) {
+      const bg = parse(getComputedStyle(node).backgroundColor);
+      if (!bg || bg.a === 0) continue;
+      if (bg.a >= 1) {
+        let base = bg;
+        for (let i = layers.length - 1; i >= 0; i--) {
+          const top = layers[i];
+          base = { r: top.r * top.a + base.r * (1 - top.a), g: top.g * top.a + base.g * (1 - top.a), b: top.b * top.a + base.b * (1 - top.a), a: 1 };
+        }
+        return base;
+      }
+      layers.push(bg);
+    }
+    return { r: 255, g: 255, b: 255, a: 1 };
+  };
+  const rgb = (c) => "rgb(" + Math.round(c.r) + ", " + Math.round(c.g) + ", " + Math.round(c.b) + ")";
+  const activeOutline = (() => {
+    if (!active || active === document.body) return null;
+    const style = getComputedStyle(active);
+    const rect = active.getBoundingClientRect();
+    const width = parseFloat(style.outlineWidth) || 0;
+    const offset = parseFloat(style.outlineOffset) || 0;
+    const box = { left: rect.left - offset - width, top: rect.top - offset - width, right: rect.right + offset + width, bottom: rect.bottom + offset + width };
+    const clippedBy = [];
+    for (let node = active.parentElement; node; node = node.parentElement) {
+      const s = getComputedStyle(node);
+      if (s.overflowX === "visible" && s.overflowY === "visible") continue;
+      const b = node.getBoundingClientRect();
+      if (box.left < b.left - 0.5 || box.right > b.right + 0.5 || box.top < b.top - 0.5 || box.bottom > b.bottom + 0.5) clippedBy.push(describe(node));
+    }
+    const color = parse(style.outlineColor);
+    const inside = background(active);
+    const outside = background(active.parentElement);
+    return {
+      selector: describe(active),
+      className: (active.className || "").toString(),
+      focusVisible: active.matches(":focus-visible"),
+      outlineStyle: style.outlineStyle,
+      outlineWidth: width,
+      outlineOffset: offset,
+      outlineColor: style.outlineColor,
+      background: style.backgroundColor,
+      insideBackground: rgb(inside),
+      outsideBackground: rgb(outside),
+      contrastInside: color ? Number(ratio(color, inside).toFixed(2)) : null,
+      contrastOutside: color ? Number(ratio(color, outside).toFixed(2)) : null,
+      box: { left: Math.round(box.left), top: Math.round(box.top), right: Math.round(box.right), bottom: Math.round(box.bottom) },
+      clippedBy,
+    };
+  })();
+  const search = document.querySelector(".commit-search");
+  // Chromium answers getComputedStyle(input, "::-webkit-search-cancel-button")
+  // with the UA defaults no matter what the author sheet says, so a computed
+  // style cannot prove the native affordance is hidden. Read the author rules
+  // instead and check that their selector (pseudo-element stripped) matches.
+  const cancelRules = [];
+  if (search) {
+    for (const sheet of document.styleSheets) {
+      let rules;
+      try { rules = [...sheet.cssRules]; } catch { continue; }
+      for (const rule of rules) {
+        if (!rule.selectorText || !rule.selectorText.includes("::-webkit-search-cancel-button")) continue;
+        const bases = rule.selectorText.split(",").map((part) => part.replace(/::[\\w-]+/g, "").trim()).filter(Boolean);
+        let matches = false;
+        try { matches = bases.some((base) => search.matches(base)); } catch { /* :host() etc. */ }
+        if (matches) cancelRules.push({ selector: rule.selectorText, display: rule.style.display, appearance: rule.style.webkitAppearance || rule.style.appearance });
+      }
+    }
+  }
+  const searchRect = search ? search.getBoundingClientRect() : null;
+  const clear = document.querySelector(".list-controls .btn");
   return {
+    searchBox: search ? {
+      type: search.type,
+      rect: searchRect && { left: Math.round(searchRect.left), top: Math.round(searchRect.top), width: Math.round(searchRect.width), height: Math.round(searchRect.height) },
+      cancelRules,
+      clearTabbable: document.body.dataset.harnessClearTabbable === "true",
+      clearButton: clear ? { text: clear.textContent.trim(), tabIndex: clear.tabIndex, disabled: clear.disabled, focusVisible: clear.matches(":focus-visible") } : null,
+    } : null,
+    activeOutline,
     activeElement: describe(active),
     activeFocusVisible: !!active && active.matches(":focus-visible"),
     selectionForegroundToken: getComputedStyle(document.documentElement).getPropertyValue("--vscode-menu-selectionForeground").trim(),
@@ -725,6 +890,39 @@ class Cdp {
       const row = document.querySelectorAll(".commit")[${index}];
       row.dispatchEvent(new MouseEvent("mouseenter", { bubbles: true, clientX: ${rect.x}, clientY: ${rect.y} }));
     })()`);
+  }
+
+  /**
+   * One real Tab key press. `Input.dispatchKeyEvent` is trusted input, so the
+   * browser runs its default focus traversal and marks the newly focused
+   * element as keyboard-focused (`:focus-visible`). A synthetic `keydown` or a
+   * programmatic `focus()` does not necessarily do either.
+   */
+  async pressTab({ shift = false } = {}) {
+    const key = { key: "Tab", code: "Tab", windowsVirtualKeyCode: 9, nativeVirtualKeyCode: 9, modifiers: shift ? 8 : 0 };
+    await this.send("Input.dispatchKeyEvent", { type: "keyDown", ...key });
+    await this.send("Input.dispatchKeyEvent", { type: "keyUp", ...key });
+  }
+
+  /**
+   * Press Tab until `selector` is the active element. `after` is an optional JS
+   * expression yielding an element to focus first, which turns a long DOM walk
+   * into one key press; the Tab itself still has to be the event that moves
+   * focus, so the target really matches `:focus-visible`.
+   */
+  async tabTo(selector, { after = null, max = 160, shift = false } = {}) {
+    if (after) {
+      const found = await this.evaluate(`(() => { const el = (${after}); if (!el) return false; el.focus(); return true; })()`);
+      if (!found) throw new Error(`focus start ${after} missing`);
+    }
+    for (let i = 0; i < max; i++) {
+      await this.pressTab({ shift });
+      if (await this.evaluate(`document.activeElement?.matches(${JSON.stringify(selector)}) === true`)) {
+        await this.evaluate(`(() => { const el = document.activeElement; el.scrollIntoView({ block: "nearest" }); return true; })()`);
+        return;
+      }
+    }
+    throw new Error(`Tab never reached ${selector} within ${max} presses`);
   }
 
   /**
