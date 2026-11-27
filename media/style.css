@@ -651,7 +651,9 @@ button, .grip, .dot, .lock-icon, .stopped-badge {
   background: transparent;
 }
 
-.menu .menu-icon { width: 14px; text-align: center; color: var(--vscode-descriptionForeground); }
+/* 1.4em at the item's 13px font is 18.2px, which fits the 17-18px glyphs
+   (the lock and delete emoji). A fixed 14px box clipped them by 3-4px. */
+.menu .menu-icon { width: 1.4em; text-align: center; color: var(--vscode-descriptionForeground); }
 .menu .item kbd { margin-left: auto; font: 10px var(--vscode-font-family); color: var(--vscode-descriptionForeground); }
 
 .menu .item:hover,
@@ -660,9 +662,22 @@ button, .grip, .dot, .lock-icon, .stopped-badge {
   color: var(--vscode-menu-selectionForeground);
 }
 
+/* The icon and shortcut set their own grey, so they would not follow the
+   selection foreground above: 1.67:1 dark, 1.78:1 light on the blue row. */
+.menu .item:hover .menu-icon,
+.menu .item:focus-visible .menu-icon,
+.menu .item:hover kbd,
+.menu .item:focus-visible kbd { color: inherit; }
+
 .menu .item.danger {
   color: var(--vscode-errorForeground, var(--vscode-inputValidation-errorForeground));
 }
+
+/* `.item.danger` comes after `.item:hover` at the same specificity, so its red
+   would paint over the selection background (1.35:1 dark, 1.88:1 light). Keep
+   the idle red and let the selected row use the selection foreground. */
+.menu .item.danger:hover,
+.menu .item.danger:focus-visible { color: var(--vscode-menu-selectionForeground); }
 
 .menu .sep {
   height: 1px;
