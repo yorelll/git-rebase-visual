@@ -368,6 +368,11 @@ const scenarios = {
 
   "menu-batch": async (page) => {
     await page.render(baseState);
+    // The real pointer keeps its last position across `Page.reload`, so a
+    // scenario that ran earlier can leave it hovering a row and change what
+    // this audit sees. Park it on the branch-context strip, which has no hover
+    // handler, so the batch menu is always rendered from the same state.
+    await page.mouseMove(1, 1);
     await page.clickRow(3, { ctrl: true });
     await page.clickRow(4, { ctrl: true });
     await page.contextMenuRow(4);
