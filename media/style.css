@@ -64,13 +64,19 @@ button, .grip, .dot, .lock-icon, .stopped-badge {
      flow above the list: without a bound a 900-character error pushed `#list`
      almost out of the viewport (546px banner / 64px list at 340px; 739px / 0 at
      260px). Cap the banner below half the viewport and let it scroll
-     internally, so the list always keeps the majority of the height.
+     internally, so the list keeps a usable slice (271px of 720px at 340px
+     width; 0 -> 271px at 260px width).
 
      The actions stay inside that scroll area. They are reachable by scrolling
      the banner, and Tab scrolls a focused button into view. A `position: sticky`
      action bar was rejected: it would float over the diagnostic text while the
      user reads it and would need a variant-specific opaque backdrop, while the
-     review only requires the actions to be reachable, not permanently visible. */
+     review only requires the actions to be reachable, not permanently visible.
+
+     Known boundary: `45vh` applies to every banner variant, so a viewport
+     shorter than roughly 367px also scrolls an ordinary edit/conflict banner
+     instead of showing it in full; its actions stay reachable through the same
+     internal scroll. */
   max-height: 45vh;
   overflow-y: auto;
 }
@@ -450,6 +456,18 @@ button, .grip, .dot, .lock-icon, .stopped-badge {
    ~5.85. */
 .commit.pending {
   opacity: 0.8;
+}
+
+/* Hover paints the lighter `list-hoverBackground`; at the resting 0.8 opacity
+   the dark meta line drops to 3.84:1 there. Raise the group opacity only while
+   hovered: 0.92 lifts the dark meta to 4.57:1 (light 7.96:1), still below a
+   normal hovered row (dark 5.12:1, light 10.01:1) and clearly below the
+   surrounding resting rows. Resting pending stays 0.8 (4.65/5.85), so the
+   always-visible distinction is unchanged. Selected rows are not fixed here:
+   their selection surface leaves meta at 4.42:1 even at opacity 1, a
+   pre-existing selection-colour issue that opacity cannot solve. */
+.commit.pending:hover {
+  opacity: 0.92;
 }
 
 .pending-boundary {
