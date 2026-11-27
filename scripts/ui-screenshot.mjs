@@ -854,6 +854,26 @@ scenarios["locked-run-focus"] = async (page) => {
   await page.evaluate(`window.__probe.summaryStillExists = !!document.querySelector("details.locked-run > summary"); true`);
 };
 
+/** A focused locked run disappears while an unrelated run survives. */
+scenarios["locked-run-missing"] = async (page) => {
+  const twoRuns = {
+    ...baseState,
+    collapseLockedRuns: true,
+    // Two runs (indices 0-2 and 4-6) separated by one unlocked commit.
+    commits: baseState.commits.map((commit, index) => ({ ...commit, locked: [0, 1, 2, 4, 5, 6].includes(index) })),
+  };
+  await page.render(twoRuns);
+  await page.wait(150);
+  await installRecord(page);
+  await page.evaluate(`(() => { const summaries = document.querySelectorAll("details.locked-run > summary"); if (summaries.length < 2) return false; summaries[1].focus(); return true; })()`);
+  await page.evaluate(`window.__probeRecord("secondRunFocused"); true`);
+  const oneRun = { ...twoRuns, commits: twoRuns.commits.map((commit, index) => ({ ...commit, locked: index < 3 })) };
+  await page.render(oneRun);
+  await page.wait(150);
+  await page.evaluate(`window.__probeRecord("afterRunRemoved"); true`);
+  await page.evaluate(`window.__probe.remainingRuns = document.querySelectorAll("details.locked-run").length; true`);
+};
+
 /** Continue becomes disabled when the paused rebase gains conflicts. */
 scenarios["disabled-action-focus"] = async (page) => {
   const editState = { ...baseState, rebaseInProgress: true, conflictCount: 0, pausedReason: "edit", stoppedAt: commits[3].hash, totalSteps: 8, completedSteps: 3 };

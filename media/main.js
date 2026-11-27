@@ -153,18 +153,25 @@
     return isFocusableTarget(target) ? target : null;
   }
   function fallbackFocus(identity) {
-    // Prefer the same region: another action in the change row, another banner
-    // button, another locked run. Then the list's search control. Focus is
-    // verified for each candidate because existence is not focusability.
+    // Prefer the same region: another action in the change row, the banner
+    // scroll container, or another banner button. Then the list's search
+    // control. Focus is verified for each candidate because existence is not
+    // focusability.
+    //
+    // Destructive banner actions are never fallback targets. A user who just
+    // pressed Continue on a conflict banner would otherwise land on `Skip
+    // （丢弃 patch）`; a second Enter (or key auto-repeat) could discard the
+    // patch. If the banner has no safe, enabled action left, go to search.
+    // A vanished locked-run key likewise must not jump to an unrelated run:
+    // such a run holds a different commit set and is not the user's context.
     const candidates = [];
     if (identity.kind === "change-action" || identity.kind === "change-row") {
       const row = findChangeRow(identity);
       if (row) candidates.push(row, ...row.querySelectorAll("button"));
       candidates.push(changesEl.querySelector(".changes-more > summary"));
     } else if (identity.kind === "banner" || identity.kind === "banner-action") {
-      candidates.push(...bannerEl.querySelectorAll("button"));
-    } else if (identity.kind === "locked-run") {
-      candidates.push(...listEl.querySelectorAll(".locked-run > summary"));
+      candidates.push(bannerEl);
+      candidates.push(...bannerEl.querySelectorAll("button:not(.danger-btn)"));
     }
     candidates.push(listEl.querySelector(".commit-search"));
     return candidates.find((candidate) => focusIfVerified(candidate)) || null;

@@ -10,6 +10,10 @@ const hash = (letter: string) => letter.repeat(40);
 const a = hash("a");
 const b = hash("b");
 const c = hash("c");
+const d = hash("d");
+const e = hash("e");
+const f = hash("f");
+const g = hash("g");
 
 interface Harness {
   dom: JSDOM;
@@ -1169,13 +1173,76 @@ test("a banner action that became disabled does not send focus to <body>", () =>
     continueButton().focus();
     assert.equal(doc.activeElement, continueButton(), "Continue holds focus");
 
-    // The same identity now exists but is disabled: focus() is a silent no-op,
-    // so the restore must reject it and land on a same-region action instead.
+    // The same identity now exists but is disabled: focus() is a silent no-op.
+    // The only enabled actions left are destructive (Skip / Abort), so the
+    // restore must not land on them; the list's search control is the safe
+    // fallback.
     view.postState({ ...editState, conflictCount: 2, conflictFiles: ["src/a.ts", "src/b.ts"], pausedReason: "conflict" });
     assert.equal(continueButton().disabled, true, "the conflict really disabled Continue");
-    const skip = [...doc.querySelectorAll<HTMLButtonElement>("#banner .btn")].find((button) => button.textContent.startsWith("Skip"))!;
+    const search = doc.querySelector(".commit-search") as HTMLInputElement;
     assert.notEqual(doc.activeElement, doc.body, "focus does not silently fall to <body>");
-    assert.equal(doc.activeElement, skip, "focus lands on the next enabled banner action");
+    assert.equal((doc.activeElement as HTMLElement).classList.contains("danger-btn"), false, "focus never lands on a destructive action");
+    assert.equal(doc.activeElement, search, "focus falls back to the search control");
+  } finally {
+    view.close();
+  }
+});
+
+test("banner fallback never focuses a destructive action when only danger buttons remain", () => {
+  const view = createHarness();
+  try {
+    const doc = view.dom.window.document;
+    const editState = {
+      ...state([a], 7),
+      rebaseInProgress: true,
+      conflictCount: 0,
+      pausedReason: "edit",
+      stoppedAt: a,
+      totalSteps: 8,
+      completedSteps: 3,
+    };
+    view.postState(editState);
+    const continueButton = () => [...doc.querySelectorAll<HTMLButtonElement>("#banner .btn")].find((button) => button.textContent === "Continue")!;
+    continueButton().focus();
+
+    // Counting up the conflicts rebuilds the banner: Continue is disabled and
+    // Skip / Abort are the only enabled banner actions.
+    view.postState({ ...editState, conflictCount: 3, conflictFiles: ["src/a.ts", "src/b.ts", "src/c.ts"], pausedReason: "conflict" });
+    const enabled = [...doc.querySelectorAll<HTMLButtonElement>("#banner .btn")].filter((button) => !button.disabled);
+    assert.ok(enabled.length > 0, "the banner still has enabled actions");
+    assert.equal(enabled.every((button) => button.classList.contains("danger-btn")), true, "every enabled banner action is destructive");
+    const active = doc.activeElement as HTMLElement;
+    assert.equal(active.classList.contains("danger-btn"), false, "no destructive action receives fallback focus");
+    assert.equal(active.classList.contains("commit-search"), true, "focus goes to the search control instead");
+  } finally {
+    view.close();
+  }
+});
+
+test("a vanished locked run falls back to search, not an unrelated run", () => {
+  const view = createHarness();
+  try {
+    const doc = view.dom.window.document;
+    // a/b/c and e/f/g are two locked runs separated by the unlocked d.
+    const twoRuns = state([a, b, c, d, e, f, g], 7);
+    (twoRuns.commits as Array<Record<string, unknown>>).forEach((commit, index) => { commit.locked = index !== 3; });
+    twoRuns.collapseLockedRuns = true;
+    view.postState(twoRuns);
+    const runs = [...doc.querySelectorAll("details.locked-run")];
+    assert.equal(runs.length, 2, "two locked runs render");
+    const secondSummary = runs[1].firstElementChild as HTMLElement;
+    secondSummary.focus();
+    assert.equal(doc.activeElement, secondSummary, "the second run's summary holds focus");
+
+    // Unlock e/f/g: the focused run disappears while the first run survives.
+    const oneRun = state([a, b, c, d, e, f, g], 8);
+    (oneRun.commits as Array<Record<string, unknown>>).forEach((commit, index) => { commit.locked = index < 3; });
+    oneRun.collapseLockedRuns = true;
+    view.postState(oneRun);
+    assert.equal(doc.querySelectorAll("details.locked-run").length, 1, "only the first run remains");
+    const firstSummary = doc.querySelector("details.locked-run > summary") as HTMLElement;
+    assert.notEqual(doc.activeElement, firstSummary, "focus does not jump to an unrelated run's commit set");
+    assert.equal((doc.activeElement as HTMLElement).classList.contains("commit-search"), true, "focus falls back to the search control");
   } finally {
     view.close();
   }
