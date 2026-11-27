@@ -1434,9 +1434,20 @@ test("a collapsed locked run is a named listbox group and is excluded from the r
     );
     const ariaLabel = listbox.getAttribute("aria-label") ?? "";
     assert.match(ariaLabel, /共 4 个 commit，显示 1 个/, "the reachable count excludes the folded options");
-    assert.match(ariaLabel, /其中 3 个折叠在锁定区/, "the label explains the folded options instead of silently dropping them");
+    assert.match(ariaLabel, /另有 3 个折叠在锁定区/, "the label explains the folded options instead of silently dropping them");
     const zero = () => [...listbox.querySelectorAll<HTMLElement>(".commit")].filter((row) => row.tabIndex === 0);
     assert.deepEqual(zero().map((row) => row.dataset.hash), [d], "the unfolded option is the roving stop");
+    // The option's own accessible name is what a screen reader reads, so its
+    // "共 N 项" must match the reachable options, not the repository.
+    const reachableNames = () => [...listbox.querySelectorAll<HTMLElement>(".commit")]
+      .filter((row) => !row.closest("details.locked-run") || (row.closest("details.locked-run") as HTMLDetailsElement).open)
+      .map((row) => ({
+        label: row.getAttribute("aria-label") ?? "",
+        posinset: row.getAttribute("aria-posinset"),
+        setsize: row.getAttribute("aria-setsize"),
+      }));
+    assert.match(reachableNames()[0].label, /^第 1 项，共 1 项，/, "a folded run leaves only the reachable option in the count");
+    assert.deepEqual([reachableNames()[0].posinset, reachableNames()[0].setsize], ["1", "1"], "position and size describe the reachable set");
 
     // Expanding the run makes its options reachable; the announced count and
     // the roving stop must follow without a rebuild.
@@ -1445,10 +1456,17 @@ test("a collapsed locked run is a named listbox group and is excluded from the r
     assert.match(listbox.getAttribute("aria-label") ?? "", /显示 4 个/, "expanding updates the reachable count");
     assert.doesNotMatch(listbox.getAttribute("aria-label") ?? "", /折叠在锁定区/, "no folded remainder is claimed once expanded");
     assert.deepEqual(zero().map((row) => row.dataset.hash), [a], "the first now-reachable option becomes the roving stop");
+    assert.deepEqual(
+      reachableNames().map((entry) => [entry.posinset, entry.setsize]),
+      [["1", "4"], ["2", "4"], ["3", "4"], ["4", "4"]],
+      "option names and posinset/setsize follow the expanded reachable set"
+    );
+    assert.match(reachableNames()[3].label, /^第 4 项，共 4 项，/, "the last option is the fourth of four");
     run.open = false;
     run.dispatchEvent(new view.dom.window.Event("toggle"));
-    assert.match(listbox.getAttribute("aria-label") ?? "", /显示 1 个.*其中 3 个折叠在锁定区/, "collapsing restores the folded count");
+    assert.match(listbox.getAttribute("aria-label") ?? "", /显示 1 个.*另有 3 个折叠在锁定区/, "collapsing restores the folded count");
     assert.deepEqual(zero().map((row) => row.dataset.hash), [d], "the roving stop returns to a reachable option");
+    assert.match(reachableNames()[0].label, /^第 1 项，共 1 项，/, "the option name shrinks back with the fold");
   } finally {
     view.close();
   }
@@ -1551,6 +1569,138 @@ test("disabled menu items stay in the arrow cycle and explain themselves on acti
     assert.equal(view.messages.some((message) => message.type === "openCompose"), false, "a disabled item never executes its action");
     assert.match(doc.getElementById("live")?.textContent ?? "", /配置 LLM/, "the reason is announced instead");
     assert.equal(menu.classList.contains("hidden"), false, "the explanation leaves the menu open");
+  } finally {
+    view.close();
+  }
+});
+
+// ------------------------------------------------- B2-1: option name counts
+test("option names count the reachable set when a filter hides rows", () => {
+  const view = createHarness();
+  try {
+    const doc = view.dom.window.document;
+    view.postState(state([a, b, c, d], 7));
+    const search = doc.querySelector(".commit-search") as HTMLInputElement;
+    search.value = "commit-2";
+    search.dispatchEvent(new view.dom.window.Event("input", { bubbles: true }));
+    const rows = [...doc.querySelectorAll<HTMLElement>(".commit")];
+    assert.equal(rows.length, 1, "the filter leaves exactly one option");
+    assert.match(rows[0].getAttribute("aria-label") ?? "", /^第 1 项，共 1 项，commit-2，/, "the only reachable option is first of one");
+    assert.equal(rows[0].getAttribute("aria-posinset"), "1");
+    assert.equal(rows[0].getAttribute("aria-setsize"), "1");
+    assert.match(doc.querySelector('[role="listbox"]')!.getAttribute("aria-label") ?? "", /共 4 个 commit，显示 1 个，过滤后 1 个/, "the listbox label agrees with the option name");
+  } finally {
+    view.close();
+  }
+});
+
+test("option names count the reachable set while commits are pending", () => {
+  const view = createHarness();
+  try {
+    const doc = view.dom.window.document;
+    view.postState({ ...state([a, b, c], 7), rebaseInProgress: true, pausedReason: "edit", stoppedAt: a, pendingHashes: [b] });
+    const rows = [...doc.querySelectorAll<HTMLElement>(".commit")];
+    assert.equal(rows.length, 3, "a pending boundary does not hide options");
+    assert.deepEqual(
+      rows.map((row) => row.getAttribute("aria-label")?.match(/^第 \d+ 项，共 \d+ 项，/)?.[0]),
+      ["第 1 项，共 3 项，", "第 2 项，共 3 项，", "第 3 项，共 3 项，"],
+      "pending rows still read as positions of the same reachable set"
+    );
+    assert.deepEqual(rows.map((row) => row.getAttribute("aria-setsize")), ["3", "3", "3"]);
+  } finally {
+    view.close();
+  }
+});
+
+// ------------------------------------------------- B2-2: no-match AX
+test("a no-match listbox exposes no text child and the empty message is hidden from AT", () => {
+  const view = createHarness();
+  try {
+    const doc = view.dom.window.document;
+    view.postState(state([a, b, c], 7));
+    const search = doc.querySelector(".commit-search") as HTMLInputElement;
+    search.value = "no-such-commit";
+    search.dispatchEvent(new view.dom.window.Event("input", { bubbles: true }));
+    const listbox = doc.querySelector('[role="listbox"]') as HTMLElement;
+    assert.equal(listbox.querySelectorAll(".commit").length, 0, "no option matches");
+    const empty = listbox.querySelector(".empty") as HTMLElement;
+    assert.ok(empty, "the visual no-match message is still rendered");
+    assert.equal(empty.getAttribute("role"), "presentation");
+    assert.equal(empty.getAttribute("aria-hidden"), "true", "the message does not become a StaticText child of the listbox");
+    assert.match(listbox.getAttribute("aria-label") ?? "", /显示 0 个，过滤后 0 个/, "the honest zero count remains on the listbox");
+  } finally {
+    view.close();
+  }
+});
+
+// ------------------------------------------------- B2-3: batch menu initial focus
+test("a batch menu starts focus on its first actionable item, not a disabled one", () => {
+  const view = createHarness();
+  try {
+    const doc = view.dom.window.document;
+    view.postState(state([a, b, c], 3));
+    view.row(a).dispatchEvent(mouseEvent(view.dom.window, "click", { ctrlKey: true }));
+    view.row(b).dispatchEvent(mouseEvent(view.dom.window, "click", { ctrlKey: true }));
+    view.row(b).dispatchEvent(mouseEvent(view.dom.window, "contextmenu", { clientX: 10, clientY: 10 }));
+    const menu = doc.getElementById("menu")!;
+    const items = [...menu.querySelectorAll<HTMLButtonElement>("button.item")];
+    assert.equal(items[0].getAttribute("aria-disabled"), "true", "the batch menu really starts with disabled items");
+    const active = doc.activeElement as HTMLButtonElement;
+    assert.match(active.textContent ?? "", /生成 Diff/, "initial focus is the first actionable item");
+    assert.notEqual(active.getAttribute("aria-disabled"), "true", "the focused item is actionable");
+    assert.equal(active.tabIndex, 0, "the roving stop is on the focused item");
+    const disabledBefore = items.slice(0, items.indexOf(active));
+    assert.equal(disabledBefore.every((item) => item.tabIndex === -1), true, "the skipped disabled items keep tabIndex -1 for the arrow cycle");
+  } finally {
+    view.close();
+  }
+});
+
+// ------------------------------------------------- B2-4: filter + collapse
+test("filtering a list whose supplied active hash is absent still collapses consecutive locked commits", () => {
+  const view = createHarness();
+  try {
+    const doc = view.dom.window.document;
+    // a / b / c are locked but separated by unlocked commits, so the initial
+    // list has no run at all and the default roving row is the first locked
+    // commit (a). Filtering removes the separators: the three locked commits
+    // become adjacent and must merge into a collapsed run.
+    const lockState = state([a, d, b, e, c], 7);
+    const subjects = ["lock-a", "sep-1", "lock-b", "sep-2", "lock-c"];
+    (lockState.commits as Array<Record<string, unknown>>).forEach((commit, index) => {
+      commit.subject = subjects[index];
+      commit.locked = index % 2 === 0;
+    });
+    lockState.collapseLockedRuns = true;
+    view.postState(lockState);
+    assert.equal(doc.querySelectorAll("details.locked-run").length, 0, "separated locked commits do not form a run yet");
+
+    const search = doc.querySelector(".commit-search") as HTMLInputElement;
+    const filter = (value: string) => {
+      search.value = value;
+      search.dispatchEvent(new view.dom.window.Event("input", { bubbles: true }));
+    };
+    filter("lock");
+    assert.equal(doc.querySelectorAll(".commit").length, 3, "only the locked commits match");
+    assert.equal(doc.querySelectorAll("details.locked-run").length, 1, "the newly adjacent locked commits merge into a collapsed run");
+    filter("lock ");
+    assert.equal(doc.querySelectorAll("details.locked-run").length, 1, "a second filter keystroke does not un-collapse the run");
+    assert.equal(view.dom.window.__grvUiTrace().activeHash, undefined, "the default roving row is not promoted to a user active commit");
+  } finally {
+    view.close();
+  }
+});
+
+// ------------------------------------------------- B2-5: empty list exception
+test("an empty timeline has no listbox (documented exception to the reachable-count label)", () => {
+  const view = createHarness();
+  try {
+    const doc = view.dom.window.document;
+    view.postState({ ...state([], 7), commits: [], canonicalOrder: [] });
+    // Documented exception: with no options there is no listbox to label; the
+    // plain "没有可显示的 commit。" text is the whole surface.
+    assert.equal(doc.querySelector("#list [role=listbox]"), null, "no empty listbox is invented");
+    assert.equal(doc.querySelector("#list .empty")?.textContent, "没有可显示的 commit。");
   } finally {
     view.close();
   }

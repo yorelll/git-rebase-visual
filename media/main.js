@@ -672,6 +672,10 @@
     const commits = state.commits ?? [];
     const known = new Set(commits.map((c) => c.hash));
     selectedHashes = new Set([...selectedHashes].filter((h) => known.has(h)));
+    // Documented exception to the "listbox label counts reachable options"
+    // rule: with no commits there are no options to describe, and an empty
+    // labelled listbox would announce "0 items" while hiding the reason. The
+    // plain `.empty` text is the whole surface in this state.
     if (!commits.length) { const empty = document.createElement("div"); empty.className = "empty"; empty.textContent = "没有可显示的 commit。"; listEl.appendChild(empty); restoreFocusIdentity(focus); return; }
     const visible = filteredCommits();
     const controls = document.createElement("div"); controls.className = "list-controls";
@@ -740,7 +744,7 @@
       }
       listbox.appendChild(commitRow(c)); i++;
     }
-    if (!visible.length) { const empty = document.createElement("div"); empty.className = "empty"; empty.setAttribute("role", "presentation"); empty.textContent = "无匹配 · 清空搜索以显示全部 commit。"; listbox.appendChild(empty); }
+    if (!visible.length) { const empty = document.createElement("div"); empty.className = "empty"; empty.setAttribute("role", "presentation"); empty.setAttribute("aria-hidden", "true"); empty.textContent = "无匹配 · 清空搜索以显示全部 commit。"; listbox.appendChild(empty); }
     const bottom = document.createElement("div"); bottom.className = "timeline-end"; bottom.textContent = "↓ HEAD / 较新"; listEl.appendChild(bottom);
     updateListboxLabel(listbox);
     applyRoving();
@@ -779,12 +783,37 @@
     const reachable = [...listbox.querySelectorAll(".commit")].filter(optionIsReachable).length;
     const filterNote = isFilterActive() ? `，过滤后 ${filtered} 个` : "";
     const collapsed = filtered - reachable;
-    const collapsedNote = collapsed > 0 ? `，其中 ${collapsed} 个折叠在锁定区（展开后可操作）` : "";
+    const collapsedNote = collapsed > 0 ? `，另有 ${collapsed} 个折叠在锁定区（展开后可操作）` : "";
     listbox.setAttribute("aria-label", `Commit 时间轴，共 ${total} 个 commit，显示 ${reachable} 个${filterNote}${collapsedNote}，顶部较早，底部较新`);
+    applyOptionPositions(listbox);
+  }
+  // An option's own accessible name is what a screen reader reads while
+  // walking the list; the listbox label is only heard when entering the list.
+  // Keeping "第 X 项，共 N 项" in the count of the *whole repository* made
+  // collapsed and filtered lists announce positions that do not exist (5
+  // reachable options read as "第 4..8 项，共 8 项"). Positions and size are
+  // therefore computed from the currently reachable options, and mirrored in
+  // aria-posinset/aria-setsize for ATs that use those properties instead of
+  // the label text.
+  function applyOptionPositions(listbox) {
+    if (!listbox) return;
+    const options = [...listbox.querySelectorAll(".commit")].filter(optionIsReachable);
+    const size = options.length;
+    options.forEach((row, index) => {
+      row.setAttribute("aria-posinset", String(index + 1));
+      row.setAttribute("aria-setsize", String(size));
+      if (row.__grvOptionLabel) row.setAttribute("aria-label", `第 ${index + 1} 项，共 ${size} 项，${row.__grvOptionLabel}`);
+    });
   }
   // After every rebuild exactly one option carries tabIndex=0. Prefer the row
   // that held the roving stop, then the host's active commit, then the first
   // reachable option.
+  //
+  // The fallback row is only a focus stop, not a user/host active commit:
+  // writing it into `state.activeHash` made `isUnsafeToCollapse()` protect a
+  // locked run merely because it contained the first option, so a filtered
+  // list stopped collapsing. Only `setRovingActive()` (focus, arrow, click,
+  // Alt+↑↓) promotes a row to `state.activeHash`.
   function applyRoving() {
     const rows = optionRows();
     const active = rows.find((row) => row.dataset.hash === activeRowHash && optionIsReachable(row))
@@ -793,10 +822,6 @@
       || null;
     rows.forEach((row) => { row.tabIndex = row === active ? 0 : -1; });
     activeRowHash = active ? active.dataset.hash : null;
-    // Keep the host-facing active commit on a row that really is reachable: a
-    // hidden row must not keep a collapsed run exempt from collapsing on the
-    // next render.
-    if (active) state.activeHash = active.dataset.hash;
   }
   function moveActiveOption(key) {
     const rows = optionRows().filter(optionIsReachable);
@@ -837,7 +862,15 @@
       if (details.open) {
         const first = details.querySelector(".commit");
         if (first) setRovingActive(first);
-      } else applyRoving();
+      } else {
+        // A user who just collapsed this run is no longer "active" on a row
+        // inside it. Leaving that hash in place would make the next render
+        // treat the run as protected and reopen the fold.
+        const containsActive = [...details.querySelectorAll(".commit")]
+          .some((row) => row.dataset.hash === state.activeHash);
+        if (containsActive) state.activeHash = undefined;
+        applyRoving();
+      }
       updateListboxLabel(listbox);
     });
     const summary = document.createElement("summary"); summary.textContent = runSummary(commits); summary.title = runSummaryAria(commits);
@@ -855,11 +888,16 @@
   }
 
   function commitRow(c) {
-    const row = document.createElement("div"); const pending = commitIsPending(c); const stopped = commitIsStopped(c); const selected = selectedHashes.has(c.hash); const index = state.commits.indexOf(c) + 1;
+    const row = document.createElement("div"); const pending = commitIsPending(c); const stopped = commitIsStopped(c); const selected = selectedHashes.has(c.hash);
     row.className = `commit${c.locked ? " locked" : ""}${pending ? " pending" : ""}${stopped ? " stopped" : ""}${selected ? " selected" : ""}${keyboardPickup?.sourceHash === c.hash ? " keyboard-pickup" : ""}`;
     // `tabIndex` is assigned by applyRoving(): exactly one row is 0.
     row.dataset.hash = c.hash; row.setAttribute("role", "option"); row.setAttribute("aria-selected", String(selected));
-    row.setAttribute("aria-label", `第 ${index} 项，共 ${state.commits.length} 项，${c.subject}，${short(c.hash)}，${c.author}${c.locked ? "，已锁定" : ""}${pending ? "，待重放" : ""}${stopped ? "，变基停靠于此" : ""}。选择后可按 Alt+上/下 移动一位。`);
+    // The position/size prefix is added by applyOptionPositions() from the
+    // reachable set (a whole-repository count lies whenever a locked run is
+    // folded or a filter hides rows). The immutable tail is kept on the node
+    // so expand/collapse can regenerate the name without rebuilding rows.
+    row.__grvOptionLabel = `${c.subject}，${short(c.hash)}，${c.author}${c.locked ? "，已锁定" : ""}${pending ? "，待重放" : ""}${stopped ? "，变基停靠于此" : ""}。选择后可按 Alt+上/下 移动一位。`;
+    row.setAttribute("aria-label", row.__grvOptionLabel);
     const grip = document.createElement("span"); grip.className = "grip"; grip.textContent = "⋮⋮"; grip.title = isFilterActive() ? "过滤中无法重排，请先清空搜索。" : c.locked ? "已锁定的 commit 不能拖动。" : "拖拽重排；顶部较早，底部较新"; grip.setAttribute("aria-hidden", "true"); grip.draggable = !state.rebaseInProgress && !isFilterActive() && !c.locked;
     const authorDotLabel = authorLabel(c);
     const dot = document.createElement("span"); dot.className = `dot author-${c.authorColorKey || "0"}${authorDotLabel.length > 1 ? " author-label-two" : ""}`; dot.textContent = authorDotLabel; dot.title = `${c.author} <${c.authorEmail || "unknown"}>${c.isCurrentAuthor === false ? "（非当前作者）" : c.isCurrentAuthor === "unknown" ? "（当前作者未知）" : "（当前作者）"}`;
@@ -1087,6 +1125,18 @@
   // their reason is reachable with the keyboard and from a screen reader.
   function menuButtons() { return [...menuEl.querySelectorAll("button.item")]; }
   function focusMenu(index) { const buttons = menuButtons(); if (!buttons.length) return; const next = (index + buttons.length) % buttons.length; buttons.forEach((b, i) => b.tabIndex = i === next ? 0 : -1); buttons[next].focus(); }
+  // Opening a menu must not start on an inert item: the batch menu's first
+  // entries are disabled single-commit actions, and focusing one put the
+  // initial highlight somewhere the base menu never shows it. Disabled items
+  // stay in the arrow cycle (focusMenu above does not filter); only the
+  // initial choice skips them, falling back to the first item when every item
+  // is disabled.
+  function focusMenuInitial() {
+    const buttons = menuButtons();
+    if (!buttons.length) return;
+    const firstEnabled = buttons.findIndex((button) => button.getAttribute("aria-disabled") !== "true");
+    focusMenu(firstEnabled < 0 ? 0 : firstEnabled);
+  }
   function openMenu(x, y, c, origin, options = {}) {
     hideTooltip(); menuRestoreFocus = origin || document.activeElement; menuEl.innerHTML = "";
     const multi = selectedMultiple(); const count = selectedHashes.size;
@@ -1123,7 +1173,7 @@
     // Grow from the actual trigger point, not the menu's own centre, so the
     // scale-up visibly originates where the user clicked.
     menuEl.style.setProperty("--grv-origin", `${Math.max(0, x - left)}px ${Math.max(0, y - top)}px`);
-    menuEl.onkeydown = (event) => { const buttons = menuButtons(); const index = buttons.indexOf(document.activeElement); if (event.key === "ArrowDown") { event.preventDefault(); focusMenu(index + 1); } else if (event.key === "ArrowUp") { event.preventDefault(); focusMenu(index - 1); } else if (event.key === "Home") { event.preventDefault(); focusMenu(0); } else if (event.key === "End") { event.preventDefault(); focusMenu(buttons.length - 1); } else if (event.key === "Escape") { event.preventDefault(); closeMenu(); } }; focusMenu(0);
+    menuEl.onkeydown = (event) => { const buttons = menuButtons(); const index = buttons.indexOf(document.activeElement); if (event.key === "ArrowDown") { event.preventDefault(); focusMenu(index + 1); } else if (event.key === "ArrowUp") { event.preventDefault(); focusMenu(index - 1); } else if (event.key === "Home") { event.preventDefault(); focusMenu(0); } else if (event.key === "End") { event.preventDefault(); focusMenu(buttons.length - 1); } else if (event.key === "Escape") { event.preventDefault(); closeMenu(); } }; focusMenuInitial();
   }
   function sendCompose(c, ai) { vscode.postMessage({ type: "openCompose", mode: "commit", hash: c.hash, ai, thenEdit: false }); }
   function send(type, c) { vscode.postMessage({ type, hash: c.hash }); }

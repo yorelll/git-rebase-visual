@@ -1019,6 +1019,9 @@ scenarios.ax = async (page) => {
       directChildRoles: [...box.children].map((child) => child.getAttribute("role") || child.tagName),
       commitTabIndex: [...document.querySelectorAll(".commit")].map((row) => ({ hash: row.dataset.hash, tabIndex: row.tabIndex, inRun: !!row.closest("details.locked-run") })),
       zeroTabStopCount: [...document.querySelectorAll(".commit")].filter((row) => row.tabIndex === 0).length,
+      optionNames: [...document.querySelectorAll(".commit")]
+        .filter((row) => { const lockedRun = row.closest("details.locked-run"); return !lockedRun || lockedRun.open; })
+        .map((row) => ({ name: row.getAttribute("aria-label"), posinset: row.getAttribute("aria-posinset"), setsize: row.getAttribute("aria-setsize") })),
       lockedRun: run ? { role: run.getAttribute("role"), ariaLabel: run.getAttribute("aria-label"), open: run.open } : null,
     };
   })(); true`);
@@ -1036,6 +1039,63 @@ scenarios.ax = async (page) => {
     await page.wait(100);
     await page.evaluate(`window.__probe.tooltipAx = ${JSON.stringify(await axSnapshot(page, "#tooltip .tip-actions"))}; true`);
   }
+
+  // B2-1 / B2-2 / B2-4: the option name is what a screen reader reads, so its
+  // "第 X 项，共 N 项" must follow the reachable set in filtered and pending
+  // states too. A no-match listbox must not expose its `.empty` text as a
+  // StaticText child, and filtering must not stop a locked run collapsing.
+  await page.evaluate(`window.__optionNames = () => [...document.querySelectorAll(".commit")]
+    .filter((row) => { const run = row.closest("details.locked-run"); return !run || run.open; })
+    .map((row) => ({ name: row.getAttribute("aria-label"), posinset: row.getAttribute("aria-posinset"), setsize: row.getAttribute("aria-setsize") })); true`);
+  await page.render(baseState);
+  await page.wait(120);
+  await page.typeSearch("cif");
+  await page.wait(150);
+  await page.evaluate(`window.__probe.filtered = {
+    names: window.__optionNames(),
+    label: document.querySelector('[role="listbox"]').getAttribute("aria-label"),
+  }; true`);
+  // Clear the persisted filter before measuring the pending state, otherwise
+  // this probe would silently measure a filtered list again.
+  await page.typeSearch("");
+  await page.wait(150);
+  await page.render(pendingState);
+  await page.wait(120);
+  await page.evaluate(`window.__probe.pending = {
+    names: window.__optionNames(),
+    label: document.querySelector('[role="listbox"]').getAttribute("aria-label"),
+  }; true`);
+  await page.typeSearch("");
+  await page.wait(150);
+  // Locked at 0 / 2 / 4, separated by unlocked commits: no run initially, and
+  // the default roving row is the first locked commit.
+  const lockSubjects = { 0: "lock-a", 2: "lock-b", 4: "lock-c" };
+  const lockCommits = baseState.commits.map((commit, index) => lockSubjects[index]
+    ? { ...commit, locked: true, subject: lockSubjects[index] }
+    : { ...commit, locked: false });
+  await page.render({ ...baseState, collapseLockedRuns: true, commits: lockCommits });
+  await page.wait(120);
+  await page.evaluate(`window.__probe.lockRun = { before: document.querySelectorAll("details.locked-run").length }; true`);
+  // Filter edits are local renders on the same state object. The bug's first
+  // filtered render promoted its fallback roving row into state.activeHash, so
+  // the second keystroke protected that row and dropped the fold.
+  await page.typeSearch("lock");
+  await page.wait(150);
+  await page.evaluate(`window.__probe.lockRun.afterFirstFilter = document.querySelectorAll("details.locked-run").length; true`);
+  await page.typeSearch("lock ");
+  await page.wait(150);
+  await page.evaluate(`window.__probe.lockRun.afterSecondFilter = document.querySelectorAll("details.locked-run").length;
+    window.__probe.lockRun.names = window.__optionNames();
+    window.__probe.lockRun.label = document.querySelector('[role="listbox"]').getAttribute("aria-label");
+    window.__probe.lockRun.activeHash = window.__grvUiTrace().activeHash || null; true`);
+  await page.typeSearch("zzzz");
+  await page.wait(150);
+  const noMatchAx = await axSnapshot(page, '[role="listbox"]');
+  await page.evaluate(`window.__probe.noMatch = {
+    emptyAriaHidden: document.querySelector('[role="listbox"] .empty')?.getAttribute("aria-hidden") ?? null,
+    label: document.querySelector('[role="listbox"]').getAttribute("aria-label"),
+    ax: ${JSON.stringify(noMatchAx)},
+  }; true`);
 };
 
 /**
@@ -1118,6 +1178,27 @@ scenarios["menu-keyboard"] = async (page) => {
     menuOpen: !document.getElementById("menu").classList.contains("hidden"),
   }; true`);
   await page.evaluate(`window.__probe.ax = ${JSON.stringify(await axSnapshot(page, "#menu"))}; true`);
+
+  // B2-3: the batch menu's first entries are disabled single-commit actions.
+  // Opening it must still land focus on the first actionable item, while the
+  // arrow cycle keeps the disabled ones reachable.
+  await pressKey(page, "Escape", "Escape", 27);
+  await page.wait(120);
+  await page.clickRow(3, { ctrl: true });
+  await page.clickRow(4, { ctrl: true });
+  await page.contextMenuRow(4);
+  await page.wait(150);
+  await page.evaluate(`window.__probe.batchInitialFocus = (() => {
+    const items = [...document.querySelectorAll("#menu button.item")];
+    const active = document.activeElement;
+    return {
+      label: active && active.textContent ? active.textContent.trim() : null,
+      ariaDisabled: active ? active.getAttribute("aria-disabled") : null,
+      tabIndex: active ? active.tabIndex : null,
+      firstItemDisabled: items[0] ? items[0].getAttribute("aria-disabled") : null,
+      activeIndex: items.indexOf(active),
+    };
+  })(); true`);
 };
 
 /**
