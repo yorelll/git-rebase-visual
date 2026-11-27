@@ -447,6 +447,39 @@ const scenarios = {
   },
 
   /**
+   * K3: a selected row at rest. The selection surface is dimmer than the list,
+   * so the meta line was below AA there even though the subject passed.
+   */
+  selected: async (page) => {
+    await page.render(baseState);
+    await page.wait(120);
+    await page.clickRow(3, { ctrl: true });
+    await page.wait(180);
+    windowProbe(page, `(() => {
+      const row = document.querySelector(".commit.selected");
+      return row ? { rowClass: row.className, meta: ${textStyleExpression(".commit.selected .commit-meta")} } : null;
+    })()`);
+  },
+
+  /**
+   * K3: the pending row is also selected. `.commit.pending { opacity: .8 }` is a
+   * group opacity, so the raw colour and the effective contrast disagree; the
+   * probe records both and the test gate uses the effective one.
+   */
+  "pending-selected": async (page) => {
+    await page.render(pendingState);
+    await page.wait(120);
+    const rect = await page.rowRect(4);
+    if (!rect) throw new Error("pending row 4 missing");
+    await page.clickRow(4, { ctrl: true });
+    await page.wait(180);
+    windowProbe(page, `(() => {
+      const row = document.querySelector(".commit.selected");
+      return row ? { rowClass: row.className, selected: row.classList.contains("selected"), pending: row.classList.contains("pending"), meta: ${textStyleExpression(".commit.selected .commit-meta")} } : null;
+    })()`);
+  },
+
+  /**
    * C4's second half: the banner that carries Continue / Skip / Abort can be
    * made just as tall by a long conflict-file list. `.banner` is the same box,
    * so the bound and the internal scroll have to keep those actions reachable,
@@ -474,10 +507,44 @@ const scenarios = {
     await page.wait(200);
   },
 
+  /**
+   * K1: the menu is wider than a narrow sidebar. The probe records the geometry
+   * (menu versus viewport), the label/shortcut split, and whether the full action
+   * survives truncation as an accessible name.
+   */
   menu: async (page) => {
     await page.render(baseState);
     await page.contextMenuRow(3);
     await page.wait(200);
+    windowProbe(page, `(() => {
+      const menu = document.getElementById("menu");
+      const rect = menu.getBoundingClientRect();
+      return {
+        viewport: window.innerWidth,
+        menuWidth: Math.round(rect.width),
+        menuLeft: Math.round(rect.left),
+        menuRight: Math.round(rect.right),
+        overflows: rect.right > window.innerWidth + 0.5 || rect.left < -0.5,
+        items: [...menu.querySelectorAll("button.item")].map((item) => {
+          const label = item.querySelector(".menu-label") || item.children[1];
+          const kbd = item.querySelector("kbd");
+          const labelStyle = label ? getComputedStyle(label) : null;
+          const kbdRect = kbd ? kbd.getBoundingClientRect() : null;
+          const itemRect = item.getBoundingClientRect();
+          return {
+            text: item.textContent.trim(),
+            action: item.getAttribute("aria-label"),
+            title: item.title,
+            label: label ? label.textContent.trim() : null,
+            labelTruncated: !!label && label.scrollWidth > label.clientWidth + 1,
+            labelEllipsis: labelStyle ? labelStyle.textOverflow : null,
+            labelOverflow: labelStyle ? labelStyle.overflow : null,
+            kbdRightAligned: !!kbdRect && !!itemRect.width && kbdRect.right >= itemRect.right - 12,
+            kbdWidth: kbdRect ? Math.round(kbdRect.width) : null,
+          };
+        }),
+      };
+    })()`);
   },
 
   "menu-batch": async (page) => {
@@ -556,6 +623,13 @@ const scenarios = {
       totalSteps: 8,
       completedSteps: 3,
     });
+    await page.wait(120);
+    // K3: the stopped row paints `list-activeSelectionBackground`, where the
+    // shared description colour also missed AA.
+    windowProbe(page, `(() => {
+      const row = document.querySelector(".commit.stopped");
+      return row ? { rowClass: row.className, meta: ${textStyleExpression(".commit.stopped .commit-meta")} } : null;
+    })()`);
   },
 
   empty: async (page) => {
@@ -627,6 +701,33 @@ const scenarios = {
     await page.wait(120);
   },
 
+  /**
+   * N3: the stopped row owns an `editorInfo` outline for its state. That rule
+   * comes after the shared `:focus-visible` one, so the keyboard ring inherited
+   * the state colour instead of the focus colour. A real Tab marks it
+   * `:focus-visible`; the interaction probe then reads the painted outline.
+   */
+  "focus-stopped": async (page) => {
+    await page.render({
+      ...baseState,
+      rebaseInProgress: true,
+      conflictCount: 0,
+      pausedReason: "edit",
+      stoppedAt: commits[3].hash,
+      totalSteps: 8,
+      completedSteps: 3,
+    });
+    await page.wait(180);
+    // The stopped row is not the roving tab stop, so Tab would skip it. A real
+    // Tab establishes keyboard modality (making the following programmatic focus
+    // match `:focus-visible`), then the row is focused directly.
+    await page.pressTab();
+    await page.evaluate(`document.querySelector(".commit.stopped").focus(); true`);
+    await page.wait(120);
+    const focused = await page.evaluate(`document.activeElement?.matches(".commit.stopped:focus-visible") === true`);
+    if (!focused) throw new Error("the stopped row never matched :focus-visible");
+  },
+
   /** The secondary control lives in the tooltip, which is the tightest container. */
   "focus-btn-secondary": async (page) => {
     await page.render(baseState);
@@ -649,6 +750,65 @@ const scenarios = {
  * bounded error banner can be scrolled with the keyboard. `window.__probe` is
  * read into `probe.json` when the harness is run with `--probe`.
  */
+/** Assign an expression's value to `window.__probe` so `--probe` records it. */
+function windowProbe(page, expression) {
+  return page.evaluate(`window.__probe = ${expression}; true`);
+}
+
+/**
+ * The text-node metric the audit reports, as an expression that can be embedded
+ * in a larger probe object. It returns both the raw contrast and the effective
+ * contrast after every ancestor `opacity`, because a pending row is dimmed by a
+ * group opacity and only the effective value is what the user sees.
+ */
+function textStyleExpression(selector) {
+  return `(() => {
+    const el = document.querySelector(${JSON.stringify(selector)});
+    if (!el) return null;
+    const parse = (value) => {
+      const m = value.match(/rgba?\\(([^)]+)\\)/);
+      if (!m) return null;
+      const parts = m[1].split(",").map((p) => parseFloat(p.trim()));
+      return { r: parts[0], g: parts[1], b: parts[2], a: parts.length > 3 ? parts[3] : 1 };
+    };
+    const blend = (fg, bg) => fg.a >= 1 ? fg : {
+      r: fg.r * fg.a + bg.r * (1 - fg.a),
+      g: fg.g * fg.a + bg.g * (1 - fg.a),
+      b: fg.b * fg.a + bg.b * (1 - fg.a),
+      a: 1,
+    };
+    const channel = (v) => { const s = v / 255; return s <= 0.03928 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4); };
+    const lum = (c) => 0.2126 * channel(c.r) + 0.7152 * channel(c.g) + 0.0722 * channel(c.b);
+    const ratio = (a, b) => { const l1 = lum(a), l2 = lum(b); return (Math.max(l1, l2) + 0.05) / (Math.min(l1, l2) + 0.05); };
+    const background = (node) => {
+      for (let current = node; current && current.nodeType === 1; current = current.parentElement) {
+        const bg = parse(getComputedStyle(current).backgroundColor);
+        if (bg && bg.a > 0) return bg;
+      }
+      return { r: 255, g: 255, b: 255, a: 1 };
+    };
+    const opacity = (node) => {
+      let alpha = 1;
+      for (let current = node; current && current.nodeType === 1; current = current.parentElement) {
+        const value = parseFloat(getComputedStyle(current).opacity);
+        if (!Number.isNaN(value)) alpha *= value;
+      }
+      return alpha;
+    };
+    const fg = parse(getComputedStyle(el).color);
+    const bg = background(el);
+    const groupOpacity = opacity(el);
+    return {
+      text: el.textContent.trim().slice(0, 48),
+      color: getComputedStyle(el).color,
+      background: "rgb(" + Math.round(bg.r) + ", " + Math.round(bg.g) + ", " + Math.round(bg.b) + ")",
+      opacity: Number(groupOpacity.toFixed(3)),
+      contrast: Number(ratio(blend(fg, bg), bg).toFixed(2)),
+      effectiveContrast: Number(ratio(blend({ ...fg, a: fg.a * groupOpacity }, bg), bg).toFixed(2)),
+    };
+  })()`;
+}
+
 async function pressKey(page, key, code, vk, modifiers = 0) {
   // Enter needs its text payload for Chromium to run a focused button's
   // default activation; arrows and PageDown are fine without one.
@@ -1260,6 +1420,52 @@ const composeScenarios = {
     await page.wait(80);
     await page.post({ type: "applyFailed", message: "应用失败：目标 commit 已被其他操作改写。" });
     await page.wait(80);
+    windowProbe(page, `(() => {
+      const error = document.getElementById("error");
+      return { text: error.textContent.trim(), style: ${textStyleExpression("#error")} };
+    })()`);
+  },
+
+  /**
+   * N4: the three fields need a programmatic name, and clicking a visible label
+   * must move focus to its control. `input.labels` is the DOM's own association;
+   * the AX tree is what a screen reader actually receives.
+   */
+  "compose-probe": async (page) => {
+    // The AI section (and its 补充信息 field) is hidden unless the target is an
+    // AI compose, so measure all three fields in the AI variant.
+    await page.post({ ...composeTarget, ai: true, model: "fast" });
+    await page.wait(150);
+    windowProbe(page, `(() => {
+      const fields = ["subject", "body", "extra"].map((id) => {
+        const el = document.getElementById(id);
+        return {
+          id,
+          tag: el.tagName,
+          labels: [...(el.labels || [])].map((label) => label.textContent.trim()),
+          ariaLabel: el.getAttribute("aria-label"),
+          htmlFor: [...(el.labels || [])].map((label) => label.htmlFor),
+        };
+      });
+      const labelClicks = [...document.querySelectorAll("main label")].map((label) => {
+        const control = label.htmlFor ? document.getElementById(label.htmlFor) : label.querySelector("input, textarea, select");
+        control?.blur();
+        label.click();
+        return {
+          text: label.textContent.trim(),
+          htmlFor: label.htmlFor,
+          target: control ? (control.id || control.tagName) : null,
+          focused: !!control && document.activeElement === control,
+        };
+      });
+      return { fields, labelClicks };
+    })()`);
+    const ax = {};
+    for (const id of ["subject", "body", "extra"]) {
+      const snapshot = await axSnapshot(page, `#${id}`);
+      ax[id] = snapshot.found ? { role: snapshot.node.role, name: snapshot.node.name } : null;
+    }
+    await page.evaluate(`window.__probe.ax = ${JSON.stringify(ax)}; true`);
   },
 
   "compose-stale": async (page) => {

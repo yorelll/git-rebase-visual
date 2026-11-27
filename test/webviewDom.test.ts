@@ -886,6 +886,39 @@ test("the menu grows from the pointer but skips the animation when opened from t
   }
 });
 
+// ------------------------------------------------- K1: menu truncation
+test("every menu item keeps its full action name while its label may truncate", () => {
+  const view = createHarness();
+  try {
+    const doc = view.dom.window.document;
+    // Disable two actions so the disabled path and the normal path are both
+    // represented: a disabled item's title is its reason, so its accessible name
+    // has to carry the action instead.
+    view.postState({ ...state([a, b], 3), llmConfigured: false, hasStaged: false, hasUnstaged: false, changes: [] });
+    view.row(b).dispatchEvent(mouseEvent(view.dom.window, "contextmenu", { clientX: 10, clientY: 10 }));
+    const items = [...doc.querySelectorAll<HTMLButtonElement>("#menu button.item")];
+    assert.ok(items.length > 0);
+    for (const item of items) {
+      const label = item.querySelector(".menu-label");
+      assert.ok(label, `menu item "${item.textContent?.trim()}" has a shrinkable label`);
+      const action = item.getAttribute("aria-label");
+      assert.ok(action, "the full action is exposed as the accessible name");
+      assert.equal(action, label.textContent?.trim(), "the accessible name is the untruncated action");
+      if (item.getAttribute("aria-disabled") === "true") {
+        assert.equal(item.title, item.getAttribute("aria-description"), "a disabled item's title stays the reason");
+      } else {
+        assert.equal(item.title, action, "a normal item's title carries the full action");
+      }
+    }
+    // The shortcut is a fixed-width tail, not part of the shrinkable label.
+    const shortcut = items.find((item) => item.querySelector("kbd"));
+    assert.ok(shortcut, "the shortcut-bearing item is still rendered");
+    assert.equal(shortcut!.querySelector(".menu-label")?.nextElementSibling?.tagName, "KBD", "the shortcut follows the label");
+  } finally {
+    view.close();
+  }
+});
+
 test("a second tooltip request within the grace window skips the 400ms anti-misfire delay", async () => {
   const view = createHarness();
   try {
