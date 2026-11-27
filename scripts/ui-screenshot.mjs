@@ -374,6 +374,40 @@ const scenarios = {
     await page.wait(200);
   },
 
+  /**
+   * The three scenarios below need the browser's own pointer handling: a
+   * synthetic `mouseenter`/`contextmenu` does not make `:hover` or
+   * `:focus-visible` match, so they would audit the idle colours and report a
+   * passing contrast for a state the user never sees. CDP `Input.*` injects
+   * trusted input, exactly like a real pointer.
+   */
+  "menu-hover": async (page) => {
+    await page.render(baseState);
+    await page.rightClickRow(3);
+    await page.wait(200);
+    // The shortcut-bearing item is the one whose `kbd` sits beside a grey icon;
+    // it is the row that V1/C1 are about.
+    await page.mouseMoveToMenuItem("shortcut");
+    await page.wait(120);
+  },
+
+  "menu-hover-danger": async (page) => {
+    await page.render(baseState);
+    await page.rightClickRow(3);
+    await page.wait(200);
+    await page.mouseMoveToMenuItem("danger");
+    await page.wait(120);
+  },
+
+  "menu-real": async (page) => {
+    await page.render(baseState);
+    // A real right click opens the menu and moves focus to its first item.
+    // Nothing else is moved: whatever paint is on screen must come from the
+    // pointer, not from the programmatic focus.
+    await page.rightClickRow(3);
+    await page.wait(200);
+  },
+
   drag: async (page) => {
     await page.render(baseState);
     await page.dragGrip(6, 3);
@@ -546,6 +580,10 @@ const AUDIT_PROBE = `(() => {
       height: Math.round(rect.height),
       left: Math.round(rect.left),
       right: Math.round(rect.right),
+      // The icon box is sized by the stylesheet and the glyph is sized by the
+      // font, so "does it fit" is scrollWidth vs clientWidth, not rect.width.
+      clientWidth: el.clientWidth,
+      scrollWidth: el.scrollWidth,
       // Ellipsised text is a deliberate truncation, not a layout defect; only
       // report clipping where the stylesheet did not ask for it.
       clipped: style.textOverflow !== "ellipsis" && (el.scrollWidth > el.clientWidth + 1 || el.scrollHeight > el.clientHeight + 1),
@@ -563,6 +601,45 @@ const AUDIT_PROBE = `(() => {
     });
   }
   return found;
+})()`;
+
+/**
+ * State probe for the pointer scenarios. The audit says what colour a text node
+ * ended up with; this says *why* — which menu item the browser considers
+ * hovered, whether the programmatic focus is painting a keyboard focus ring,
+ * and whether any row was selected as a side effect of opening the menu.
+ */
+const INTERACTION_PROBE = `(() => {
+  const describe = (el) => {
+    if (!el) return null;
+    const cls = (el.className || "").toString().split(/\\s+/).filter(Boolean).slice(0, 2).join(".");
+    return el.id ? "#" + el.id : el.tagName.toLowerCase() + (cls ? "." + cls : "");
+  };
+  const active = document.activeElement;
+  const items = [...document.querySelectorAll("#menu .item")].map((el) => {
+    const style = getComputedStyle(el);
+    return {
+      text: el.textContent.trim().slice(0, 24),
+      hovered: el.matches(":hover"),
+      focusVisible: el.matches(":focus-visible"),
+      painted: style.backgroundColor !== "rgba(0, 0, 0, 0)",
+      color: style.color,
+      backgroundColor: style.backgroundColor,
+    };
+  });
+  const rows = [...document.querySelectorAll(".commit")];
+  const menuEl = document.getElementById("menu");
+  const menuRect = menuEl && !menuEl.classList.contains("hidden") ? menuEl.getBoundingClientRect() : null;
+  return {
+    activeElement: describe(active),
+    activeFocusVisible: !!active && active.matches(":focus-visible"),
+    selectionForegroundToken: getComputedStyle(document.documentElement).getPropertyValue("--vscode-menu-selectionForeground").trim(),
+    menuOpen: !!menuRect,
+    menuRect: menuRect && { left: Math.round(menuRect.left), width: Math.round(menuRect.width), right: Math.round(menuRect.right) },
+    menuItems: items,
+    highlightedMenuItems: items.filter((item) => item.hovered || item.focusVisible || item.painted).map((item) => item.text),
+    selectedRows: rows.filter((row) => row.classList.contains("selected")).length,
+  };
 })()`;
 
 const auditResults = [];
@@ -648,6 +725,47 @@ class Cdp {
       const row = document.querySelectorAll(".commit")[${index}];
       row.dispatchEvent(new MouseEvent("mouseenter", { bubbles: true, clientX: ${rect.x}, clientY: ${rect.y} }));
     })()`);
+  }
+
+  /**
+   * Move the hardware pointer. `mouseMoved` is what makes `:hover` match;
+   * dispatching a synthetic `mouseenter` from the page does not, because the
+   * cascade only consults the browser's internal hover chain.
+   */
+  mouseMove(x, y) {
+    return this.send("Input.dispatchMouseEvent", { type: "mouseMoved", x, y, button: "none", buttons: 0 });
+  }
+
+  /** A full press/release pair with a real button, so the browser derives `click` and `contextmenu`. */
+  async mouseClick(x, y, { button = "left", clickCount = 1 } = {}) {
+    const buttons = button === "right" ? 2 : 1;
+    await this.send("Input.dispatchMouseEvent", { type: "mousePressed", x, y, button, buttons, clickCount });
+    await this.send("Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button, buttons: 0, clickCount });
+  }
+
+  async rightClickRow(index) {
+    const rect = await this.rowRect(index);
+    if (!rect) throw new Error(`row ${index} missing`);
+    await this.mouseClick(rect.x, rect.y, { button: "right" });
+  }
+
+  /**
+   * Aim at a menu item after the menu is on screen. `kind` is "shortcut" for
+   * the only item that carries a `kbd`, or "danger" for the destructive item.
+   */
+  async mouseMoveToMenuItem(kind) {
+    const rect = await this.evaluate(`(() => {
+      const items = [...document.querySelectorAll("#menu .item")];
+      const item = ${kind === "danger"
+        ? `items.find((el) => el.classList.contains("danger"))`
+        : `items.find((el) => el.querySelector("kbd"))`};
+      if (!item) return null;
+      const r = item.getBoundingClientRect();
+      return { x: r.left + r.width / 2, y: r.top + r.height / 2, text: item.textContent.trim() };
+    })()`);
+    if (!rect) throw new Error(`no menu item matching ${kind}`);
+    await this.mouseMove(rect.x, rect.y);
+    return rect;
   }
 
   /** Press the grip of `from`, then move onto `to` so the drop marker paints. */
@@ -826,7 +944,7 @@ async function renderTheme(themeName, chromePort, profile, defaults) {
       }
       await activeScenarios[name](cdp);
       await cdp.wait(80);
-      if (args.includes("--audit")) auditResults.push({ theme: themeName, scenario: name, elements: await cdp.evaluate(AUDIT_PROBE) });
+      if (args.includes("--audit")) auditResults.push({ theme: themeName, scenario: name, elements: await cdp.evaluate(AUDIT_PROBE), interaction: await cdp.evaluate(INTERACTION_PROBE) });
       if (args.includes("--debug-style") && name === "menu") {
         console.log("  menu-fit:", JSON.stringify(await cdp.evaluate(`(() => {
           const menu = document.getElementById("menu");
