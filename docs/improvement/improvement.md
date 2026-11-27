@@ -415,6 +415,9 @@
 
 * **\[ ] P2 —— 右键菜单在默认侧边栏宽度下溢出（视觉评审第一轮发现，未修）。** 菜单宽度由内容决定，实测 **322px**；VS Code 默认侧边栏约 300px，`.menu` 只有 `min-width: 200px` 而没有 `max-width`，菜单是 `position: fixed` 且位于 webview 内部，无法逃出面板边界，于是右侧的快捷键提示（`Enter` / `Delete`）与长标签尾部被裁掉。**证据**：`scripts/ui-screenshot.mjs --only menu --width 300 --debug-style` 输出 `{"innerWidth":300,"menuWidth":322,"left":4,"right":326,"overflows":true}`。**修法方向**：`max-width: calc(100vw - 8px)` + 让 `.menu .item` 的标签部分 `min-width: 0` / `text-overflow: ellipsis`（`kbd` 保持右对齐不被压缩）；需要同时确认截断后的 `aria-label`/`title` 仍能表达完整动作名。**影响面**：`media/style.css` 的 `.menu` 与 `.menu .item`，无 JS 改动。
 
+* **\[ ] P2 —— 外部 rebase 的刷新链路没有端到端测试（视觉评审发现的覆盖缺口）。** 今天的证据只到纯函数层：`test/rebaseProgressState.test.ts:15` 的 `external/unknown rebase does not invent progress` 证明“外部 rebase 不臆造进度”，`rebaseEngine` 的 `continueRebase`/`abortRebase` 有引擎级集成测试。但“用户在终端执行 `git rebase --continue` → 插件轮询发现 `.git/rebase-merge` 消失 → 重读 commit 列表 → 发出新 state → 横幅消失、列表刷新”这条链路**没有任何测试**（`grep refreshTimer` 在 `test/` 下无命中）。截图管线也覆盖不到：它验证的是“给定 state 画得对不对”，不是“state 从哪来”。**建议的测法**：真实仓库制造冲突 → 外部 `git rebase --continue` → 触发一次 refresh → 断言 posted state 的 `rebaseInProgress`、`commits`、`pausedReason` 与横幅输入。
+* **\[ ] P2 —— 拖拽没有边缘自动滚动（视觉评审发现的可用性缺陷）。** `media/main.js` 的 `grip.pointermove` 只做 `elementFromPoint` 找目标行，全文唯一的 `scroll` 监听是关闭右键菜单用的（`main.js:687`）。列表超过一屏时，把第 20 行拖到第 2 行**做不到**：必须先放下、滚动、再拖一次。**修法方向**：在 `pointermove` 里判断指针距 `#list` 上下边缘的距离，进入阈值后按距离加速自动滚动，并在滚动后重新计算 `pointerTarget`（注意滚动会让目标行移动，必须用当前指针位置重新命中）。**风险**：`elementFromPoint` 在滚动过程中会返回不同行，需要防抖，否则插入线会抖动。
+
 ## 验收原则
 所有后续历史改写功能应满足：
 
