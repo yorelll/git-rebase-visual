@@ -231,7 +231,7 @@ button, .grip, .dot, .lock-icon, .stopped-badge {
   font: 700 11px var(--vscode-editor-font-family, monospace);
   text-align: center;
 }
-.change-file .file-state-modify { color: var(--vscode-editorWarning-foreground, var(--vscode-charts-yellow)); }
+.change-file .file-state-modify { color: var(--vscode-gitDecoration-modifiedResourceForeground, var(--vscode-editorWarning-foreground)); }
 .change-file .file-state-add, .change-file .file-state-untracked { color: var(--vscode-gitDecoration-addedResourceForeground, var(--vscode-testing-iconPassed)); }
 .change-file .file-state-delete { color: var(--vscode-gitDecoration-deletedResourceForeground, var(--vscode-errorForeground)); }
 .change-file .file-state-rename { color: var(--vscode-gitDecoration-renamedResourceForeground, var(--vscode-charts-blue)); }
@@ -309,6 +309,16 @@ button, .grip, .dot, .lock-icon, .stopped-badge {
   outline-offset: 1px;
 }
 
+/* `type="search"` makes Chromium paint its own cancel button inside the field,
+   right beside the page's 清除 button. Hide only that native affordance; the
+   input keeps its search semantics and the page button stays in the tab order. */
+.commit-search::-webkit-search-cancel-button,
+.commit-search::-webkit-search-decoration {
+  -webkit-appearance: none;
+  appearance: none;
+  display: none;
+}
+
 .selection-count {
   font-size: 10.5px;
   color: var(--vscode-descriptionForeground);
@@ -382,7 +392,7 @@ button, .grip, .dot, .lock-icon, .stopped-badge {
   font-family: var(--vscode-editor-font-family, monospace);
   font-size: 10.5px;
   font-variant-numeric: tabular-nums;
-  color: var(--vscode-descriptionForeground);
+  color: var(--vscode-badge-foreground, var(--vscode-foreground));
   background: var(--vscode-badge-background, rgba(128, 128, 128, 0.18));
   border-radius: 4px;
   padding: 1px 6px;
@@ -709,6 +719,15 @@ button, .grip, .dot, .lock-icon, .stopped-badge {
 .btn.primary {
   color: var(--vscode-button-foreground);
   background: var(--vscode-button-background);
+}
+
+/* The primary fill and `focusBorder` are the same token family in the default
+   themes, so an inset ring (the shared `.btn:focus-visible` rule) is invisible.
+   Draw this ring just outside the fill instead. Secondary buttons keep the
+   inset ring: theirs is already visible and an outer ring would be clipped in
+   tight containers. */
+.btn.primary:focus-visible {
+  outline-offset: 1px;
 }
 
 .btn:hover:not(:disabled) {
