@@ -418,6 +418,16 @@
 * **\[ ] P2 —— 外部 rebase 的刷新链路没有端到端测试（视觉评审发现的覆盖缺口）。** 今天的证据只到纯函数层：`test/rebaseProgressState.test.ts:15` 的 `external/unknown rebase does not invent progress` 证明“外部 rebase 不臆造进度”，`rebaseEngine` 的 `continueRebase`/`abortRebase` 有引擎级集成测试。但“用户在终端执行 `git rebase --continue` → 插件轮询发现 `.git/rebase-merge` 消失 → 重读 commit 列表 → 发出新 state → 横幅消失、列表刷新”这条链路**没有任何测试**（`grep refreshTimer` 在 `test/` 下无命中）。截图管线也覆盖不到：它验证的是“给定 state 画得对不对”，不是“state 从哪来”。**建议的测法**：真实仓库制造冲突 → 外部 `git rebase --continue` → 触发一次 refresh → 断言 posted state 的 `rebaseInProgress`、`commits`、`pausedReason` 与横幅输入。
 * **\[ ] P2 —— 拖拽没有边缘自动滚动（视觉评审发现的可用性缺陷）。** `media/main.js` 的 `grip.pointermove` 只做 `elementFromPoint` 找目标行，全文唯一的 `scroll` 监听是关闭右键菜单用的（`main.js:687`）。列表超过一屏时，把第 20 行拖到第 2 行**做不到**：必须先放下、滚动、再拖一次。**修法方向**：在 `pointermove` 里判断指针距 `#list` 上下边缘的距离，进入阈值后按距离加速自动滚动，并在滚动后重新计算 `pointerTarget`（注意滚动会让目标行移动，必须用当前指针位置重新命中）。**风险**：`elementFromPoint` 在滚动过程中会返回不同行，需要防抖，否则插入线会抖动。
 
+* **\[ ] P2 —— 视觉审计发现的 8 项对比度/图标缺陷（0.8.6）。** 完整证据见 `docs/ui-reivew/visual-audit-0-8-6.md` §3.1，复现：`node scripts/ui-screenshot.mjs --theme dark_modern,light_modern --audit`。按组件排序：
+  * **菜单高亮项图标 1.67:1（dark）/ 1.78:1（light）**：`.menu .menu-icon` 自带 `color`，不随 `menu-selectionForeground` 变化。改 `color: inherit`。
+  * **tooltip 的 `tip-stat` 徽标 2.28:1**：`badge-background` 配 `descriptionForeground`，应为 `badge-foreground`。
+  * **改动列表 `M` 标记 2.93:1（light）**：`.file-state-modify` 用 `editorWarning-foreground`，而 A/D/R 用的是 `gitDecoration.*ResourceForeground`；改用 `gitDecoration.modifiedResourceForeground`。
+  * **菜单危险项 3.35:1（light）**：与 `.danger-btn` 同源，随危险色方案一起定。
+  * **作者圆点首字母 3.59:1（light）/ `⏸ 停在此` 徽标 3.64:1（dark）**：都用 `editor-background` 作前景，需按背景亮度选色。
+  * **过滤框两个清除入口**：`input[type=search]` 的 Chromium 原生取消按钮与页面「清除」按钮并存；隐藏 `::-webkit-search-cancel-button`。
+  * **菜单 emoji 图标被裁**：`.menu .menu-icon` 宽 14px，`🔒`/`⌫` 的 `scrollWidth` 是 17px。
+  * 临界项（4.36:1 / 4.48:1）不单独立项，随上述改动一并复核。
+
 ## 验收原则
 所有后续历史改写功能应满足：
 

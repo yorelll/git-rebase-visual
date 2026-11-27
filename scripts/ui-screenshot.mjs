@@ -21,6 +21,7 @@
  *
  * Usage:
  *   node scripts/ui-screenshot.mjs [--out DIR] [--theme a,b] [--only name,name]
+ *                                  [--width N] [--audit] [--debug-style]
  *
  * Defaults to `D:\tmp\grv-ui-shots` so a render never dirties the working tree.
  */
@@ -119,7 +120,9 @@ function readColorDefaults() {
   const stamp = fs.statSync(workbenchBundle).mtimeMs;
   if (fs.existsSync(cacheFile)) {
     const cached = JSON.parse(fs.readFileSync(cacheFile, "utf8"));
-    if (cached.stamp === stamp) return cached.defaults;
+    // `version` guards against reusing a cache written before extension colours
+    // and bundle constants were added to the resolver.
+    if (cached.version === 2 && cached.stamp === stamp) return cached.defaults;
   }
   const source = fs.readFileSync(workbenchBundle, "utf8");
   const spec = String.raw`(?:\{[^{}]{0,800}\}|[A-Za-z_$][\w$]*)`;
@@ -127,9 +130,22 @@ function readColorDefaults() {
   // The trailing `h(id, fallback)` is not always present (`debugTokenExpression`
   // is followed by its description string), so it must not be part of the match.
   const registration = new RegExp(String.raw`([A-Za-z_$][\w$]*)\(\s*"(${idPattern})"\s*,\s*(${spec})`, "g");
+  // Colours are sometimes written as bundle constants (`he.white`) rather than
+  // literals; `list.activeSelectionForeground` — which `menu.selectionForeground`
+  // aliases — is exactly that case, and missing it makes selected menu text look
+  // unreadable in the render while VS Code shows white.
+  const constants = {
+    "he.white": "#ffffff",
+    "he.black": "#000000",
+    "he.transparent": "transparent",
+  };
   const parseObject = (text) => {
     const found = {};
     for (const m of text.matchAll(/(dark|light|hcDark|hcLight)\s*:\s*"(#[0-9a-fA-F]{3,8})"/g)) found[m[1]] = m[2];
+    for (const m of text.matchAll(/(dark|light|hcDark|hcLight)\s*:\s*([A-Za-z_$][\w$]*\.[\w$]+)/g)) {
+      const value = constants[m[2]];
+      if (value && !found[m[1]]) found[m[1]] = value;
+    }
     return found;
   };
   const resolve = (raw) => {
@@ -149,7 +165,28 @@ function readColorDefaults() {
     const parsed = resolve(match[3]);
     if (Object.keys(parsed).length) defaults[match[2]] = parsed;
   }
-  fs.writeFileSync(cacheFile, JSON.stringify({ stamp, defaults }));
+  // Not every colour is registered by the workbench: extensions contribute
+  // their own through `contributes.colors` (gitDecoration.* lives there, which
+  // is why the file-state letters rendered in fallback colours). Those use
+  // `highContrast` / `highContrastLight` key names.
+  const extensionsDir = path.join(vscodeRoot, "extensions");
+  for (const entry of fs.existsSync(extensionsDir) ? fs.readdirSync(extensionsDir) : []) {
+    const manifest = path.join(extensionsDir, entry, "package.json");
+    if (!fs.existsSync(manifest)) continue;
+    let pkg;
+    try { pkg = JSON.parse(fs.readFileSync(manifest, "utf8")); } catch { continue; }
+    for (const color of pkg.contributes?.colors || []) {
+      if (!color.id || defaults[color.id]) continue;
+      const value = color.defaults || {};
+      const normalized = {};
+      if (value.dark) normalized.dark = value.dark;
+      if (value.light) normalized.light = value.light;
+      if (value.highContrast) normalized.hcDark = value.highContrast;
+      if (value.highContrastLight) normalized.hcLight = value.highContrastLight;
+      if (Object.keys(normalized).length) defaults[color.id] = normalized;
+    }
+  }
+  fs.writeFileSync(cacheFile, JSON.stringify({ version: 2, stamp, defaults }));
   return defaults;
 }
 
@@ -341,6 +378,86 @@ const scenarios = {
 };
 
 // ---------------------------------------------------------------- driver
+
+/**
+ * In-page metrics probe. A screenshot shows that contrast looks wrong; this
+ * says by how much, which is what a review report has to cite. Contrast is
+ * computed against the nearest painted ancestor because the stylesheet paints
+ * backgrounds on several layers (row, section, panel).
+ */
+const AUDIT_PROBE = `(() => {
+  const parse = (value) => {
+    const m = value.match(/rgba?\\(([^)]+)\\)/);
+    if (!m) return null;
+    const parts = m[1].split(",").map((p) => parseFloat(p.trim()));
+    return { r: parts[0], g: parts[1], b: parts[2], a: parts.length > 3 ? parts[3] : 1 };
+  };
+  const blend = (fg, bg) => fg.a >= 1 ? fg : {
+    r: fg.r * fg.a + bg.r * (1 - fg.a),
+    g: fg.g * fg.a + bg.g * (1 - fg.a),
+    b: fg.b * fg.a + bg.b * (1 - fg.a),
+    a: 1,
+  };
+  const channel = (v) => { const s = v / 255; return s <= 0.03928 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4); };
+  const lum = (c) => 0.2126 * channel(c.r) + 0.7152 * channel(c.g) + 0.0722 * channel(c.b);
+  const ratio = (a, b) => { const l1 = lum(a), l2 = lum(b); return (Math.max(l1, l2) + 0.05) / (Math.min(l1, l2) + 0.05); };
+  const background = (el) => {
+    let node = el;
+    while (node && node.nodeType === 1) {
+      const bg = parse(getComputedStyle(node).backgroundColor);
+      if (bg && bg.a > 0) return bg;
+      node = node.parentElement;
+    }
+    return { r: 255, g: 255, b: 255, a: 1 };
+  };
+  const label = (el) => {
+    if (el.id) return "#" + el.id;
+    const cls = (el.className || "").toString().split(/\\s+/).filter(Boolean).slice(0, 2).join(".");
+    return el.tagName.toLowerCase() + (cls ? "." + cls : "");
+  };
+  const found = [];
+  for (const el of document.querySelectorAll("body *")) {
+    if (el.closest(".hidden, .sr-only")) continue;
+    const own = [...el.childNodes].filter((n) => n.nodeType === 3).map((n) => n.textContent.trim()).join(" ").trim();
+    if (!own) continue;
+    const style = getComputedStyle(el);
+    if (style.visibility === "hidden" || style.display === "none" || parseFloat(style.opacity) === 0) continue;
+    const rect = el.getBoundingClientRect();
+    if (!rect.width || !rect.height) continue;
+    const fg = parse(style.color);
+    if (!fg) continue;
+    const bg = background(el);
+    found.push({
+      label: label(el),
+      text: own.slice(0, 40),
+      fontSize: parseFloat(style.fontSize),
+      color: style.color,
+      background: "rgb(" + Math.round(bg.r) + ", " + Math.round(bg.g) + ", " + Math.round(bg.b) + ")",
+      contrast: Number(ratio(blend(fg, bg), bg).toFixed(2)),
+      width: Math.round(rect.width),
+      height: Math.round(rect.height),
+      left: Math.round(rect.left),
+      right: Math.round(rect.right),
+      // Ellipsised text is a deliberate truncation, not a layout defect; only
+      // report clipping where the stylesheet did not ask for it.
+      clipped: style.textOverflow !== "ellipsis" && (el.scrollWidth > el.clientWidth + 1 || el.scrollHeight > el.clientHeight + 1),
+      // A child wider than the panel is fine when an ancestor clips it (that is
+      // how the branch context line ellipsises); only unclipped overflow matters.
+      overflowsViewport: (rect.right > window.innerWidth + 0.5 || rect.left < -0.5) && !(() => {
+        let node = el.parentElement;
+        while (node) {
+          const overflow = getComputedStyle(node).overflowX;
+          if (overflow !== "visible") return true;
+          node = node.parentElement;
+        }
+        return false;
+      })(),
+    });
+  }
+  return found;
+})()`;
+
+const auditResults = [];
 
 class Cdp {
   constructor(socket) {
@@ -581,6 +698,7 @@ async function renderTheme(themeName, chromePort, profile, defaults) {
       }
       await scenarios[name](cdp);
       await cdp.wait(80);
+      if (args.includes("--audit")) auditResults.push({ theme: themeName, scenario: name, elements: await cdp.evaluate(AUDIT_PROBE) });
       if (args.includes("--debug-style") && name === "menu") {
         console.log("  menu-fit:", JSON.stringify(await cdp.evaluate(`(() => {
           const menu = document.getElementById("menu");
@@ -628,6 +746,15 @@ const main = async () => {
   for (const [index, themeName] of themes.entries()) {
     console.log(`${themeName}:`);
     await renderTheme(themeName, 9411 + index, path.join(outDir, `.chrome-profile-${themeName}`), defaults);
+  }
+  if (auditResults.length) {
+    fs.writeFileSync(path.join(outDir, "audit.json"), JSON.stringify(auditResults, null, 2));
+    const all = auditResults.flatMap((shot) => shot.elements.map((el) => ({ ...el, theme: shot.theme, scenario: shot.scenario })));
+    // WCAG AA: 4.5:1 for body text, 3:1 for large text (>=18.66px bold or >=24px).
+    const below = all.filter((el) => el.contrast < (el.fontSize >= 24 ? 3 : 4.5));
+    const clipped = all.filter((el) => el.clipped);
+    const overflowing = all.filter((el) => el.overflowsViewport);
+    console.log(`\nAudit: ${all.length} text nodes · ${below.length} below AA · ${clipped.length} clipped · ${overflowing.length} overflowing the panel`);
   }
   console.log(`\nWrote screenshots to ${outDir}`);
 };
