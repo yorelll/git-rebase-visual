@@ -105,7 +105,19 @@ function readComposeDocument() {
   const start = source.indexOf("<!doctype html>");
   const end = source.indexOf("</html>", start);
   if (start < 0 || end < 0) throw new Error("compose panel template not found");
-  const template = source.slice(start, end + "</html>".length);
+  const raw = source.slice(start, end + "</html>".length);
+  // Slice with `source.slice` would hand the browser the *unescaped* template:
+  // `split('\\n')` stays two backslashes instead of becoming the single
+  // backslash that the shipped HTML carries, so a panel that is correct in
+  // production renders as if it were broken. Evaluate the template once, with
+  // the same two interpolations the extension supplies.
+  let template;
+  try {
+    template = new Function("nonce", "webview", `return \`${raw}\`;`)("harness-nonce", { cspSource: "http://127.0.0.1" });
+  } catch (error) {
+    console.warn(`  ! compose template could not be evaluated (${error.message}); falling back to the raw slice, which may render escape sequences wrongly`);
+    template = raw;
+  }
   const style = /<style>([\s\S]*?)<\/style>/.exec(template);
   const body = /<body>([\s\S]*?)<\/body>/.exec(template);
   if (!style || !body) throw new Error("compose panel template lost its style or body");
