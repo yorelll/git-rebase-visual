@@ -60,6 +60,19 @@ button, .grip, .dot, .lock-icon, .stopped-badge {
   font-size: 11.5px;
   line-height: 1.4;
   border-bottom: 1px solid var(--vscode-panel-border);
+  /* A Git failure can be hundreds of characters, and the banner sits in normal
+     flow above the list: without a bound a 900-character error pushed `#list`
+     almost out of the viewport (546px banner / 64px list at 340px; 739px / 0 at
+     260px). Cap the banner below half the viewport and let it scroll
+     internally, so the list always keeps the majority of the height.
+
+     The actions stay inside that scroll area. They are reachable by scrolling
+     the banner, and Tab scrolls a focused button into view. A `position: sticky`
+     action bar was rejected: it would float over the diagnostic text while the
+     user reads it and would need a variant-specific opaque backdrop, while the
+     review only requires the actions to be reachable, not permanently visible. */
+  max-height: 45vh;
+  overflow-y: auto;
 }
 
 .banner.error {
@@ -429,8 +442,14 @@ button, .grip, .dot, .lock-icon, .stopped-badge {
   cursor: default;
 }
 
+/* The pending rows are the ones the user is about to replay, so their hashes
+   and the `*（待重放）` suffix must stay readable. At 0.62 the effective
+   contrast (ancestor opacity folded into the foreground alpha) fell to 3.31:1
+   for the dark meta line and 3.58:1 for light subject and meta. 0.8 keeps the
+   rows visibly dimmer than a normal row while lifting those to ~4.65 and
+   ~5.85. */
 .commit.pending {
-  opacity: 0.62;
+  opacity: 0.8;
 }
 
 .pending-boundary {
