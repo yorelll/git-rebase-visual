@@ -895,9 +895,24 @@ test("a second tooltip request within the grace window skips the 400ms anti-misf
       "the first hover still waits the full 400ms"
     );
 
-    // Leaving hides the tooltip after its own 200ms grace and arms the window.
+    // The host answers, so the tooltip is actually on screen before the pointer
+    // leaves. That is the path that teaches the next hover to skip the delay.
+    view.postState({
+      type: "detail",
+      hash: c,
+      author: "Carol",
+      relDate: "1 hour ago",
+      absDate: "today",
+      stat: "1 file changed",
+      message: "subject-c",
+    });
+    const tooltip = view.dom.window.document.getElementById("tooltip")!;
+    assert.equal(tooltip.classList.contains("hidden"), false, "the first tooltip is visible before the pointer leaves");
+
+    // Leaving hides the shown tooltip after its own 200ms grace and arms the window.
     view.row(c).dispatchEvent(mouseEvent(view.dom.window, "mouseleave"));
     await new Promise((resolve) => setTimeout(resolve, 240));
+    assert.equal(tooltip.classList.contains("hidden"), true, "the shown tooltip really was hidden");
     view.messages.length = 0;
 
     view.row(b).dispatchEvent(mouseEvent(view.dom.window, "mouseenter"));
@@ -909,6 +924,82 @@ test("a second tooltip request within the grace window skips the 400ms anti-misf
     );
   } finally {
     view.close();
+  }
+});
+
+test("opening a menu or leaving before the tooltip shows does not arm the instant window", async () => {
+  const detailFor = (hash: string) => ({
+    type: "detail",
+    hash,
+    author: "Author",
+    relDate: "1 hour ago",
+    absDate: "today",
+    stat: "1 file changed",
+    message: "subject",
+  });
+
+  // Path 1: `openMenu()` calls `hideTooltip()` even though no tooltip is on
+  // screen. That must not masquerade as "the user just dismissed a tooltip".
+  const menuView = createHarness();
+  try {
+    menuView.postState(state([a, b, c], 3));
+    menuView.row(c).dispatchEvent(mouseEvent(menuView.dom.window, "contextmenu", { clientX: 10, clientY: 10 }));
+    menuView.messages.length = 0;
+
+    menuView.row(b).dispatchEvent(mouseEvent(menuView.dom.window, "mouseenter"));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.deepEqual(
+      menuView.messages.filter((message) => message.type === "requestDetail"),
+      [],
+      "a menu opened before the hover does not make the request immediate"
+    );
+    await new Promise((resolve) => setTimeout(resolve, 380));
+    assert.deepEqual(
+      menuView.messages.filter((message) => message.type === "requestDetail").map((message) => message.hash),
+      [b],
+      "the first hover after a menu open still pays the full 400ms"
+    );
+    menuView.postState(detailFor(b));
+    const menuTooltip = menuView.dom.window.document.getElementById("tooltip")!;
+    assert.notEqual(menuTooltip.dataset.instant, "true", "and the tooltip keeps its entrance animation");
+  } finally {
+    menuView.close();
+  }
+
+  // Path 2: a hover shorter than 400ms is cancelled before `requestDetail` is
+  // ever posted, so `hideTooltip()` runs with the tooltip still hidden.
+  const passView = createHarness();
+  try {
+    passView.postState(state([a, b, c], 3));
+    passView.row(a).dispatchEvent(mouseEvent(passView.dom.window, "mouseenter"));
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    passView.row(a).dispatchEvent(mouseEvent(passView.dom.window, "mouseleave"));
+    await new Promise((resolve) => setTimeout(resolve, 240));
+    assert.deepEqual(
+      passView.messages.filter((message) => message.type === "requestDetail"),
+      [],
+      "the quick pass never requested detail, so no tooltip was shown"
+    );
+    passView.messages.length = 0;
+
+    passView.row(c).dispatchEvent(mouseEvent(passView.dom.window, "mouseenter"));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.deepEqual(
+      passView.messages.filter((message) => message.type === "requestDetail"),
+      [],
+      "a hover that never showed a tooltip does not make the next request immediate"
+    );
+    await new Promise((resolve) => setTimeout(resolve, 380));
+    assert.deepEqual(
+      passView.messages.filter((message) => message.type === "requestDetail").map((message) => message.hash),
+      [c],
+      "the next hover still waits the full 400ms"
+    );
+    passView.postState(detailFor(c));
+    const passTooltip = passView.dom.window.document.getElementById("tooltip")!;
+    assert.notEqual(passTooltip.dataset.instant, "true", "and keeps its entrance animation too");
+  } finally {
+    passView.close();
   }
 });
 

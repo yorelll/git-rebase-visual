@@ -52,9 +52,10 @@
   let tipHash = null;
   let tipAnchor = null;
   let tipOverTip = false;
-  // After a tooltip is dismissed, the next hover is almost certainly the user
-  // moving down the timeline. Skip the 400ms anti-misfire delay during that
-  // window so browsing rows does not pay the delay on every row.
+  // After a tooltip that was actually on screen is dismissed, the next hover is
+  // almost certainly the user moving down the timeline. Skip the 400ms
+  // anti-misfire delay during that window so browsing rows does not pay the
+  // delay on every row.
   let tipInstantUntil = 0;
   let isComposingInput = false;
 
@@ -707,7 +708,20 @@
   // the row (with a short grace so moving onto the tooltip keeps it open).
   function scheduleTooltip(c, row) { if (tipTimer) clearTimeout(tipTimer); if (tipHideTimer) clearTimeout(tipHideTimer); tipHash = c.hash; tipAnchor = row; const instant = Date.now() < tipInstantUntil; tipTimer = setTimeout(() => vscode.postMessage({ type: "requestDetail", hash: c.hash }), instant ? 0 : 400); }
   function cancelTooltip() { if (tipTimer) clearTimeout(tipTimer); if (tipHideTimer) clearTimeout(tipHideTimer); tipHideTimer = setTimeout(() => { if (!tipOverTip) hideTooltip(); }, 200); }
-  function hideTooltip() { tooltipEl.classList.add("hidden"); tipHash = null; tipAnchor = null; tipInstantUntil = Date.now() + 800; }
+  function hideTooltip() {
+    // `hideTooltip()` has three callers: leaving a shown tooltip, the 200ms
+    // grace callback after a hover that never reached 400ms, and `openMenu()`.
+    // Only the first means a tooltip was actually on screen and the user is
+    // likely walking down the list; arming from the other two made the first
+    // hover after a menu open (or a quick pass) skip the anti-misfire delay.
+    // Check the DOM state here rather than adding an `arm` flag to every call
+    // site: one condition, no chance for a caller to pass the wrong mode.
+    const wasVisible = !tooltipEl.classList.contains("hidden");
+    tooltipEl.classList.add("hidden");
+    tipHash = null;
+    tipAnchor = null;
+    if (wasVisible) tipInstantUntil = Date.now() + 800;
+  }
   function compactStat(stat) { const match = (stat || "").match(/(\d+) files? changed(?:, (\d+) insertions?\(\+\))?(?:, (\d+) deletions?\(-\))?/); return match ? `${match[1]} file${match[1] === "1" ? "" : "s"}${match[2] ? ` · +${match[2]}` : ""}${match[3] ? ` −${match[3]}` : ""}` : stat; }
   function showDetail(d) {
     if (d.hash !== tipHash || !tipAnchor) return; tooltipEl.innerHTML = "";
