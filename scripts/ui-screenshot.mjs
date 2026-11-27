@@ -346,6 +346,24 @@ const baseState = {
 // ---------------------------------------------------------------- scenarios
 
 /**
+ * C4: a real Git failure is a multi-sentence diagnostic, not a one-liner. Eight
+ * repeated sentences are ~900 UTF-16 characters of CJK, which is what pushed the
+ * commit list below the fold before `.banner` grew a height bound.
+ */
+const LONG_ERROR = Array.from({ length: 8 }, (_, i) =>
+  `第${i + 1}段：无法把提交应用到当前分支，因为冲突文件中的冲突标记仍未解决，并且工作区里的另一个文件已被外部进程改写；请逐行检查冲突，保留需要的改动，执行暂存之后重试继续，或者选择中止放弃本次变基并保留现场，确认无误后再继续下一步。`
+).join("\n");
+
+/**
+ * C4's action-bearing case: the conflict banner renders `conflictFiles` as one
+ * joined sentence, so thirty realistically long paths reproduce the same
+ * overflow while Continue / Skip / Abort remain part of the banner.
+ */
+const LONG_CONFLICT_FILES = Array.from({ length: 30 }, (_, i) =>
+  `src/modules/generated/section-${i}/internal/rate-conversion-table-${i}.ts`
+);
+
+/**
  * Each scenario drives the webview through the same entry points the host uses
  * (`postMessage`) or the same events the user generates, then the caller
  * screenshots whatever is on screen. Nothing here reaches into internal state.
@@ -353,6 +371,67 @@ const baseState = {
 const scenarios = {
   "list-idle": async (page) => {
     await page.render(baseState);
+  },
+
+  /**
+   * C4: the error path from `renderBanner()` paints `state.error` as one text
+   * node. A paused rebase is deliberately not part of this state: the defect is
+   * that the plain error banner has no height bound, so the commit list gets
+   * whatever vertical space is left.
+   */
+  "error-long": async (page) => {
+    if (LONG_ERROR.length < 850 || LONG_ERROR.length > 950) {
+      throw new Error(`error-long fixture drifted: ${LONG_ERROR.length} chars`);
+    }
+    await page.render({ ...baseState, error: LONG_ERROR });
+  },
+
+  /**
+   * C5: `pendingHashes` marks the commits a paused replay has not applied yet;
+   * the list draws the boundary row and the `*（待重放）` meta suffix from it.
+   * The stop is parked on a replayed commit so every pending row keeps the
+   * plain list background, which is the surface the opacity is measured on.
+   */
+  pending: async (page) => {
+    await page.render({
+      ...baseState,
+      // The changes section is unrelated to C5 and would push the pending rows
+      // below the fold; keep the surface compact so the screenshot shows the
+      // normal and pending rows side by side.
+      changes: [],
+      hasStaged: false,
+      hasUnstaged: false,
+      stagedCount: 0,
+      unstagedCount: 0,
+      rebaseInProgress: true,
+      conflictCount: 0,
+      pausedReason: "edit",
+      stoppedAt: commits[2].hash,
+      totalSteps: 8,
+      completedSteps: 3,
+      pendingHashes: [commits[3].hash, commits[4].hash, commits[5].hash],
+    });
+    await page.wait(150);
+  },
+
+  /**
+   * C4's second half: the banner that carries Continue / Skip / Abort can be
+   * made just as tall by a long conflict-file list. `.banner` is the same box,
+   * so the bound and the internal scroll have to keep those actions reachable,
+   * not only keep the list visible.
+   */
+  "rebase-long": async (page) => {
+    await page.render({
+      ...baseState,
+      rebaseInProgress: true,
+      conflictCount: LONG_CONFLICT_FILES.length,
+      conflictFiles: LONG_CONFLICT_FILES,
+      totalSteps: 8,
+      completedSteps: 3,
+      pausedReason: "conflict",
+      stoppedAt: commits[4].hash,
+    });
+    await page.wait(150);
   },
 
   tooltip: async (page) => {
@@ -631,6 +710,19 @@ const AUDIT_PROBE = `(() => {
     }
     return { r: 255, g: 255, b: 255, a: 1 };
   };
+  // Group opacity is applied after the subtree is painted, so a text node inside
+  // an element with opacity 0.62 is composited at 62% over the surface behind
+  // the group. The plain contrast field multiplies only the colour's own alpha
+  // and therefore over-reports such text; effectiveContrast folds in every
+  // ancestor opacity on the way up to the background.
+  const cumulativeOpacity = (el) => {
+    let alpha = 1;
+    for (let node = el; node && node.nodeType === 1; node = node.parentElement) {
+      const opacity = parseFloat(getComputedStyle(node).opacity);
+      if (!Number.isNaN(opacity)) alpha *= opacity;
+    }
+    return alpha;
+  };
   const label = (el) => {
     if (el.id) return "#" + el.id;
     const cls = (el.className || "").toString().split(/\\s+/).filter(Boolean).slice(0, 2).join(".");
@@ -648,6 +740,11 @@ const AUDIT_PROBE = `(() => {
     const fg = parse(style.color);
     if (!fg) continue;
     const bg = background(el);
+    const opacity = cumulativeOpacity(el);
+    const effectiveFg = blend({ ...fg, a: fg.a * opacity }, bg);
+    // A scroll container is asked to clip by the stylesheet; only unrequested
+    // overflow is a layout defect, matching the ellipsis exemption below.
+    const scrolls = ["auto", "scroll"].includes(style.overflowY) || ["auto", "scroll"].includes(style.overflowX);
     found.push({
       label: label(el),
       text: own.slice(0, 40),
@@ -655,6 +752,10 @@ const AUDIT_PROBE = `(() => {
       color: style.color,
       background: "rgb(" + Math.round(bg.r) + ", " + Math.round(bg.g) + ", " + Math.round(bg.b) + ")",
       contrast: Number(ratio(blend(fg, bg), bg).toFixed(2)),
+      // Foreground alpha after every ancestor opacity; 1 means no opacity group
+      // sits between this text node and the surface it is painted on.
+      effectiveOpacity: Number(opacity.toFixed(3)),
+      effectiveContrast: Number(ratio(effectiveFg, bg).toFixed(2)),
       width: Math.round(rect.width),
       height: Math.round(rect.height),
       left: Math.round(rect.left),
@@ -665,7 +766,7 @@ const AUDIT_PROBE = `(() => {
       scrollWidth: el.scrollWidth,
       // Ellipsised text is a deliberate truncation, not a layout defect; only
       // report clipping where the stylesheet did not ask for it.
-      clipped: style.textOverflow !== "ellipsis" && (el.scrollWidth > el.clientWidth + 1 || el.scrollHeight > el.clientHeight + 1),
+      clipped: !scrolls && style.textOverflow !== "ellipsis" && (el.scrollWidth > el.clientWidth + 1 || el.scrollHeight > el.clientHeight + 1),
       // A child wider than the panel is fine when an ancestor clips it (that is
       // how the branch context line ellipsises); only unclipped overflow matters.
       overflowsViewport: (rect.right > window.innerWidth + 0.5 || rect.left < -0.5) && !(() => {
@@ -812,6 +913,59 @@ const INTERACTION_PROBE = `(() => {
     menuItems: items,
     highlightedMenuItems: items.filter((item) => item.hovered || item.focusVisible || item.painted).map((item) => item.text),
     selectedRows: rows.filter((row) => row.classList.contains("selected")).length,
+  };
+})()`;
+
+/**
+ * Geometry probe for the fault-tolerance scenarios. C4 is a question about the
+ * viewport, not about colour: how tall the banner gets, where the list starts,
+ * and whether the banner's actions can still be brought on screen. The banner
+ * is scrolled to both ends during the probe and restored, so the screenshot
+ * still shows the top of a long error.
+ */
+const LAYOUT_PROBE = `(() => {
+  const rect = (el) => {
+    if (!el) return null;
+    const r = el.getBoundingClientRect();
+    return { top: Math.round(r.top), bottom: Math.round(r.bottom), left: Math.round(r.left), right: Math.round(r.right), width: Math.round(r.width), height: Math.round(r.height) };
+  };
+  const viewport = { width: window.innerWidth, height: window.innerHeight };
+  const banner = document.getElementById("banner");
+  const list = document.getElementById("list");
+  const visible = banner && !banner.classList.contains("hidden");
+  const actions = visible ? [...banner.querySelectorAll(".banner-actions .btn, .edit-actions .btn")] : [];
+  const actionState = () => actions.map((button) => {
+    const box = rect(button);
+    return {
+      text: button.textContent.trim(),
+      rect: box,
+      inViewport: !!box && box.top >= 0 && box.bottom <= viewport.height && box.left >= 0 && box.right <= viewport.width,
+    };
+  });
+  let atTop = null, atBottom = null;
+  if (visible) {
+    banner.scrollTop = 0;
+    atTop = actionState();
+    banner.scrollTop = banner.scrollHeight;
+    atBottom = actionState();
+    banner.scrollTop = 0;
+  }
+  return {
+    viewport,
+    banner: visible ? {
+      rect: rect(banner),
+      scrollHeight: banner.scrollHeight,
+      clientHeight: banner.clientHeight,
+      scrollTopMax: banner.scrollHeight - banner.clientHeight,
+      maxHeight: getComputedStyle(banner).maxHeight,
+      overflowY: getComputedStyle(banner).overflowY,
+      // The list must keep a usable slice of the viewport even with a long error.
+      listTop: list ? rect(list).top : null,
+      listVisibleHeight: list ? Math.max(0, Math.min(rect(list).bottom, viewport.height) - Math.max(rect(list).top, 0)) : null,
+    } : null,
+    actionsAtTop: atTop,
+    actionsAtBottom: atBottom,
+    documentHeight: document.documentElement.scrollHeight,
   };
 })()`;
 
@@ -1150,7 +1304,11 @@ async function renderTheme(themeName, chromePort, profile, defaults) {
       }
       await activeScenarios[name](cdp);
       await cdp.wait(80);
-      if (args.includes("--audit")) auditResults.push({ theme: themeName, scenario: name, elements: await cdp.evaluate(AUDIT_PROBE), interaction: await cdp.evaluate(INTERACTION_PROBE) });
+      // Entrance animations must be finished before anything is measured. The
+      // banner fades in over 150ms; sampling mid-fade folds a transient opacity
+      // into effectiveContrast and reports a colour the user never sees.
+      await cdp.evaluate(`Promise.all(document.getAnimations().map((animation) => animation.finished.catch(() => {}))).then(() => true)`).catch(() => {});
+      if (args.includes("--audit")) auditResults.push({ theme: themeName, scenario: name, elements: await cdp.evaluate(AUDIT_PROBE), interaction: await cdp.evaluate(INTERACTION_PROBE), layout: await cdp.evaluate(LAYOUT_PROBE) });
       if (args.includes("--debug-style") && name === "menu") {
         console.log("  menu-fit:", JSON.stringify(await cdp.evaluate(`(() => {
           const menu = document.getElementById("menu");
