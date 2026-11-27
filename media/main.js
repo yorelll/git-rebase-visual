@@ -64,6 +64,85 @@
     if (live) live.textContent = message;
   }
 
+  // ------------------------------------------------------------ focus identity
+  // A 1.5s status poll can resend the same state, and a real one rebuilds
+  // `#banner`, `#changes` and `#list` with `innerHTML = ""`. Replacing the
+  // focused element drops keyboard focus to <body>: the next Alt+↓ goes
+  // nowhere, Ctrl+Space loses the row, and a banner action stops working after
+  // one refresh. Capture a *stable identity* before the teardown and re-find
+  // the equivalent element afterwards. A node reference is deliberately not
+  // used — it points at the removed element. `document.hasFocus()` is the
+  // guard: a background webview must never steal focus back from the editor.
+  function focusIdentityFor(el) {
+    if (!el || el === document.body || el === document.documentElement) return null;
+    // The search box owns its own selection restore (captureSearchFocus); do
+    // not compete with it here.
+    if (el.classList?.contains("commit-search")) return null;
+    if (el === bannerEl) return { kind: "banner" };
+    const commit = el.closest?.(".commit");
+    if (commit?.dataset.hash) return { kind: "commit", hash: commit.dataset.hash };
+    const changeRow = el.closest?.(".change-file");
+    if (changeRow) {
+      const identity = { path: changeRow.dataset.path, group: changeRow.dataset.group };
+      if (el === changeRow) return { kind: "change-row", ...identity };
+      if (el.dataset?.action) return { kind: "change-action", ...identity, action: el.dataset.action };
+      return { kind: "change-row", ...identity };
+    }
+    if (el.closest?.("#banner") && el.dataset?.action) return { kind: "banner-action", action: el.dataset.action };
+    if (el.dataset?.action) return { kind: "action", action: el.dataset.action };
+    return null;
+  }
+  function captureFocusIdentity() {
+    // `hasFocus` reports whether the webview itself is the focused document.
+    // When it is false (the user is typing in the editor next door) a poll must
+    // not pull focus into the sidebar.
+    if (typeof document.hasFocus === "function" && !document.hasFocus()) return null;
+    return focusIdentityFor(document.activeElement);
+  }
+  function findByData(el, key, value) {
+    return [...el.querySelectorAll("[data-" + key + "]")].find((candidate) => candidate.dataset[key] === value) || null;
+  }
+  function focusTargetFor(identity) {
+    if (identity.kind === "commit") return [...listEl.querySelectorAll(".commit")].find((row) => row.dataset.hash === identity.hash) || null;
+    if (identity.kind === "banner") return bannerEl.hasAttribute("tabindex") ? bannerEl : null;
+    if (identity.kind === "banner-action") return findByData(bannerEl, "action", identity.action);
+    if (identity.kind === "change-row" || identity.kind === "change-action") {
+      const row = [...changesEl.querySelectorAll(".change-file")]
+        .find((candidate) => candidate.dataset.path === identity.path && candidate.dataset.group === identity.group);
+      if (!row) return null;
+      if (identity.kind === "change-row") return row;
+      return findByData(row, "action", identity.action);
+    }
+    if (identity.kind === "action") {
+      const found = findByData(document, "action", identity.action);
+      if (found) return found;
+      // A group-level change action (stage/discard all) has no row scope.
+      return null;
+    }
+    return null;
+  }
+  function restoreFocusIdentity(identity) {
+    if (!identity) return;
+    const target = focusTargetFor(identity);
+    if (target) {
+      // `preventScroll` keeps a restored row where the user left it; the browser
+      // already scrolled it into view when it first received focus.
+      target.focus?.({ preventScroll: true });
+      return;
+    }
+    // The target no longer exists (the row was deleted or filtered out). Land
+    // on the list's own search control when one is rendered; otherwise leave
+    // focus wherever the rebuild put it (body) rather than throwing.
+    const fallback = listEl.querySelector(".commit-search");
+    fallback?.focus?.({ preventScroll: true });
+  }
+  // utf-8 JSON of the host state. Used to prove that an identical poll is a
+  // no-op: rebuilding the same DOM is both wasted work and a live-region churn.
+  function stateSignature(value) {
+    try { return JSON.stringify(value); } catch { return null; }
+  }
+  let lastStateSignature = null;
+
   function short(hash) { return (hash || "").slice(0, 8); }
   function setDragHint(message) { dragHint = message; renderDirection(); }
   function clearDragHint() { dragHint = ""; renderDirection(); }
@@ -97,7 +176,10 @@
     // back on only for the duration of a drag, where target changes must speak.
     const live = dragHint ? "polite" : "off";
     if (directionEl.getAttribute("aria-live") !== live) directionEl.setAttribute("aria-live", live);
-    directionEl.textContent = directionHint();
+    // Writing the same text still replaces the text node and mutates the live
+    // region; only write when the copy actually changed.
+    const next = directionHint();
+    if (directionEl.textContent !== next) directionEl.textContent = next;
     directionEl.classList.remove("hidden");
   }
 
@@ -117,7 +199,12 @@
   }
   function render() {
     captureSearchFocus();
+    // Banner changes and the list rebuild both destroy focus. Capture once here
+    // so a focus target in an earlier region survives every later region; the
+    // per-region rebuilds also restore on their own for direct calls.
+    const focus = captureFocusIdentity();
     renderBanner(); renderContext(); renderChanges(); renderList(); restoreSearchFocus();
+    restoreFocusIdentity(focus);
   }
   function renderContext() {
     if (!state.branchName) { contextEl.classList.add("hidden"); return; }
@@ -129,7 +216,8 @@
     const counters = state.upstreamNote
       ? `↑? ↓? · ${state.upstreamNote}`
       : `↑${state.aheadCount || 0} ↓${state.behindCount || 0}`;
-    contextTextEl.textContent = `${state.branchName} · ${state.upstreamRef} · ${counters} · ${state.rangeLabel || ""}`;
+    const next = `${state.branchName} · ${state.upstreamRef} · ${counters} · ${state.rangeLabel || ""}`;
+    if (contextTextEl.textContent !== next) contextTextEl.textContent = next;
     contextEl.classList.remove("hidden");
   }
   function showInlineToast(message, duration) {
@@ -143,11 +231,70 @@
     const b = document.createElement("button");
     b.type = "button"; b.className = "btn" + (options.primary ? " primary" : "") + (options.danger ? " danger-btn" : "");
     b.textContent = label; b.disabled = !!options.disabled; b.title = options.title || "";
+    // Stable identity for focus restoration across a refresh; the label is
+    // localized copy, the action is a fixed key.
+    if (options.action) b.dataset.action = options.action;
     if (!b.disabled) b.onclick = onClick;
     return b;
   }
 
+  // Everything the banner paints, as one comparable string. `renderBanner` is
+  // the first region every state message touches and `#banner` is
+  // `role="status" aria-live="polite"`, so rebuilding identical content both
+  // wastes a frame and makes a screen reader announce the same error every
+  // 1.5s. Only a changed key may touch `innerHTML`/`textContent`.
+  function bannerRenderKey() {
+    if (!state.rebaseInProgress) {
+      if (state.error) return `error\u0000${state.error}`;
+      if (state.recoveryNotice) return `recovery\u0000${state.recoveryNotice}`;
+      return "hidden";
+    }
+    const stopped = (state.commits ?? []).find((c) => c.hash === state.stoppedAt);
+    const isConflict = state.conflictCount > 0;
+    const isEditStop = state.pausedReason === "edit" && !!stopped;
+    return JSON.stringify([
+      "rebase",
+      isConflict,
+      isConflict ? state.conflictCount : null,
+      isConflict ? state.conflictFiles ?? [] : null,
+      isEditStop ? stopped.hash : null,
+      isEditStop ? stopped.subject : null,
+      state.totalSteps ?? null,
+      state.completedSteps || 0,
+      isEditStop ? state.stagedCount || 0 : null,
+      isEditStop ? state.unstagedCount || 0 : null,
+      isEditStop ? !!state.hasStaged : null,
+    ]);
+  }
+  let lastBannerKey = null;
+  // The banner is a scroll container, not a natural tab stop. Give it
+  // `tabindex="0"` only while it actually overflows (`scrollHeight >
+  // clientHeight`), so PageDown can scroll the diagnostic text; remove it
+  // again when the content fits, otherwise every banner steals a Tab press.
+  // Re-evaluated after each rebuild and on resize.
+  function updateBannerFocusability() {
+    if (bannerEl.classList.contains("hidden")) {
+      if (bannerEl.hasAttribute("tabindex")) bannerEl.removeAttribute("tabindex");
+      return;
+    }
+    const scrollable = bannerEl.scrollHeight > bannerEl.clientHeight;
+    if (scrollable) {
+      if (bannerEl.getAttribute("tabindex") !== "0") bannerEl.setAttribute("tabindex", "0");
+    } else if (bannerEl.hasAttribute("tabindex")) {
+      bannerEl.removeAttribute("tabindex");
+    }
+  }
+
   function renderBanner() {
+    const key = bannerRenderKey();
+    if (key === lastBannerKey) {
+      // Same content: leave the live region and its buttons untouched. Focus
+      // inside it therefore survives the poll without any restoration work.
+      updateBannerFocusability();
+      return;
+    }
+    lastBannerKey = key;
+    const focus = captureFocusIdentity();
     bannerEl.innerHTML = "";
     if (!state.rebaseInProgress) {
       if (state.error) { bannerEl.className = "banner error"; bannerEl.textContent = state.error; bannerEl.classList.remove("hidden"); }
@@ -159,13 +306,15 @@
         const textEl = document.createElement("div"); textEl.textContent = state.recoveryNotice;
         const actions = document.createElement("div"); actions.className = "banner-actions";
         actions.append(
-          button("打开日志", () => vscode.postMessage({ type: "openLogs" })),
-          button("关闭提示", () => vscode.postMessage({ type: "dismissRecoveryNotice" }))
+          button("打开日志", () => vscode.postMessage({ type: "openLogs" }), { action: "open-logs" }),
+          button("关闭提示", () => vscode.postMessage({ type: "dismissRecoveryNotice" }), { action: "dismiss-recovery" })
         );
         bannerEl.append(titleEl, textEl, actions);
         bannerEl.classList.remove("hidden");
       }
       else bannerEl.classList.add("hidden");
+      updateBannerFocusability();
+      restoreFocusIdentity(focus);
       return;
     }
     // `state.commits ?? []` for the same reason as in `renderList`: the
@@ -195,17 +344,19 @@
       editActions.appendChild(counts);
       const amendLabel = `追加到 ${short(stopped.hash)} (amend)…`;
       editActions.append(
-        button(amendLabel, () => vscode.postMessage({ type: "openCompose", mode: "commit", hash: stopped.hash, ai: false, thenEdit: true, editKind: "amend" }), { primary: true, disabled: !state.hasStaged, title: state.hasStaged ? "编辑 message 后 amend 当前 edit commit" : "请先在 SCM 中暂存改动。" }),
-        button("新建 commit…", () => vscode.postMessage({ type: "openCompose", mode: "staged", ai: false, thenEdit: false, editKind: "new" }), { disabled: !state.hasStaged, title: state.hasStaged ? "创建新 commit；变基暂停时不调用 AI。" : "请先在 SCM 中暂存改动。" })
+        button(amendLabel, () => vscode.postMessage({ type: "openCompose", mode: "commit", hash: stopped.hash, ai: false, thenEdit: true, editKind: "amend" }), { primary: true, disabled: !state.hasStaged, action: "amend-commit", title: state.hasStaged ? "编辑 message 后 amend 当前 edit commit" : "请先在 SCM 中暂存改动。" }),
+        button("新建 commit…", () => vscode.postMessage({ type: "openCompose", mode: "staged", ai: false, thenEdit: false, editKind: "new" }), { disabled: !state.hasStaged, action: "new-commit", title: state.hasStaged ? "创建新 commit；变基暂停时不调用 AI。" : "请先在 SCM 中暂存改动。" })
       );
       bannerEl.appendChild(editActions);
     }
     const actions = document.createElement("div"); actions.className = "banner-actions";
-    actions.appendChild(button("Continue", () => vscode.postMessage({ type: "continueRebase" }), { primary: true, disabled: isConflict, title: isConflict ? `还有 ${state.conflictCount} 个文件未解决；解决并暂存后才能 Continue。` : "" }));
-    if (isConflict) actions.appendChild(button("Skip（丢弃 patch）", () => vscode.postMessage({ type: "skipRebase" }), { danger: true }));
-    actions.appendChild(button("Abort", () => vscode.postMessage({ type: "abortRebase" }), { danger: true }));
+    actions.appendChild(button("Continue", () => vscode.postMessage({ type: "continueRebase" }), { primary: true, disabled: isConflict, action: "continue-rebase", title: isConflict ? `还有 ${state.conflictCount} 个文件未解决；解决并暂存后才能 Continue。` : "" }));
+    if (isConflict) actions.appendChild(button("Skip（丢弃 patch）", () => vscode.postMessage({ type: "skipRebase" }), { danger: true, action: "skip-rebase" }));
+    actions.appendChild(button("Abort", () => vscode.postMessage({ type: "abortRebase" }), { danger: true, action: "abort-rebase" }));
     bannerEl.appendChild(actions);
     bannerEl.classList.remove("hidden");
+    updateBannerFocusability();
+    restoreFocusIdentity(focus);
   }
 
   function changeState(kind) {
@@ -220,6 +371,8 @@
     const action = document.createElement("button");
     action.type = "button"; action.className = "btn file-action"; action.textContent = icon;
     action.title = title; action.setAttribute("aria-label", title);
+    // Stable focus key; the visible glyph and localized label may change.
+    action.dataset.action = title;
     action.addEventListener("pointerdown", (event) => event.stopPropagation());
     action.addEventListener("click", (event) => { event.stopPropagation(); onClick(); });
     return action;
@@ -246,10 +399,13 @@
       header.appendChild(groupActions); parent.appendChild(header);
       items.forEach((change) => {
         const row = document.createElement("div"); row.className = "change-file"; row.tabIndex = 0;
+        // The same path can appear once per group (staged and unstaged), so the
+        // focus key is path + group, never the path alone.
+        row.dataset.path = change.path; row.dataset.group = side;
         const kind = side === "staged" ? change.indexKind : change.worktreeKind;
         const visual = changeState(kind);
         const status = document.createElement("span"); status.className = `file-state file-state-${kind || "modify"}`; status.textContent = visual.mark; status.title = visual.label; status.setAttribute("aria-label", visual.label);
-        const target = document.createElement("button"); target.type = "button"; target.className = "file-open"; target.title = change.path; target.setAttribute("aria-label", `打开 Diff：${change.path}`);
+        const target = document.createElement("button"); target.type = "button"; target.className = "file-open"; target.title = change.path; target.setAttribute("aria-label", `打开 Diff：${change.path}`); target.dataset.action = "open-diff";
         const pieces = fileNameAndPath(change.path); const name = document.createElement("span"); name.className = "file-name"; name.textContent = pieces.name; const parentPath = document.createElement("span"); parentPath.className = "file-path"; parentPath.textContent = pieces.parent; target.append(name, parentPath); target.onclick = () => vscode.postMessage({ type: "openWorktreeDiff", path: change.path });
         const actions = document.createElement("span"); actions.className = "file-actions";
         if (side === "unstaged" && !change.conflicted) actions.append(changeAction("+", "暂存此文件", () => vscode.postMessage({ type: "stageFile", path: change.path })));
@@ -278,7 +434,27 @@
     const untracked = restoreSide === "working" && change.worktreeKind === "untracked";
     vscode.postMessage({ type: "restoreFile", path: change.path, side: restoreSide, deleteUntracked: untracked });
   }
+  // Everything `renderChanges()` paints. A poll can carry an unrelated field
+  // change (undo bookkeeping, presentation counts) while this region is
+  // identical; rebuilding it would churn focus and mutations for nothing.
+  function changesRenderKey() {
+    if (!state.hasStaged && !state.hasUnstaged) return "hidden";
+    return JSON.stringify([
+      !!state.hasStaged, !!state.hasUnstaged,
+      state.stagedCount || 0, state.unstagedCount || 0,
+      !!state.llmConfigured, !!state.rebaseInProgress, state.pausedReason ?? null,
+      // `changesMoreOpen` is not part of the key: it is persisted UI state that
+      // the `<details>` element already reflects natively. Including it makes
+      // the programmatic `open` write fire a toggle event that changes the key
+      // and forces a redundant rebuild on the next poll.
+      (state.changes || []).map((change) => [change.path, change.indexKind ?? null, change.worktreeKind ?? null, !!change.staged, !!change.unstaged, !!change.conflicted]),
+    ]);
+  }
+  let lastChangesKey = null;
   function renderChanges() {
+    const key = changesRenderKey();
+    if (key === lastChangesKey) return;
+    lastChangesKey = key;
     changesEl.innerHTML = "";
     if (!state.hasStaged && !state.hasUnstaged) { changesEl.classList.add("hidden"); return; }
     changesEl.classList.remove("hidden");
@@ -288,11 +464,11 @@
     const atEditStop = state.rebaseInProgress && state.pausedReason === "edit";
     if (!atEditStop && !state.llmConfigured) {
       const hint = document.createElement("div"); hint.className = "changes-hint"; hint.textContent = "配置 LLM 后可生成 AI commit message。";
-      changesEl.append(hint, button("打开 LLM 设置", () => vscode.postMessage({ type: "openLlmSettings" })));
+      changesEl.append(hint, button("打开 LLM 设置", () => vscode.postMessage({ type: "openLlmSettings" }), { action: "open-llm-settings" }));
     }
     const more = document.createElement("details"); more.className = "changes-more"; more.open = changesMoreOpen || atEditStop;
     more.addEventListener("toggle", () => { changesMoreOpen = more.open; persistUi(); });
-    const summary = document.createElement("summary"); summary.textContent = atEditStop ? "本次 edit stop 的文件" : "更多提交选项"; more.appendChild(summary);
+    const summary = document.createElement("summary"); summary.textContent = atEditStop ? "本次 edit stop 的文件" : "更多提交选项"; summary.dataset.action = "changes-more"; more.appendChild(summary);
     appendChangeFiles(more, state.changes || []);
     changesEl.appendChild(more);
   }
@@ -370,7 +546,41 @@
     return `已锁定 ${commits.length} 个 commit，不会被推送${pending}；${[...authors].map(([name, count]) => `${name} ${count} 个`).join("，")}`;
   }
 
+  // Everything `renderList()` paints, including the local selection/filter/
+  // keyboard-pickup state that does not live in the host message. Same key =>
+  // no rebuild, so an unrelated poll field cannot drop focus or churn rows.
+  function listRenderKey() {
+    return JSON.stringify([
+      stateLoaded,
+      !!state.rebaseInProgress,
+      state.pausedReason ?? null,
+      state.stoppedAt ?? null,
+      state.activeHash ?? null,
+      !!state.collapseLockedRuns,
+      filterText,
+      [...selectedHashes].sort(),
+      keyboardPickup ? keyboardPickup.sourceHash : null,
+      // `expandedLockedRuns` is DOM-owned like `changesMoreOpen`: a toggle
+      // already changed the visible `<details>`, and a later rebuild reads the
+      // current set. Keeping it here would force a second rebuild after every
+      // programmatic open/close.
+      (state.commits ?? []).map((c) => [
+        c.hash, c.shortHash, c.subject, c.author, c.authorEmail,
+        c.authorInitial ?? null, c.authorColorKey ?? null, c.isCurrentAuthor ?? null,
+        c.date, !!c.locked,
+      ]),
+      state.pendingHashes ?? [],
+    ]);
+  }
+  let lastListKey = null;
   function renderList() {
+    const key = listRenderKey();
+    if (key === lastListKey) return;
+    lastListKey = key;
+    // `listEl.innerHTML = ""` removes the focused row on every selection,
+    // filter edit and Alt+↓ move. Capture first, re-find the row by data-hash at
+    // the end; otherwise the second Alt+↓ of a pair lands on <body>.
+    const focus = captureFocusIdentity();
     // Every path that can change whether reordering is available funnels through
     // here: a state message calls render() → renderList(), while filter edits,
     // row selection and the clear-search button call renderList() directly. A
@@ -387,7 +597,7 @@
     const commits = state.commits ?? [];
     const known = new Set(commits.map((c) => c.hash));
     selectedHashes = new Set([...selectedHashes].filter((h) => known.has(h)));
-    if (!commits.length) { const empty = document.createElement("div"); empty.className = "empty"; empty.textContent = "没有可显示的 commit。"; listEl.appendChild(empty); return; }
+    if (!commits.length) { const empty = document.createElement("div"); empty.className = "empty"; empty.textContent = "没有可显示的 commit。"; listEl.appendChild(empty); restoreFocusIdentity(focus); return; }
     const visible = filteredCommits();
     listEl.setAttribute("role", "listbox");
     listEl.setAttribute("aria-label", `Commit 时间轴，共 ${commits.length} 个 commit，显示 ${visible.length} 个，顶部较早，底部较新`);
@@ -416,7 +626,7 @@
     });
     controls.appendChild(search);
     const count = document.createElement("span"); count.className = "selection-count"; count.textContent = `${visible.length} / ${state.commits.length}`; controls.appendChild(count);
-    if (filterText) controls.appendChild(button("清除", () => { filterText = ""; persistUi(); renderList(); listEl.querySelector(".commit-search")?.focus(); }));
+    if (filterText) controls.appendChild(button("清除", () => { filterText = ""; persistUi(); renderList(); listEl.querySelector(".commit-search")?.focus(); }, { action: "clear-filter" }));
     listEl.appendChild(controls);
     const top = document.createElement("div"); top.className = "timeline-end"; top.textContent = "↑ Base / 较早"; listEl.appendChild(top);
     let pendingMarkerShown = false;
@@ -438,6 +648,7 @@
     }
     if (!visible.length) { const empty = document.createElement("div"); empty.className = "empty"; empty.textContent = "无匹配 · 清空搜索以显示全部 commit。"; listEl.appendChild(empty); }
     const bottom = document.createElement("div"); bottom.className = "timeline-end"; bottom.textContent = "↓ HEAD / 较新"; listEl.appendChild(bottom);
+    restoreFocusIdentity(focus);
   }
 
   function lockedRunRow(commits) {
@@ -598,6 +809,7 @@
   function applyDeferredState() {
     if (!deferredState) return;
     state = deferredState;
+    lastStateSignature = stateSignature(state);
     deferredState = null;
     render();
   }
@@ -701,7 +913,7 @@
   document.addEventListener("click", (event) => { if (!menuEl.contains(event.target)) closeMenu(); clearSelection(event); }); document.addEventListener("contextmenu", (event) => { if (!event.target.closest(".commit")) { closeMenu(); clearSelection(event); } });
   // Scroll can only close the DOM menu. It deliberately neither calls
   // postMessage nor persistUi; __grvUiTrace exposes that invariant to tests.
-  document.addEventListener("scroll", () => { menuScrollCloseCount++; closeMenu(); }, true); window.addEventListener("resize", closeMenu);
+  document.addEventListener("scroll", () => { menuScrollCloseCount++; closeMenu(); }, true); window.addEventListener("resize", () => { closeMenu(); updateBannerFocusability(); });
 
   // Commit detail belongs to the sidebar: a hover opens a floating tooltip over
   // the adjacent timeline area. It is dismissed as soon as the pointer leaves
@@ -764,11 +976,18 @@
       // A refresh must not destroy a native or pointer drag session. It is
       // applied after the shared session ends, preserving its revision guard.
       if (drag) { deferredState = m; return; }
+      // The 1.5s status poll usually resends the same state. Rebuilding the
+      // same DOM would churn the aria-live regions for no reason; skip the
+      // whole render when nothing the webview consumes has changed.
+      const signature = stateSignature(m);
+      if (signature !== null && signature === lastStateSignature) return;
+      lastStateSignature = signature;
       state = m; render();
     } else if (m.type === "recoveryNotice") {
       // Dismissal applied without a full refresh, so a drag session in progress
       // is never disturbed by hiding the banner.
       state = { ...state, recoveryNotice: m.recoveryNotice };
+      lastStateSignature = stateSignature(state);
       renderBanner();
     } else if (m.type === "detail") showDetail(m);
     else if (m.type === "inlineToast") showInlineToast(m.message, m.duration);

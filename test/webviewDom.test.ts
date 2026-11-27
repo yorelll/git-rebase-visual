@@ -1003,6 +1003,121 @@ test("opening a menu or leaving before the tooltip shows does not arm the instan
   }
 });
 
+test("a status refresh keeps keyboard focus on the same commit row", () => {
+  const view = createHarness();
+  try {
+    view.postState(state([a, b, c], 7));
+    const first = view.row(b);
+    first.focus();
+    assert.equal(view.dom.window.document.activeElement, first, "the row really has focus before the poll");
+
+    // The 1.5s poll resends the same state. It must be a no-op: rebuilding the
+    // same DOM would drop focus to <body>.
+    view.postState(state([a, b, c], 7));
+    assert.equal(view.row(b), first, "an identical state does not rebuild the row");
+    assert.equal(view.dom.window.document.activeElement, first, "focus survives a same-state poll");
+
+    // A genuine commit-list change still rebuilds the rows, so the restoration
+    // path has to find the row by data-hash rather than hold the removed node.
+    view.postState(state([a, b, c, "d".repeat(40)], 8));
+    const rebuilt = view.row(b);
+    assert.notEqual(rebuilt, first, "the changed state really replaced the row node");
+    assert.equal(view.dom.window.document.activeElement, rebuilt, "focus is restored to the rebuilt row");
+    assert.equal((view.dom.window.document.activeElement as HTMLElement).dataset.hash, b);
+  } finally {
+    view.close();
+  }
+});
+
+test("resending the same state does not mutate the banner or its live region", async () => {
+  const view = createHarness();
+  try {
+    const banner = view.dom.window.document.getElementById("banner")!;
+    const withError = { ...state([a, b, c], 7), error: "fatal: ... is corrupt" };
+    view.postState(withError);
+    const text = banner.textContent;
+    const records: MutationRecord[] = [];
+    const observer = new view.dom.window.MutationObserver((list) => records.push(...list));
+    observer.observe(banner, { childList: true, subtree: true, characterData: true });
+    view.postState({ ...withError });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    observer.disconnect();
+    assert.deepEqual(records, [], `an identical state wrote the live region: ${records.length} mutations`);
+    assert.equal(banner.textContent, text, "the error text is byte-for-byte unchanged");
+
+    // The guard must not swallow a real change: new error text repaints.
+    view.postState({ ...withError, error: "fatal: a different failure" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.match(banner.textContent ?? "", /a different failure/, "a changed error still repaints the banner");
+  } finally {
+    view.close();
+  }
+});
+
+test("a refresh whose focused commit row disappeared moves focus to the list instead of throwing", () => {
+  const view = createHarness();
+  try {
+    const errors: unknown[] = [];
+    view.dom.window.addEventListener("error", (event) => errors.push((event as ErrorEvent).error ?? event));
+    view.postState(state([a, b, c], 7));
+    const row = view.row(b);
+    row.focus();
+    assert.equal(view.dom.window.document.activeElement, row);
+
+    // b is gone after the refresh; the identity cannot be re-found.
+    view.postState(state([a, c], 8));
+    const active = view.dom.window.document.activeElement as HTMLElement;
+    assert.equal(active.className.includes("commit-search"), true, "focus lands on the list's search control");
+    assert.deepEqual(errors, [], "losing the focused row does not throw");
+  } finally {
+    view.close();
+  }
+});
+
+test("a background webview does not pull focus back on a refresh", () => {
+  const view = createHarness();
+  try {
+    view.postState(state([a, b, c], 7));
+    view.row(b).focus();
+    // The user moved to the editor: the webview document is no longer focused,
+    // even though its last activeElement still points at the row.
+    Object.defineProperty(view.dom.window.document, "hasFocus", { configurable: true, value: () => false });
+    view.postState(state([a, b, c, "d".repeat(40)], 8));
+    assert.equal(view.dom.window.document.activeElement, view.dom.window.document.body, "focus is not stolen back from the editor");
+  } finally {
+    view.close();
+  }
+});
+
+test("the error banner is a tab stop only while it actually overflows", () => {
+  const view = createHarness();
+  try {
+    const doc = view.dom.window.document;
+    const banner = doc.getElementById("banner")!;
+    // jsdom has no layout, so the scroll geometry the CSS would produce at a
+    // real viewport is supplied explicitly. `updateBannerFocusability` reads
+    // exactly these two numbers.
+    let scrollHeight = 400;
+    Object.defineProperty(banner, "scrollHeight", { configurable: true, get: () => scrollHeight });
+    Object.defineProperty(banner, "clientHeight", { configurable: true, get: () => 200 });
+
+    view.postState({ ...state([a], 7), error: "fatal: " + "long ".repeat(200) });
+    assert.equal(banner.getAttribute("tabindex"), "0", "an overflowing banner is keyboard reachable");
+    banner.focus();
+    assert.equal(doc.activeElement, banner, "the banner can hold focus");
+    // A still-overflowing banner must keep focus across a content change.
+    view.postState({ ...state([a], 8), error: "fatal: " + "long ".repeat(200) + "again" });
+    assert.equal(doc.activeElement, banner, "focus survives a banner rebuild while it still scrolls");
+
+    // Once the content fits, the banner must leave the tab order.
+    scrollHeight = 120;
+    view.postState({ ...state([a], 9), error: "fatal: a short failure" });
+    assert.equal(banner.hasAttribute("tabindex"), false, "a fitting banner is not a tab stop");
+  } finally {
+    view.close();
+  }
+});
+
 test("the tooltip pops in from the row-facing edge and flips its origin when placed above", () => {
   const view = createHarness();
   try {

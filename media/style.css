@@ -492,6 +492,7 @@ button, .grip, .dot, .lock-icon, .stopped-badge {
 
 .commit:focus-visible,
 .menu .item:focus-visible,
+.banner:focus-visible,
 .btn:focus-visible {
   outline: 1px solid var(--vscode-focusBorder);
   outline-offset: -1px;
