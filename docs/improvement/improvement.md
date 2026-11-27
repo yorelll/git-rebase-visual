@@ -428,6 +428,8 @@
   * **菜单 emoji 图标被裁**：`.menu .menu-icon` 宽 14px，`🔒`/`⌫` 的 `scrollWidth` 是 17px。
   * 临界项（4.36:1 / 4.48:1）不单独立项，随上述改动一并复核。
 
+* **\[ ] P1 —— 编辑 / AI message 面板把多行 message 压成一行（视觉评审 V9，既有缺陷，未修）。** `composePanel.ts` 的 `set()` 里 `.split('\\n')` 在模板字符串中被二次转义，页面实际执行的是"按字面量反斜杠+n 拆分"，永远不匹配真实换行。后果：打开带正文的 commit，**整段 message 落进 Subject、Body 为空**（输入框吞掉换行导致标题与正文粘连，截图见 `visual-audit-0-8-6.md` §5.1），点「应用」会把多行 message 压成一行写回，超过 `maxlength=200` 还会截断。**为什么没被测到**：`test/composeDraft.test.ts` 只镜像了 `text()`（拼接方向），拆分方向无覆盖。**修法**：修正转义层级并补"多行 original → subject/body"用例，同时覆盖 `\r\n`。
+
 ## 验收原则
 所有后续历史改写功能应满足：
 

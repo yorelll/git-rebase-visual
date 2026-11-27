@@ -50,6 +50,8 @@
 | V7 | 过滤框两个清除入口 | — | `input[type=search]` 自带 Chromium 的 `::-webkit-search-cancel-button`，页面又渲染了一个「清除」按钮 | 隐藏原生按钮：`input[type=search]::-webkit-search-cancel-button { display: none; }` |
 | V8 | 菜单图标被裁 | `menu-icon` 14×17，`scrollWidth 17` | `.menu .menu-icon { width: 14px }` 装不下 `🔒`/`⌫` 这类 emoji | 宽度改 `1.2em` 或 `font-size` 与宽度解耦 |
 
+| V9 | 编辑 / AI message 面板的 Subject 拆分 | **功能性缺陷（非对比度）** | `composePanel.ts` 的 `set()` 用 `split('\\n')`——JS 里这是"反斜杠 + n"两个字符，不是换行符，所以多行 message 永远不会被拆开 | 见 §5.1 |
+
 **已知项**：`Skip（丢弃 patch）`/`Abort` 的 danger 按钮 2.66:1（light）/ 3.88:1（dark），已在
 `docs/improvement/improvement.md` 记录，本报告不重复立项。
 
@@ -87,6 +89,24 @@
 | tooltip | 层级、origin 正确；**V2 徽标对比度** |
 | 冲突横幅 | 信息完整、Continue 在冲突时禁用、Skip/Abort 危险色可见 |
 | 空 / 过滤态 | 文案正确，无残留控件 |
+
+## 5.1 编辑 / AI message 面板（`--surface compose`）
+
+该面板是**独立的 editor webview**，自带内联样式，不加载 `media/style.css`。harness 用 `--surface compose` 渲染它（同样从 `composePanel.ts` 切出标记与脚本，桩替换 `acquireVsCodeApi`），7 个场景：
+`compose-edit`、`compose-ai`、`compose-dirty`、`compose-generating`、`compose-streamed`、`compose-error`、`compose-stale`。
+
+**发现 V9（功能性，最高优先级）**：打开一个带正文的 commit 后，**整段 message 落在 Subject 输入框里，Body 为空**。
+
+根因链：
+
+1. `rebaseViewProvider.ts:2584` 传入 `original: body`，这是多行字符串。
+2. 面板 `set()` 执行 `.split('\\n')`。该代码在 `composePanel.ts` 的模板字符串里被二次转义，最终页面执行的是 `split('\\n')`——匹配的是**字面量反斜杠 + n**，不是换行符，因此永远返回单元素数组。
+3. 结果：`subject = 整段 message`，`body = ''`；`<input>` 会吞掉换行，正文与标题被**直接粘连**（截图里是 `…pointer contractOlder body…`）。
+4. 点「应用」时 `text()` 用 `subject + '\n\n' + body` 重新拼接，于是**把多行 message 压成一行写回 commit**；若超过 `maxlength=200` 还会被截断。
+
+**为什么测试没拦住**：`test/composeDraft.test.ts` 的 `compose()` 只镜像了 `text()`（拼接方向），**拆分方向没有对应用例**。
+
+修复方向（未实施）：`split('\n')` 应为真正的换行转义（模板里少一层转义），并补一条"多行 original → subject/body 正确拆分"的用例；同时确认 `\r\n` 的处理。
 
 ## 6. 局限
 

@@ -41,6 +41,9 @@ const flag = (name, fallback) => {
 const outDir = path.resolve(flag("out", "D:/tmp/grv-ui-shots"));
 const themes = flag("theme", "dark_modern,light_modern,hc_black,hc_light").split(",");
 const only = flag("only", "").split(",").filter(Boolean);
+// The sidebar view and the compose panel are different webviews with different
+// markup, viewport and scenarios; `--surface compose` renders the second one.
+const surface = flag("surface", "sidebar");
 // VS Code's default sidebar is 300px; 340 leaves room for a wider panel.
 const viewportWidth = Number(flag("width", "340"));
 
@@ -89,6 +92,30 @@ function readWebviewBody() {
     if (!body.includes(`id="${id}"`)) throw new Error(`webview template lost #${id}; the screenshot harness would render a different UI`);
   }
   return body;
+}
+
+/**
+ * The compose / AI-message panel lives in a single template literal inside
+ * `composePanel.ts`, which is why it can be rendered the same way: its markup,
+ * its inline styles and its own controller script are all literal. Only the
+ * nonce attribute is interpolated, and that is stripped before serving.
+ */
+function readComposeDocument() {
+  const source = fs.readFileSync(path.join(root, "src/ui/composePanel.ts"), "utf8");
+  const start = source.indexOf("<!doctype html>");
+  const end = source.indexOf("</html>", start);
+  if (start < 0 || end < 0) throw new Error("compose panel template not found");
+  const template = source.slice(start, end + "</html>".length);
+  const style = /<style>([\s\S]*?)<\/style>/.exec(template);
+  const body = /<body>([\s\S]*?)<\/body>/.exec(template);
+  if (!style || !body) throw new Error("compose panel template lost its style or body");
+  // Keep the panel's own controller script: it is what turns host messages into
+  // the states under review. Only the nonce attribute is dropped.
+  const inner = body[1].replace(/<script[^>]*>([\s\S]*?)<\/script>/, (_, script) => `<script>${script}</script>`);
+  for (const id of ["subject", "body", "extra", "generate", "apply", "close"]) {
+    if (!inner.includes(`id="${id}"`)) throw new Error(`compose panel lost #${id}`);
+  }
+  return { style: style[1], body: inner };
 }
 
 // ---------------------------------------------------------------- themes
@@ -219,8 +246,8 @@ function themeVariables(name, defaults) {
 }
 
 /** A token the stylesheet uses but neither the theme nor the registry defined. */
-function unresolvedTokens(vars) {
-  const css = fs.readFileSync(path.join(root, "media/style.css"), "utf8");
+function unresolvedTokens(vars, extraCss) {
+  const css = extraCss ?? fs.readFileSync(path.join(root, "media/style.css"), "utf8");
   const used = new Set([...css.matchAll(/var\((--vscode-[\w-]+)/g)].map((m) => m[1]));
   return [...used].filter((token) => !(token in vars)).sort();
 }
@@ -374,6 +401,75 @@ const scenarios = {
     await page.render(baseState);
     await page.typeSearch("cif");
     await page.wait(150);
+  },
+};
+
+/**
+ * The compose / AI-message panel is driven entirely by host messages, so each
+ * scenario is one `openCompose` plus the follow-up the host would send.
+ */
+const composeTarget = {
+  type: "openCompose",
+  mode: "commit",
+  hash: "e90c55a1bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  subject: "docs: explain the rebase pointer contract",
+  original: "docs: explain the rebase pointer contract\n\nOlder body kept here so the reader can compare.",
+  trailers: "Change-Id: I0123456789abcdef\nSigned-off-by: lawrence <lawrence@example.com>",
+  ai: false,
+  thenEdit: false,
+  sessionId: "s-1",
+  revision: 3,
+};
+
+const composeScenarios = {
+  "compose-edit": async (page) => {
+    await page.post(composeTarget);
+    await page.wait(150);
+  },
+
+  "compose-ai": async (page) => {
+    await page.post({ ...composeTarget, ai: true, model: "fast" });
+    await page.wait(150);
+  },
+
+  "compose-dirty": async (page) => {
+    await page.post(composeTarget);
+    await page.wait(80);
+    await page.evaluate(`(() => {
+      const subject = document.getElementById("subject");
+      subject.value = subject.value.replace("docs:", "docs(ui):");
+      subject.dispatchEvent(new Event("input", { bubbles: true }));
+    })()`);
+    await page.wait(80);
+  },
+
+  "compose-generating": async (page) => {
+    await page.post({ ...composeTarget, ai: true, model: "fast" });
+    await page.wait(80);
+    await page.evaluate(`document.getElementById("generate").click()`);
+    await page.wait(120);
+  },
+
+  "compose-streamed": async (page) => {
+    await page.post({ ...composeTarget, ai: true, model: "fast" });
+    await page.wait(80);
+    await page.post({ type: "genDelta", text: "feat(ui): stream the generated message\n\n" });
+    await page.post({ type: "genResult", text: "feat(ui): stream the generated message\n\nGenerate the body from the staged diff.\n" });
+    await page.wait(120);
+  },
+
+  "compose-error": async (page) => {
+    await page.post(composeTarget);
+    await page.wait(80);
+    await page.post({ type: "applyFailed", message: "应用失败：目标 commit 已被其他操作改写。" });
+    await page.wait(80);
+  },
+
+  "compose-stale": async (page) => {
+    await page.post(composeTarget);
+    await page.wait(80);
+    await page.post({ type: "staleTarget", message: "目标 commit 已变化，建议重新打开。" });
+    await page.wait(80);
   },
 };
 
@@ -623,27 +719,35 @@ async function launchChrome(port, profile, url) {
  * `acquireVsCodeApi` stub before `main.js` runs and deliberately carries no CSP:
  * this is a local render harness, not the webview.
  */
-function startServer(body, theme) {
-  const assets = {
-    "/style.css": [fs.readFileSync(path.join(root, "media/style.css")), "text/css"],
-    "/main.js": [fs.readFileSync(path.join(root, "media/main.js")), "text/javascript"],
-  };
-  const variables = Object.entries(theme).map(([k, v]) => `${k}: ${v};`).join("\n");
-  const html = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
-<style>:root{${variables}} html,body{height:100%}</style>
-<link rel="stylesheet" href="/style.css"></head><body>
-<script>
+/** The host stub has to be defined before either webview's own script runs. */
+const HOST_STUB = `<script>
   window.__hostMessages = [];
   window.acquireVsCodeApi = () => ({
     postMessage: (message) => { window.__hostMessages.push(message); },
     getState: () => window.__savedState,
     setState: (value) => { window.__savedState = value; },
   });
-</script>
-${body}
+</script>`;
+
+function buildDocument(markup, theme) {
+  const variables = Object.entries(theme).map(([k, v]) => `${k}: ${v};`).join("\n");
+  if (surface === "compose") {
+    // The panel ships its styles and controller inline; the variables have to be
+    // declared before them so `var(--vscode-*)` resolves during first paint.
+    return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<style>:root{${variables}}</style>
+<style>${markup.style}</style>${HOST_STUB}</head><body>${markup.body}</body></html>`;
+  }
+  return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<style>:root{${variables}} html,body{height:100%}</style>
+<link rel="stylesheet" href="/style.css"></head><body>
+${HOST_STUB}
+${markup.body}
 <script src="/main.js"></script>
 </body></html>`;
+}
 
+function startServer(html, assets) {
   const server = http.createServer((request, response) => {
     if (request.url === "/") {
       response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
@@ -662,11 +766,16 @@ ${body}
 // ---------------------------------------------------------------- main
 
 async function renderTheme(themeName, chromePort, profile, defaults) {
+  const isCompose = surface === "compose";
   const theme = themeVariables(themeName, defaults);
-  const missing = unresolvedTokens(theme);
+  const markup = isCompose ? readComposeDocument() : { body: readWebviewBody() };
+  const missing = unresolvedTokens(theme, isCompose ? markup.style : null);
   if (missing.length) console.warn(`  ! ${themeName}: unresolved ${missing.join(", ")} — those fall back to the CSS defaults`);
-  const body = readWebviewBody();
-  const { server, port } = await startServer(body, theme);
+  const assets = isCompose ? {} : {
+    "/style.css": [fs.readFileSync(path.join(root, "media/style.css")), "text/css"],
+    "/main.js": [fs.readFileSync(path.join(root, "media/main.js")), "text/javascript"],
+  };
+  const { server, port } = await startServer(buildDocument(markup, theme), assets);
   const { child, webSocketDebuggerUrl } = await launchChrome(chromePort, profile, `http://127.0.0.1:${port}/`);
 
   try {
@@ -676,7 +785,13 @@ async function renderTheme(themeName, chromePort, profile, defaults) {
     await cdp.send("Page.enable");
     await cdp.send("Runtime.enable");
     // A sidebar-sized viewport at 2x, so text is judged at the size users see.
-    await cdp.send("Emulation.setDeviceMetricsOverride", { width: viewportWidth, height: 720, deviceScaleFactor: 2, mobile: false });
+    await cdp.send("Emulation.setDeviceMetricsOverride", {
+      // The compose panel opens as an editor and gets the editor's width.
+      width: isCompose ? 900 : viewportWidth,
+      height: 720,
+      deviceScaleFactor: 2,
+      mobile: false,
+    });
     await cdp.wait(200);
 
     for (let attempt = 0; attempt < 100; attempt++) {
@@ -685,7 +800,8 @@ async function renderTheme(themeName, chromePort, profile, defaults) {
       await cdp.wait(50);
     }
 
-    const names = Object.keys(scenarios).filter((name) => !only.length || only.includes(name));
+    const activeScenarios = isCompose ? composeScenarios : scenarios;
+    const names = Object.keys(activeScenarios).filter((name) => !only.length || only.includes(name));
     for (const name of names) {
       // Reload between scenarios: every scenario starts from a clean document,
       // so one scenario's state or open menu cannot leak into the next.
@@ -696,7 +812,7 @@ async function renderTheme(themeName, chromePort, profile, defaults) {
         if (ready) break;
         await cdp.wait(50);
       }
-      await scenarios[name](cdp);
+      await activeScenarios[name](cdp);
       await cdp.wait(80);
       if (args.includes("--audit")) auditResults.push({ theme: themeName, scenario: name, elements: await cdp.evaluate(AUDIT_PROBE) });
       if (args.includes("--debug-style") && name === "menu") {
@@ -728,7 +844,7 @@ async function renderTheme(themeName, chromePort, profile, defaults) {
         console.log("  debug:", JSON.stringify(probe));
       }
       const shot = await cdp.send("Page.captureScreenshot", { format: "png", captureBeyondViewport: false });
-      const file = path.join(outDir, themeName, `${name}.png`);
+      const file = path.join(outDir, isCompose ? `compose-${themeName}` : themeName, `${name}.png`);
       fs.mkdirSync(path.dirname(file), { recursive: true });
       fs.writeFileSync(file, Buffer.from(shot.data, "base64"));
       console.log(`  ${path.relative(outDir, file)}`);
