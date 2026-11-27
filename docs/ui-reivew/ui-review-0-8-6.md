@@ -317,3 +317,24 @@ node scripts/ui-screenshot.mjs --width 300 --only drag   # 默认测 340px，这
 **第一次跑就发现的问题**
 
 在 300px（VS Code 默认侧边栏宽度）下，右键菜单实测宽 **322px**，右侧溢出 26px，快捷键提示（`Enter` / `Delete`）与长标签尾部被裁掉。菜单是 `position: fixed` 且位于 webview 内部，无法逃出面板边界；`.menu` 只有 `min-width: 200px`，没有 `max-width`。已记录到 `docs/improvement/improvement.md`。
+
+## 9. 实施状态
+
+五批全部落地并推送到 `main`（未打 tag、未改版本号、未发布）。
+
+| 批次 | 内容 | 提交 |
+| --- | --- | --- |
+| 1 | P0-1 提示行常驻 · P0-2 插入指示不改变盒模型 | `e480d38` `3f35ba5` `bbdf651` |
+| 2 | P0-3 圆点描边 · P0-4 阴影 token · P0-5 按钮 hover | `6a8387c` |
+| 3 | P1-6 按压反馈 · P1-14 抓取态 · P1-15 grip 过渡 · P1-16 子集 | `5638e0d` |
+| 4 | P1-7~13 浮层动画与键盘免动画 · P1-16 完整版 | `111ad14` `53b9c78` |
+| 5 | P2-17 数字等宽 · P2-18 死代码 −175 行 · P2-19 分组标题正常大小写 | `88bc9da` |
+
+每批都经过实现 → 独立评审 → 回炉 → 复审的循环；评审使用真实 Chrome 的 `getComputedStyle`/`getAnimations()`/CDP 伪状态模拟，并对新增测试做"在修复前提交上必须失败"的反向验证。
+
+**遗留项**（均记录在 `docs/improvement/improvement.md`，不阻塞本版本）：
+
+- `.danger-btn` hover 对比度：Light Modern 下 2.09:1，基态 2.66:1 本身已低于 AA，需改 danger 红字或引入专用 token，属视觉决策。
+- 右键菜单在 300px 侧边栏下宽 322px，右侧快捷键提示被裁。
+- 外部 `git rebase --continue` 的刷新链路无端到端测试（截图与现有测试都覆盖不到）。
+- 拖拽无边缘自动滚动，长列表跨屏拖动需分多次。
