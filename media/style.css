@@ -73,10 +73,11 @@ button, .grip, .dot, .lock-icon, .stopped-badge {
      user reads it and would need a variant-specific opaque backdrop, while the
      review only requires the actions to be reachable, not permanently visible.
 
-     Known boundary: `45vh` applies to every banner variant, so a viewport
-     shorter than roughly 367px also scrolls an ordinary edit/conflict banner
-     instead of showing it in full; its actions stay reachable through the same
-     internal scroll. */
+     Known boundary: `45vh` applies to every banner variant, so on a short
+     viewport an ordinary banner may also scroll instead of showing in full: the
+     compact edit banner starts at roughly 333px, where 45vh plus padding falls
+     below its 165px; taller variants start at up to about 367px. Its actions
+     stay reachable through the same internal scroll. */
   max-height: 45vh;
   overflow-y: auto;
 }
