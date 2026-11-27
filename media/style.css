@@ -722,12 +722,14 @@ button, .grip, .dot, .lock-icon, .stopped-badge {
 }
 
 /* The primary fill and `focusBorder` are the same token family in the default
-   themes, so an inset ring (the shared `.btn:focus-visible` rule) is invisible.
-   Draw this ring just outside the fill instead. Secondary buttons keep the
-   inset ring: theirs is already visible and an outer ring would be clipped in
-   tight containers. */
+   themes, so the shared inset ring is invisible. Move the ring back inside the
+   fill but colour it with `button-foreground`: that pair is designed to be
+   readable against the fill, so the ring reaches 4.5:1 without depending on
+   whatever banner happens to sit behind the button. Secondary buttons keep the
+   shared focusBorder ring, which is already visible on their neutral fill. */
 .btn.primary:focus-visible {
-  outline-offset: 1px;
+  outline-offset: -1px;
+  outline-color: var(--vscode-button-foreground);
 }
 
 .btn:hover:not(:disabled) {
