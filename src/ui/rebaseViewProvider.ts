@@ -3343,40 +3343,6 @@ export class RebaseViewProvider implements vscode.WebviewViewProvider {
 <div id="list" class="list" role="list"></div>
 <div id="menu" class="menu hidden" role="menu" aria-label="Commit 操作菜单"></div>
 <div id="tooltip" class="tooltip hidden"></div>
-<div id="dialog" class="dialog-backdrop hidden" role="presentation">
-  <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="dialog-title" aria-describedby="dialog-error">
-    <div class="dialog-title" id="dialog-title">编辑 commit message</div>
-    <div id="dialog-error" class="dialog-error hidden" role="alert"></div>
-
-    <div id="orig-block" class="pane-block hidden">
-      <div class="pane-label">
-        <span>原始 message</span>
-        <button id="orig-copy" class="link-btn">复制</button>
-      </div>
-      <textarea id="orig-text" class="pane readonly" readonly spellcheck="false"></textarea>
-    </div>
-
-    <div id="ai-block" class="ai-block hidden">
-      <div class="pane-label">补充信息给 AI（可选，如链接、Issue 号等）</div>
-      <textarea id="ai-extra" class="ai-extra" spellcheck="false"
-        placeholder="例如：关联 IPCSDK-31159 ，或要求输出对应链接…"></textarea>
-      <button id="ai-generate" class="btn primary small">生成 / 重新生成</button>
-    </div>
-
-    <div class="pane-label"><span id="result-label">Commit message</span></div>
-    <textarea id="dialog-text" class="pane" spellcheck="false"></textarea>
-
-    <div id="trailer-block" class="pane-block hidden">
-      <div class="pane-label">保留的 trailer（Change-Id / Signed-off-by，不会被修改）</div>
-      <pre id="trailer-text" class="trailer"></pre>
-    </div>
-
-    <div class="dialog-actions">
-      <button id="dialog-cancel" class="btn">取消</button>
-      <button id="dialog-ok" class="btn primary">应用</button>
-    </div>
-  </div>
-</div>
 <div id="live" class="sr-only" role="status" aria-live="polite"></div>
 <script nonce="${nonce}" src="${scriptUri}"></script>
 </body>
