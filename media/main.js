@@ -1100,7 +1100,12 @@
   }
   function menuItem(item) {
     const el = document.createElement("button"); el.type = "button"; el.className = "item" + (item.disabled ? " disabled" : "") + (item.danger ? " danger" : ""); el.setAttribute("role", "menuitem"); el.tabIndex = -1;
-    el.innerHTML = `<span class="menu-icon" aria-hidden="true">${item.icon || ""}</span><span>${item.label}</span>${item.shortcut ? `<kbd>${item.shortcut}</kbd>` : ""}`;
+    // The label is the only shrinkable child (see `.menu .item .menu-label`), so
+    // a narrow sidebar truncates it instead of pushing the menu and its shortcut
+    // past the viewport edge. Keep the full action as the accessible name: the
+    // visible text may become "AI 生成 messa…", the spoken name must not.
+    el.setAttribute("aria-label", item.label);
+    el.innerHTML = `<span class="menu-icon" aria-hidden="true">${item.icon || ""}</span><span class="menu-label">${item.label}</span>${item.shortcut ? `<kbd>${item.shortcut}</kbd>` : ""}`;
     // A native `disabled` menu item cannot be focused, so `menuButtons()`
     // skipped it and both the keyboard cycle and `aria-description` were
     // unreachable. `aria-disabled` keeps the item in the focus cycle (the
@@ -1116,7 +1121,11 @@
         event.preventDefault(); event.stopPropagation();
         announce(item.disabledReason || "此操作当前不可用。");
       });
-    } else el.onclick = () => { closeMenu(); item.action(); };
+    } else {
+      // A pointer tooltip carries the untruncated action when the label clips.
+      el.title = item.label;
+      el.onclick = () => { closeMenu(); item.action(); };
+    }
     return el;
   }
   function sep() { const el = document.createElement("div"); el.className = "sep"; el.setAttribute("role", "separator"); return el; }

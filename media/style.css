@@ -628,10 +628,38 @@ button, .grip, .dot, .lock-icon, .stopped-badge {
   font-variant-numeric: tabular-nums;
 }
 
+/* `descriptionForeground` is tuned for the editor background, not for the
+   selection fills: on dark inactive selection (#37373D) it is 4.36:1 and on the
+   active selection (#04395E) 4.42:1. The selected/stopped meta line is body-adjacent
+   text, so it has to clear AA. Each surface supplies its own paired foreground:
+   inactive selection has no default token and falls back to the theme foreground,
+   while active selection defines `list-activeSelectionForeground` against its own
+   fill (#FFFFFF on #04395E dark, #000000 on #E8E8E8 light). `foreground` alone is
+   still not enough for a pending selected row because `opacity: .8` composites
+   the whole row: the fallback pair keeps that effective value above 4.5 while
+   remaining visibly dimmer than an ordinary selected row. */
+.commit.selected .commit-meta {
+  color: var(--vscode-list-inactiveSelectionForeground, var(--vscode-foreground));
+}
+
+.commit.stopped .commit-meta {
+  color: var(--vscode-list-activeSelectionForeground, var(--vscode-foreground));
+}
+
 .commit.stopped {
   outline: 1px solid var(--vscode-editorInfo-foreground, var(--vscode-focusBorder));
   border-left-color: var(--vscode-editorInfo-foreground, var(--vscode-focusBorder));
   background: var(--vscode-list-activeSelectionBackground);
+}
+
+/* `.commit.stopped` follows `.commit:focus-visible`, so its info-blue state
+   outline repainted the keyboard ring: 2.93:1 on the light active-selection fill
+   and 3.91:1 on the dark one. Restore a ring paired with that exact fill.
+   `list-activeSelectionForeground` is the theme's own readable contrast against
+   `list-activeSelectionBackground` (#FFFFFF on #04395E dark, #000000 on #E8E8E8
+   light); the fallback `foreground` still clears 3:1 where a theme omits it. */
+.commit.stopped:focus-visible {
+  outline-color: var(--vscode-list-activeSelectionForeground, var(--vscode-foreground));
 }
 
 .commit .stopped-badge {
@@ -659,6 +687,11 @@ button, .grip, .dot, .lock-icon, .stopped-badge {
   position: fixed;
   z-index: 1000;
   min-width: 200px;
+  /* Natural width is 322px. A 300px sidebar used to clip 26px of the menu and a
+     260px sidebar 66px, taking the right-aligned shortcut with it. The menu is
+     positioned with a 4px margin on both sides, so leave 8px for those margins
+     and let the label shrink instead of the box. */
+  max-width: calc(100vw - 8px);
   background: var(--vscode-menu-background, var(--vscode-editor-background));
   color: var(--vscode-menu-foreground, var(--vscode-foreground));
   border: 1px solid var(--vscode-menu-border, var(--vscode-panel-border));
@@ -702,8 +735,26 @@ button, .grip, .dot, .lock-icon, .stopped-badge {
 
 /* 1.4em at the item's 13px font is 18.2px, which fits the 17-18px glyphs
    (the lock and delete emoji). A fixed 14px box clipped them by 3-4px. */
-.menu .menu-icon { width: 1.4em; text-align: center; color: var(--vscode-descriptionForeground); }
-.menu .item kbd { margin-left: auto; font: 10px var(--vscode-font-family); color: var(--vscode-descriptionForeground); }
+.menu .menu-icon { flex: 0 0 auto; width: 1.4em; text-align: center; color: var(--vscode-descriptionForeground); }
+/* The label is the only part allowed to shrink. `min-width: 0` is required
+   because a flex item's automatic minimum is its min-content width; without it
+   the 322px menu ignored the viewport cap and the shortcut was clipped. The
+   accessible name (`aria-label`) and, for enabled items, `title` keep the full
+   action even when the visible text ends in an ellipsis. */
+.menu .item .menu-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.menu .item kbd {
+  flex: 0 0 auto;
+  margin-left: auto;
+  font: 10px var(--vscode-font-family);
+  color: var(--vscode-descriptionForeground);
+  white-space: nowrap;
+}
 
 .menu .item:hover,
 .menu .item:focus-visible {
@@ -769,6 +820,16 @@ button, .grip, .dot, .lock-icon, .stopped-badge {
 .btn.primary:focus-visible {
   outline-offset: -1px;
   outline-color: var(--vscode-button-foreground);
+}
+
+/* The shared `focusBorder` ring is only 2.87:1 on the dark secondary fill
+   (#007FD4 on #313131). `button-secondaryForeground` is the token the theme
+   pairs with `button-secondaryBackground`, so it is readable against both the
+   resting and hover fills by design; Light Modern's #3B3B3B on #E5E5E5 is
+   8.6:1 and the dark #CCCCCC on #313131 is 7.5:1. The ring stays inset, so this
+   fill is the only adjacent surface. */
+.btn:not(.primary):focus-visible {
+  outline-color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
 }
 
 .btn:hover:not(:disabled) {
