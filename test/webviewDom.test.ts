@@ -849,3 +849,96 @@ test("actual webview replaces the ahead/behind arrows with the reason when the r
     view.close();
   }
 });
+
+test("the menu grows from the pointer but skips the animation when opened from the keyboard", () => {
+  const pointerView = createHarness();
+  try {
+    pointerView.postState(state([a, b, c], 3));
+    const menu = pointerView.dom.window.document.getElementById("menu")!;
+    pointerView.row(b).dispatchEvent(mouseEvent(pointerView.dom.window, "contextmenu", { clientX: 100, clientY: 200 }));
+    assert.equal(menu.classList.contains("hidden"), false, "a pointer right-click opens the menu");
+    // `openMenu` writes the clamped offset of the trigger point inside the menu;
+    // jsdom reports zero-size boxes, so the value is "0px 0px" here, but the
+    // shape and the property are what the CSS `transform-origin` consumes.
+    assert.match(menu.style.getPropertyValue("--grv-origin"), /^\d+px \d+px$/, "the pop-in origin is set from the click point");
+    assert.notEqual(menu.dataset.instant, "true", "a pointer menu keeps its entrance animation");
+  } finally {
+    pointerView.close();
+  }
+
+  const keyboardView = createHarness();
+  try {
+    keyboardView.postState(state([a, b, c], 3));
+    const menu = keyboardView.dom.window.document.getElementById("menu")!;
+    keyboardView.row(c).dispatchEvent(new keyboardView.dom.window.KeyboardEvent("keydown", {
+      key: "ContextMenu",
+      bubbles: true,
+      cancelable: true,
+    }));
+    assert.equal(menu.classList.contains("hidden"), false, "the ContextMenu key opens the menu");
+    assert.equal(menu.dataset.instant, "true", "a keyboard menu suppresses the entrance animation");
+  } finally {
+    keyboardView.close();
+  }
+});
+
+test("a second tooltip request within the grace window skips the 400ms anti-misfire delay", async () => {
+  const view = createHarness();
+  try {
+    view.postState(state([a, b, c], 3));
+    view.messages.length = 0;
+    view.row(c).dispatchEvent(mouseEvent(view.dom.window, "mouseenter"));
+    await new Promise((resolve) => setTimeout(resolve, 420));
+    assert.deepEqual(
+      view.messages.filter((message) => message.type === "requestDetail").map((message) => message.hash),
+      [c],
+      "the first hover still waits the full 400ms"
+    );
+
+    // Leaving hides the tooltip after its own 200ms grace and arms the window.
+    view.row(c).dispatchEvent(mouseEvent(view.dom.window, "mouseleave"));
+    await new Promise((resolve) => setTimeout(resolve, 240));
+    view.messages.length = 0;
+
+    view.row(b).dispatchEvent(mouseEvent(view.dom.window, "mouseenter"));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.deepEqual(
+      view.messages.filter((message) => message.type === "requestDetail").map((message) => message.hash),
+      [b],
+      "the next hover requests detail immediately instead of paying 400ms again"
+    );
+  } finally {
+    view.close();
+  }
+});
+
+test("the tooltip pops in from the row-facing edge and flips its origin when placed above", () => {
+  const view = createHarness();
+  try {
+    view.postState(state([a, b, c], 3));
+    view.messages.length = 0;
+    view.row(c).dispatchEvent(mouseEvent(view.dom.window, "mouseenter"));
+    const detail = {
+      type: "detail",
+      hash: c,
+      author: "Carol",
+      relDate: "1 hour ago",
+      absDate: "today",
+      stat: "1 file changed",
+      message: "subject-c",
+    };
+    view.postState(detail);
+    const tooltip = view.dom.window.document.getElementById("tooltip")!;
+    assert.equal(tooltip.classList.contains("hidden"), false, "the detail renders");
+    assert.equal(tooltip.style.getPropertyValue("--grv-origin"), "left top", "below the row, it grows from its top edge");
+
+    // jsdom always reports offsetHeight 0, so the real fit check cannot flip.
+    // Shrinking the viewport below `topPos + th` makes the flip branch observable
+    // without depending on layout that this environment does not implement.
+    Object.defineProperty(view.dom.window, "innerHeight", { configurable: true, value: 1 });
+    view.postState(detail);
+    assert.equal(tooltip.style.getPropertyValue("--grv-origin"), "left bottom", "flipped above the row, it grows from its bottom edge");
+  } finally {
+    view.close();
+  }
+});

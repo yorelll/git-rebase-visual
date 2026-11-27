@@ -868,9 +868,45 @@ button, .grip, .dot, .lock-icon, .stopped-badge {
   font-size: 12px;
 }
 
-/* This batch introduces the project's first transform/transition, so it also
-   ships the reduced-motion opt-out. The full version (menu/tooltip/toast/banner
-   fades) lands in batch 4 together with those animations. */
+/* Entrance animations belong only to the surfaces that are toggled with
+   `.hidden`: the menu, tooltip, inline toast and banner. `renderList()` and
+   `renderChanges()` rebuild `.commit` / `.change-file` with innerHTML on every
+   selection, so an animation there would replay on every click. An `animation`
+   on a `.hidden` reveal, by contrast, restarts exactly when the element becomes
+   visible again.
+
+   `animation` (not `@starting-style`) is deliberate: VS Code 1.85 ships
+   Chromium 114, while `@starting-style` needs Chromium 117+. A `transition`
+   cannot animate a `display: none` -> `block` reveal at all, because the
+   transition never gets a start value. */
+.menu,
+.tooltip {
+  transform-origin: var(--grv-origin, left top);
+}
+
+.menu:not(.hidden) {
+  animation: grv-pop-in 150ms var(--grv-ease-out) both;
+}
+
+.tooltip:not(.hidden) {
+  animation: grv-pop-in 125ms var(--grv-ease-out) both;
+}
+
+.inline-toast:not(.hidden) {
+  animation: grv-toast-in 180ms var(--grv-ease-out) both;
+}
+
+/* The banner participates in document flow, so a translate would push the
+   commit list down. Fade only. `renderBanner()` reassigns `bannerEl.className`
+   on every refresh, but the `animation` declaration lives on `.banner` and its
+   name does not change with the class list, so a running animation is not
+   restarted (verified in Chrome via `getAnimations()`). */
+.banner:not(.hidden) {
+  animation: grv-fade-in 150ms ease both;
+}
+
+/* Reduced motion removes scale/translation but keeps a fade: the user asked to
+   reduce motion, not to lose the state change entirely. */
 @media (prefers-reduced-motion: reduce) {
   .btn:active:not(:disabled) {
     transform: none;
@@ -880,4 +916,27 @@ button, .grip, .dot, .lock-icon, .stopped-badge {
   .commit .grip {
     transition-duration: 0ms;
   }
+  .menu:not(.hidden),
+  .tooltip:not(.hidden),
+  .inline-toast:not(.hidden) {
+    animation-name: grv-fade-in;
+  }
+}
+
+/* A keyboard-opened menu has no pointer gesture to explain, and it is the
+   highest-frequency path; any animation reads as lag. Placed after the
+   reduced-motion block so `animation: none` also wins there. */
+.menu[data-instant="true"],
+.tooltip[data-instant="true"] {
+  animation: none;
+}
+
+@keyframes grv-pop-in {
+  from { opacity: 0; transform: scale(0.97); }
+}
+@keyframes grv-toast-in {
+  from { opacity: 0; transform: translateY(-4px); }
+}
+@keyframes grv-fade-in {
+  from { opacity: 0; }
 }

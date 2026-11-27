@@ -52,6 +52,10 @@
   let tipHash = null;
   let tipAnchor = null;
   let tipOverTip = false;
+  // After a tooltip is dismissed, the next hover is almost certainly the user
+  // moving down the timeline. Skip the 400ms anti-misfire delay during that
+  // window so browsing rows does not pay the delay on every row.
+  let tipInstantUntil = 0;
   let isComposingInput = false;
 
   function announce(message) {
@@ -547,7 +551,7 @@
     if (selectedHashes.size) { selectedHashes.clear(); selectionAnchor = null; renderList(); }
   }
   function rowKeydown(event, c) {
-    if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) { event.preventDefault(); selectContextTarget(c); const r = event.currentTarget.getBoundingClientRect(); openMenu(r.left + 8, r.bottom, c, event.currentTarget); return; }
+    if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) { event.preventDefault(); selectContextTarget(c); const r = event.currentTarget.getBoundingClientRect(); openMenu(r.left + 8, r.bottom, c, event.currentTarget, { instant: true }); return; }
     if ((event.ctrlKey || event.metaKey) && event.key === " ") { event.preventDefault(); selectRow({ ctrlKey: true, target: event.currentTarget }, c); return; }
     if (event.altKey && (event.key === "ArrowUp" || event.key === "ArrowDown")) {
       event.preventDefault();
@@ -652,7 +656,7 @@
   function group(text) { const el = document.createElement("div"); el.className = "menu-group-label"; el.textContent = text; return el; }
   function menuButtons() { return [...menuEl.querySelectorAll("button:not(.disabled)")]; }
   function focusMenu(index) { const buttons = menuButtons(); if (!buttons.length) return; const next = (index + buttons.length) % buttons.length; buttons.forEach((b, i) => b.tabIndex = i === next ? 0 : -1); buttons[next].focus(); }
-  function openMenu(x, y, c, origin) {
+  function openMenu(x, y, c, origin, options = {}) {
     hideTooltip(); menuRestoreFocus = origin || document.activeElement; menuEl.innerHTML = "";
     const multi = selectedMultiple(); const count = selectedHashes.size;
     const header = document.createElement("div"); header.className = "menu-header"; header.textContent = multi ? `已选择 ${count} 个 commit` : `${short(c.hash)} · ${c.subject}`; menuEl.append(header, sep());
@@ -676,7 +680,19 @@
       const reason = position <= 0 ? "第一个 commit 不能合并到前驱。" : c.locked || predecessor?.locked ? "当前 commit 或前驱已锁定。" : state.rebaseInProgress ? "变基进行中。" : "";
       menuEl.append(menuItem({ icon: "⌑", label: "合并到上一个 (squash)", disabled: blocked, disabledReason: reason, action: () => send("squash", c) }), menuItem({ icon: "⌑", label: "合并到上一个，丢弃 message (fixup)", disabled: blocked, disabledReason: reason, action: () => send("fixup", c) }), menuItem({ icon: "⏸", label: "停靠在此 (edit)", action: () => send("rebaseTo", c) }), sep(), group("保护"), menuItem(c.locked ? { icon: "🔓", label: "解除锁定", action: () => send("unlock", c) } : { icon: "🔒", label: "锁定 commit", action: () => send("lock", c) }), sep(), group("危险操作"), menuItem({ icon: "⌫", label: "删除 commit (drop)", shortcut: "Delete", danger: true, disabled: c.locked, disabledReason: c.locked ? "目标已锁定。" : "", action: () => send("drop", c) }));
     }
-    menuEl.classList.remove("hidden"); const mw = menuEl.offsetWidth; const mh = menuEl.offsetHeight; menuEl.style.left = Math.max(4, Math.min(x, window.innerWidth - mw - 4)) + "px"; menuEl.style.top = Math.max(4, Math.min(y, window.innerHeight - mh - 4)) + "px"; menuEl.onkeydown = (event) => { const buttons = menuButtons(); const index = buttons.indexOf(document.activeElement); if (event.key === "ArrowDown") { event.preventDefault(); focusMenu(index + 1); } else if (event.key === "ArrowUp") { event.preventDefault(); focusMenu(index - 1); } else if (event.key === "Home") { event.preventDefault(); focusMenu(0); } else if (event.key === "End") { event.preventDefault(); focusMenu(buttons.length - 1); } else if (event.key === "Escape") { event.preventDefault(); closeMenu(); } }; focusMenu(0);
+    // `data-instant` has to be written while the menu is still hidden: CSS reads
+    // it when the reveal below starts the entrance animation. Keyboard menus
+    // skip that animation because the keypress already supplied the feedback.
+    if (options.instant) menuEl.dataset.instant = "true"; else delete menuEl.dataset.instant;
+    menuEl.classList.remove("hidden");
+    const mw = menuEl.offsetWidth; const mh = menuEl.offsetHeight;
+    const left = Math.max(4, Math.min(x, window.innerWidth - mw - 4));
+    const top = Math.max(4, Math.min(y, window.innerHeight - mh - 4));
+    menuEl.style.left = left + "px"; menuEl.style.top = top + "px";
+    // Grow from the actual trigger point, not the menu's own centre, so the
+    // scale-up visibly originates where the user clicked.
+    menuEl.style.setProperty("--grv-origin", `${Math.max(0, x - left)}px ${Math.max(0, y - top)}px`);
+    menuEl.onkeydown = (event) => { const buttons = menuButtons(); const index = buttons.indexOf(document.activeElement); if (event.key === "ArrowDown") { event.preventDefault(); focusMenu(index + 1); } else if (event.key === "ArrowUp") { event.preventDefault(); focusMenu(index - 1); } else if (event.key === "Home") { event.preventDefault(); focusMenu(0); } else if (event.key === "End") { event.preventDefault(); focusMenu(buttons.length - 1); } else if (event.key === "Escape") { event.preventDefault(); closeMenu(); } }; focusMenu(0);
   }
   function sendCompose(c, ai) { vscode.postMessage({ type: "openCompose", mode: "commit", hash: c.hash, ai, thenEdit: false }); }
   function send(type, c) { vscode.postMessage({ type, hash: c.hash }); }
@@ -689,17 +705,26 @@
   // Commit detail belongs to the sidebar: a hover opens a floating tooltip over
   // the adjacent timeline area. It is dismissed as soon as the pointer leaves
   // the row (with a short grace so moving onto the tooltip keeps it open).
-  function scheduleTooltip(c, row) { if (tipTimer) clearTimeout(tipTimer); if (tipHideTimer) clearTimeout(tipHideTimer); tipHash = c.hash; tipAnchor = row; tipTimer = setTimeout(() => vscode.postMessage({ type: "requestDetail", hash: c.hash }), 400); }
+  function scheduleTooltip(c, row) { if (tipTimer) clearTimeout(tipTimer); if (tipHideTimer) clearTimeout(tipHideTimer); tipHash = c.hash; tipAnchor = row; const instant = Date.now() < tipInstantUntil; tipTimer = setTimeout(() => vscode.postMessage({ type: "requestDetail", hash: c.hash }), instant ? 0 : 400); }
   function cancelTooltip() { if (tipTimer) clearTimeout(tipTimer); if (tipHideTimer) clearTimeout(tipHideTimer); tipHideTimer = setTimeout(() => { if (!tipOverTip) hideTooltip(); }, 200); }
-  function hideTooltip() { tooltipEl.classList.add("hidden"); tipHash = null; tipAnchor = null; }
+  function hideTooltip() { tooltipEl.classList.add("hidden"); tipHash = null; tipAnchor = null; tipInstantUntil = Date.now() + 800; }
   function compactStat(stat) { const match = (stat || "").match(/(\d+) files? changed(?:, (\d+) insertions?\(\+\))?(?:, (\d+) deletions?\(-\))?/); return match ? `${match[1]} file${match[1] === "1" ? "" : "s"}${match[2] ? ` · +${match[2]}` : ""}${match[3] ? ` −${match[3]}` : ""}` : stat; }
   function showDetail(d) {
     if (d.hash !== tipHash || !tipAnchor) return; tooltipEl.innerHTML = "";
     const top = document.createElement("div"); top.className = "tip-top"; const meta = document.createElement("div"); meta.className = "tip-meta"; meta.textContent = `${d.author} · ${d.relDate} · ${d.absDate}`;
     const actions = document.createElement("div"); actions.className = "tip-actions"; actions.append(button("⧉", () => vscode.postMessage({ type: "copyText", text: d.message }), { title: "复制完整 message" }), button("◫", () => vscode.postMessage({ type: "openDiff", hash: d.hash }), { title: "打开变更" })); top.append(meta, actions);
     const stat = document.createElement("div"); stat.className = "tip-stat"; stat.textContent = `${short(d.hash)} · ${compactStat(d.stat)}`;
-    const msg = document.createElement("pre"); msg.className = "tip-msg"; msg.textContent = d.message; tooltipEl.append(top, stat, msg); tooltipEl.classList.remove("hidden");
-    const r = tipAnchor.getBoundingClientRect(); const tw = tooltipEl.offsetWidth; const th = tooltipEl.offsetHeight; let topPos = r.bottom + 4; if (topPos + th > window.innerHeight - 4) topPos = Math.max(4, r.top - th - 4); tooltipEl.style.left = Math.max(4, Math.min(r.left, window.innerWidth - tw - 4)) + "px"; tooltipEl.style.top = topPos + "px";
+    const msg = document.createElement("pre"); msg.className = "tip-msg"; msg.textContent = d.message; tooltipEl.append(top, stat, msg);
+    // As with the menu, the flag must be on the element before it is revealed.
+    tooltipEl.dataset.instant = Date.now() < tipInstantUntil ? "true" : "false";
+    tooltipEl.classList.remove("hidden");
+    const r = tipAnchor.getBoundingClientRect(); const tw = tooltipEl.offsetWidth; const th = tooltipEl.offsetHeight;
+    let topPos = r.bottom + 4; const above = topPos + th > window.innerHeight - 4;
+    if (above) topPos = Math.max(4, r.top - th - 4);
+    tooltipEl.style.left = Math.max(4, Math.min(r.left, window.innerWidth - tw - 4)) + "px"; tooltipEl.style.top = topPos + "px";
+    // The pop-in must originate from the edge facing its row: the top edge when
+    // the tooltip hangs below the row, the bottom edge when it flips above it.
+    tooltipEl.style.setProperty("--grv-origin", above ? "left bottom" : "left top");
   }
   tooltipEl.addEventListener("mouseenter", () => { tipOverTip = true; }); tooltipEl.addEventListener("mouseleave", () => { tipOverTip = false; hideTooltip(); });
 
