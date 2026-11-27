@@ -44,6 +44,9 @@ const only = flag("only", "").split(",").filter(Boolean);
 // The sidebar view and the compose panel are different webviews with different
 // markup, viewport and scenarios; `--surface compose` renders the second one.
 const surface = flag("surface", "sidebar");
+// Each theme gets its own debug port; the base is randomised per process so two
+// renders can run side by side (before/after comparisons, a reviewer's harness).
+const portBase = Number(flag("port", String(9000 + Math.floor(Math.random() * 900))));
 // VS Code's default sidebar is 300px; 340 leaves room for a wider panel.
 const viewportWidth = Number(flag("width", "340"));
 
@@ -1194,7 +1197,9 @@ const main = async () => {
   const defaults = readColorDefaults();
   for (const [index, themeName] of themes.entries()) {
     console.log(`${themeName}:`);
-    await renderTheme(themeName, 9411 + index, path.join(outDir, `.chrome-profile-${themeName}`), defaults);
+    // A fixed base port collides when two renders run at once (before/after
+    // comparison, or a reviewer's harness next to ours); pick a per-process base.
+    await renderTheme(themeName, portBase + index, path.join(outDir, `.chrome-profile-${themeName}`), defaults);
   }
   if (auditResults.length) {
     fs.writeFileSync(path.join(outDir, "audit.json"), JSON.stringify(auditResults, null, 2));
