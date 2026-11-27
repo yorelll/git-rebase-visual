@@ -650,7 +650,10 @@ const scenarios = {
  * read into `probe.json` when the harness is run with `--probe`.
  */
 async function pressKey(page, key, code, vk, modifiers = 0) {
-  const event = { key, code, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk, modifiers };
+  // Enter needs its text payload for Chromium to run a focused button's
+  // default activation; arrows and PageDown are fine without one.
+  const text = key === "Enter" ? { text: "\r", unmodifiedText: "\r" } : {};
+  const event = { key, code, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk, modifiers, ...text };
   await page.send("Input.dispatchKeyEvent", { type: "keyDown", ...event });
   await page.send("Input.dispatchKeyEvent", { type: "keyUp", ...event });
 }
@@ -684,10 +687,11 @@ scenarios["focus-refresh"] = async (page) => {
   await page.render(state);
   await page.wait(150);
   await installRecord(page);
-  // A real Tab from the third row lands on the fourth; focus() alone can leave
-  // :focus-visible false but the identity restoration is what is under test.
-  await page.tabTo(".commit", { after: "document.querySelectorAll('.commit')[2]" });
-  await page.evaluate(`window.__probeRecord("commitRowFocused"); true`);
+  // Focus a non-first row directly. With the roving tabindex there is only one
+  // commit tab stop, so a Tab from an arbitrary row leaves the list (the
+  // `tab-order` probe covers that path); what this scenario measures is the
+  // identity restoration across a rebuild, which must work for any row.
+  await page.evaluate(`document.querySelectorAll(".commit")[5].focus(); window.__probeRecord("commitRowFocused"); true`);
   // The exact defect: an identical state used to rebuild #list and drop focus.
   await page.render(state);
   await page.wait(120);
@@ -888,6 +892,232 @@ scenarios["disabled-action-focus"] = async (page) => {
   await page.wait(150);
   await page.evaluate(`window.__probe.continueDisabled = (() => { const b = [...document.querySelectorAll("#banner .btn")].find((el) => el.textContent.trim() === "Continue"); return !!b && b.disabled; })(); true`);
   await page.evaluate(`window.__probeRecord("afterContinueDisabled"); true`);
+};
+
+// ------------------------------------------------------- semantics probes
+
+/**
+ * Chrome's accessibility tree for one element and its direct children. The DOM
+ * probes above can read attributes, but they cannot prove what a screen reader
+ * is actually handed: `role="listbox"` on a node whose children are a search
+ * box and two labels looks correct in `getAttribute` and wrong here.
+ */
+async function axSnapshot(page, selector) {
+  await page.send("DOM.enable");
+  await page.send("Accessibility.enable");
+  const { root } = await page.send("DOM.getDocument", { depth: 0 });
+  const { nodeId } = await page.send("DOM.querySelector", { nodeId: root.nodeId, selector });
+  if (!nodeId) return { found: false, selector };
+  const { node } = await page.send("DOM.describeNode", { nodeId });
+  const { nodes } = await page.send("Accessibility.getFullAXTree");
+  const target = nodes.find((candidate) => candidate.backendDOMNodeId === node.backendNodeId);
+  if (!target) return { found: false, selector };
+  const summarize = (axNode) => ({
+    role: axNode.role?.value ?? null,
+    name: axNode.name?.value ?? null,
+    description: axNode.description?.value ?? null,
+    ignored: !!axNode.ignored,
+    properties: Object.fromEntries((axNode.properties || [])
+      .filter((property) => ["multiselectable", "selected", "focusable", "disabled", "expanded"].includes(property.name))
+      .map((property) => [property.name, property.value?.value])),
+  });
+  const children = nodes.filter((candidate) => candidate.parentId === target.nodeId && !candidate.ignored);
+  return {
+    found: true,
+    selector,
+    node: summarize(target),
+    childRoles: children.map((child) => child.role?.value ?? null),
+    children: children.slice(0, 14).map(summarize),
+    optionCount: nodes.filter((candidate) => candidate.role?.value === "option" && !candidate.ignored).length,
+    groupNodes: nodes.filter((candidate) => candidate.role?.value === "group" && !candidate.ignored).map(summarize).slice(0, 6),
+  };
+}
+
+/**
+ * N2(b): what Tab actually visits, in order, from the top of the document. The
+ * change list is opened first so the N6 dead stops are part of the count.
+ */
+scenarios["tab-order"] = async (page) => {
+  await page.render(baseState);
+  await page.wait(150);
+  await page.evaluate(`(() => {
+    const more = document.querySelector("#changes details.changes-more");
+    if (more) { more.open = true; more.dispatchEvent(new Event("toggle")); }
+    return true;
+  })()`);
+  await page.wait(120);
+  const snapshot = `(() => {
+    const a = document.activeElement;
+    if (!a || a === document.body) return { body: true };
+    const changeRow = a.closest ? a.closest(".change-file") : null;
+    return {
+      tag: a.tagName,
+      id: a.id || null,
+      cls: (a.className || "").toString().trim().replace(/\\s+/g, "."),
+      role: a.getAttribute("role") || null,
+      name: (a.getAttribute("aria-label") || a.title || a.textContent || "").trim().replace(/\\s+/g, " ").slice(0, 80),
+      tabIndex: a.tabIndex,
+      commitHash: a.dataset ? (a.dataset.hash || null) : null,
+      changeRow: changeRow ? (changeRow.dataset.path || null) : null,
+      fileAction: a.dataset ? (a.dataset.action || null) : null,
+    };
+  })()`;
+  const stops = [];
+  for (let i = 0; i < 120; i++) {
+    await page.pressTab();
+    await page.wait(10);
+    const info = await page.evaluate(snapshot);
+    if (info.body) break;
+    // A full cycle returns to the first stop; do not count it twice.
+    if (stops.length && JSON.stringify(info) === JSON.stringify(stops[0])) break;
+    stops.push(info);
+  }
+  const fileActions = await page.evaluate(`(() => {
+    const open = document.querySelector("#changes .change-file .file-open");
+    if (!open) return null;
+    open.focus();
+    const actions = open.closest(".change-file").querySelector(".file-actions");
+    if (!actions) return null;
+    const style = getComputedStyle(actions);
+    return {
+      activeIsOpen: document.activeElement === open,
+      opacity: style.opacity,
+      pointerEvents: style.pointerEvents,
+      buttonCount: actions.querySelectorAll("button").length,
+    };
+  })()`);
+  await page.evaluate(`window.__probe = ${JSON.stringify({
+    stopCount: stops.length,
+    stops,
+    commitStops: stops.filter((stop) => stop.commitHash).length,
+    changeRowStops: stops.filter((stop) => stop.changeRow && !stop.fileAction).length,
+    fileControlStops: stops.filter((stop) => stop.changeRow && stop.fileAction).length,
+    fileActions,
+  })}; true`);
+};
+
+/**
+ * N2(a)(c)(d)(e): listbox role, direct-child roles, roving tabindex
+ * distribution, the announced reachable count and the locked-run group name.
+ */
+scenarios.ax = async (page) => {
+  // collapseLockedRuns folds the first three locked commits into one group.
+  await page.render({ ...baseState, collapseLockedRuns: true });
+  await page.wait(150);
+  await page.evaluate(`window.__probe = (() => {
+    const list = document.getElementById("list");
+    const box = list.querySelector('[role="listbox"]') || list;
+    const describe = (el) => el.tagName + ((el.className || "").toString().trim() ? "." + (el.className || "").toString().trim().replace(/\\s+/g, ".") : "");
+    const run = document.querySelector("details.locked-run");
+    return {
+      listRole: list.getAttribute("role"),
+      listChildren: [...list.children].map(describe),
+      listboxRole: box.getAttribute("role"),
+      listboxTag: box === list ? "list" : "inner",
+      multiselectable: box.getAttribute("aria-multiselectable"),
+      label: box.getAttribute("aria-label"),
+      directChildRoles: [...box.children].map((child) => child.getAttribute("role") || child.tagName),
+      commitTabIndex: [...document.querySelectorAll(".commit")].map((row) => ({ hash: row.dataset.hash, tabIndex: row.tabIndex, inRun: !!row.closest("details.locked-run") })),
+      zeroTabStopCount: [...document.querySelectorAll(".commit")].filter((row) => row.tabIndex === 0).length,
+      lockedRun: run ? { role: run.getAttribute("role"), ariaLabel: run.getAttribute("aria-label"), open: run.open } : null,
+    };
+  })(); true`);
+  await page.evaluate(`window.__probe.ax = ${JSON.stringify(await axSnapshot(page, '[role="listbox"]'))}; true`);
+  // N5: an icon-only tooltip button must expose its action, not the glyph, as
+  // the accessible name. Open the tooltip on a visible option and read its AX.
+  const tipHash = await page.evaluate(`(() => {
+    const row = [...document.querySelectorAll(".commit")].find((candidate) => !candidate.closest("details.locked-run"));
+    if (!row) return null;
+    row.dispatchEvent(new MouseEvent("mouseenter", { bubbles: true }));
+    return row.dataset.hash;
+  })()`);
+  if (tipHash) {
+    await page.post({ type: "detail", hash: tipHash, author: "lawrence", relDate: "1 hour ago", absDate: "today", stat: "1 file changed", message: "subject" });
+    await page.wait(100);
+    await page.evaluate(`window.__probe.tooltipAx = ${JSON.stringify(await axSnapshot(page, "#tooltip .tip-actions"))}; true`);
+  }
+};
+
+/**
+ * N2(a): do ↑/↓/Home/End move the active row, does focus follow, and does the
+ * selection stay untouched? Ctrl+Space first establishes a real selection.
+ */
+scenarios["kbd-list"] = async (page) => {
+  await page.render(baseState);
+  await page.wait(150);
+  await page.evaluate(`window.__probe = { steps: [] };
+    window.__kbdSnap = (label) => {
+      const a = document.activeElement;
+      const trace = window.__grvUiTrace();
+      window.__probe.steps.push({
+        label,
+        activeHash: a && a.dataset ? (a.dataset.hash || null) : null,
+        zeroTabStops: [...document.querySelectorAll(".commit")].filter((row) => row.tabIndex === 0).map((row) => row.dataset.hash),
+        traceActive: trace.activeHash || null,
+        selected: trace.selectedHashes,
+      });
+    };
+    const row = [...document.querySelectorAll(".commit")].find((candidate) => candidate.tabIndex === 0);
+    row.focus();
+    window.__kbdSnap("start");
+    true`);
+  await pressKey(page, " ", "Space", 32, 2);
+  await page.wait(150);
+  await page.evaluate(`window.__kbdSnap("afterCtrlSpace"); true`);
+  const keys = [["ArrowDown", "ArrowDown", 40], ["ArrowDown", "ArrowDown", 40], ["ArrowUp", "ArrowUp", 38], ["End", "End", 35], ["Home", "Home", 36]];
+  for (let index = 0; index < keys.length; index++) {
+    await pressKey(page, ...keys[index]);
+    await page.wait(120);
+    await page.evaluate(`window.__kbdSnap(${JSON.stringify(`${keys[index][0]}#${index + 1}`)}); true`);
+  }
+};
+
+/**
+ * N9: disabled items must be reach stops, must not run their action on Enter,
+ * and their reason must reach both the live region and the AX description.
+ */
+scenarios["menu-keyboard"] = async (page) => {
+  await page.render({ ...baseState, llmConfigured: false, hasStaged: false, hasUnstaged: false, stagedCount: 0, unstagedCount: 0, changes: [] });
+  await page.wait(150);
+  await page.contextMenuRow(3);
+  await page.wait(150);
+  await page.evaluate(`window.__probe = {
+    items: [...document.querySelectorAll("#menu button.item")].map((el) => ({
+      label: el.textContent.trim(),
+      ariaDisabled: el.getAttribute("aria-disabled"),
+      nativeDisabled: el.disabled,
+      tabIndex: el.tabIndex,
+      title: el.title,
+      description: el.getAttribute("aria-description"),
+    })),
+    cycle: [],
+  }; true`);
+  for (let i = 0; i < 14; i++) {
+    await page.evaluate(`(() => {
+      const a = document.activeElement;
+      window.__probe.cycle.push(a && a.textContent ? a.textContent.trim() : null);
+      a?.dispatchEvent?.(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true }));
+      return true;
+    })()`);
+  }
+  const focused = await page.evaluate(`(() => {
+    const ai = [...document.querySelectorAll("#menu button.item")].find((el) => el.textContent.includes("AI 生成 message"));
+    if (!ai) return false;
+    ai.focus();
+    window.__probe.aiFocused = document.activeElement === ai;
+    window.__probe.beforeMessages = window.__hostMessages.length;
+    return true;
+  })()`);
+  if (!focused) throw new Error("the menu has no AI item to focus");
+  await pressKey(page, "Enter", "Enter", 13);
+  await page.wait(150);
+  await page.evaluate(`window.__probe.activated = {
+    focusedLabel: document.activeElement && document.activeElement.textContent ? document.activeElement.textContent.trim() : null,
+    live: document.getElementById("live").textContent,
+    newMessages: window.__hostMessages.slice(window.__probe.beforeMessages).map((message) => message.type),
+    menuOpen: !document.getElementById("menu").classList.contains("hidden"),
+  }; true`);
+  await page.evaluate(`window.__probe.ax = ${JSON.stringify(await axSnapshot(page, "#menu"))}; true`);
 };
 
 /**
