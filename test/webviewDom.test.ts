@@ -1118,6 +1118,151 @@ test("the error banner is a tab stop only while it actually overflows", () => {
   }
 });
 
+test("focus on a collapsed locked run survives a list rebuild", () => {
+  const view = createHarness();
+  try {
+    const doc = view.dom.window.document;
+    const lockedState = (hashes: string[], revision: number) => {
+      const next = state(hashes, revision);
+      (next.commits as Array<Record<string, unknown>>).forEach((commit) => { commit.locked = true; });
+      next.collapseLockedRuns = true;
+      return next;
+    };
+    // Three consecutive locked commits collapse into one <details>/<summary>.
+    view.postState(lockedState([a, b, c], 7));
+    const first = doc.querySelector("details.locked-run > summary") as HTMLElement;
+    assert.ok(first, "the locked run is collapsed");
+    first.focus();
+    assert.equal(doc.activeElement, first, "the summary holds focus");
+
+    // A fourth (unlocked) commit rebuilds #list; the run's hash list and its
+    // summary are still the same identity.
+    const rebuiltState = state([a, b, c, "d".repeat(40)], 8);
+    (rebuiltState.commits as Array<Record<string, unknown>>).slice(0, 3).forEach((commit) => { commit.locked = true; });
+    rebuiltState.collapseLockedRuns = true;
+    view.postState(rebuiltState);
+    const rebuiltRun = doc.querySelector("details.locked-run") as HTMLDetailsElement;
+    assert.ok(rebuiltRun, "the locked run is rebuilt");
+    assert.notEqual(rebuiltRun.firstElementChild, first, "the summary node really was replaced");
+    assert.equal(doc.activeElement, rebuiltRun.firstElementChild, "focus is restored to the rebuilt summary");
+    assert.equal(rebuiltRun.dataset.lockedRun, [a, b, c].join(":"), "the run carries its stable hash-list key");
+  } finally {
+    view.close();
+  }
+});
+
+test("a banner action that became disabled does not send focus to <body>", () => {
+  const view = createHarness();
+  try {
+    const doc = view.dom.window.document;
+    const editState = {
+      ...state([a], 7),
+      rebaseInProgress: true,
+      conflictCount: 0,
+      pausedReason: "edit",
+      stoppedAt: a,
+      totalSteps: 8,
+      completedSteps: 3,
+    };
+    view.postState(editState);
+    const continueButton = () => [...doc.querySelectorAll<HTMLButtonElement>("#banner .btn")].find((button) => button.textContent === "Continue")!;
+    continueButton().focus();
+    assert.equal(doc.activeElement, continueButton(), "Continue holds focus");
+
+    // The same identity now exists but is disabled: focus() is a silent no-op,
+    // so the restore must reject it and land on a same-region action instead.
+    view.postState({ ...editState, conflictCount: 2, conflictFiles: ["src/a.ts", "src/b.ts"], pausedReason: "conflict" });
+    assert.equal(continueButton().disabled, true, "the conflict really disabled Continue");
+    const skip = [...doc.querySelectorAll<HTMLButtonElement>("#banner .btn")].find((button) => button.textContent.startsWith("Skip"))!;
+    assert.notEqual(doc.activeElement, doc.body, "focus does not silently fall to <body>");
+    assert.equal(doc.activeElement, skip, "focus lands on the next enabled banner action");
+  } finally {
+    view.close();
+  }
+});
+
+test("change and banner action identities are restored across their region rebuilds", () => {
+  const view = createHarness();
+  try {
+    const doc = view.dom.window.document;
+    const withChanges = { ...state([a], 7), hasStaged: true, hasUnstaged: true, stagedCount: 1, unstagedCount: 1, changes: [
+      { path: "src/staged.ts", staged: true, unstaged: false, indexKind: "add", conflicted: false },
+      { path: "src/working.ts", staged: false, unstaged: true, worktreeKind: "modify", conflicted: false },
+    ] };
+    view.postState(withChanges);
+    const details = doc.querySelector(".changes-more") as HTMLDetailsElement;
+    details.open = true;
+    details.dispatchEvent(new view.dom.window.Event("toggle"));
+    const changeAction = () => [...doc.querySelectorAll<HTMLButtonElement>(".change-file .file-action")]
+      .find((button) => button.getAttribute("aria-label") === "暂存此文件")!;
+    changeAction().focus();
+    assert.equal(doc.activeElement, changeAction());
+    const beforeChangeAction = changeAction();
+    // Only the worktree counter changes: renderChanges() rebuilds the rows.
+    view.postState({ ...withChanges, unstagedCount: 2 });
+    assert.notEqual(changeAction(), beforeChangeAction, "the change action node was replaced");
+    assert.equal(doc.activeElement, changeAction(), "the change action is re-found by path + group + action");
+
+    const editState = { ...state([a], 8), rebaseInProgress: true, conflictCount: 0, pausedReason: "edit", stoppedAt: a, totalSteps: 8, completedSteps: 3 };
+    view.postState(editState);
+    const continueButton = () => [...doc.querySelectorAll<HTMLButtonElement>("#banner .btn")].find((button) => button.textContent === "Continue")!;
+    continueButton().focus();
+    const beforeContinue = continueButton();
+    view.postState({ ...editState, completedSteps: 4 });
+    assert.notEqual(continueButton(), beforeContinue, "the banner action node was replaced");
+    assert.equal(doc.activeElement, continueButton(), "the banner action is re-found by data-action");
+  } finally {
+    view.close();
+  }
+});
+
+test("an irrelevant state change leaves the banner live region untouched", async () => {
+  const view = createHarness();
+  try {
+    const doc = view.dom.window.document;
+    const banner = doc.getElementById("banner")!;
+    const withError = { ...state([a, b, c], 7), error: "fatal: the same failure" };
+    view.postState(withError);
+    const textNode = banner.firstChild;
+    const records: MutationRecord[] = [];
+    const observer = new view.dom.window.MutationObserver((list) => records.push(...list));
+    observer.observe(banner, { childList: true, subtree: true, characterData: true });
+    // The global state signature differs (aheadCount), so render() runs; the
+    // banner's own key is unchanged, and that is the guard under test.
+    view.postState({ ...withError, aheadCount: 9 });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    observer.disconnect();
+    assert.deepEqual(records, [], "the banner live region was not rewritten");
+    assert.equal(banner.firstChild, textNode, "the same text node is kept, not replaced");
+    assert.equal(banner.textContent, "fatal: the same failure");
+  } finally {
+    view.close();
+  }
+});
+
+test("resize re-evaluates whether the banner is a tab stop", () => {
+  const view = createHarness();
+  try {
+    const doc = view.dom.window.document;
+    const banner = doc.getElementById("banner")!;
+    let scrollHeight = 400;
+    Object.defineProperty(banner, "scrollHeight", { configurable: true, get: () => scrollHeight });
+    Object.defineProperty(banner, "clientHeight", { configurable: true, get: () => 200 });
+    view.postState({ ...state([a], 7), error: "fatal: " + "long ".repeat(200) });
+    assert.equal(banner.getAttribute("tabindex"), "0", "overflowing at the initial size");
+    // A viewport change does not change the state; only the resize listener can
+    // re-decide. Shrinking the content below the box must remove the tab stop.
+    scrollHeight = 120;
+    view.dom.window.dispatchEvent(new view.dom.window.Event("resize"));
+    assert.equal(banner.hasAttribute("tabindex"), false, "resize removed a no-longer-needed tab stop");
+    scrollHeight = 400;
+    view.dom.window.dispatchEvent(new view.dom.window.Event("resize"));
+    assert.equal(banner.getAttribute("tabindex"), "0", "resize restored the tab stop when it overflows again");
+  } finally {
+    view.close();
+  }
+});
+
 test("the tooltip pops in from the row-facing edge and flips its origin when placed above", () => {
   const view = createHarness();
   try {

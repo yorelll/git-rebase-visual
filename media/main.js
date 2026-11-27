@@ -79,6 +79,13 @@
     // not compete with it here.
     if (el.classList?.contains("commit-search")) return null;
     if (el === bannerEl) return { kind: "banner" };
+    // A collapsed locked run is represented by its focusable <summary>. The
+    // hash list is the run's stable identity; the detail rows are rebuilt on
+    // every list refresh and a node reference would point at the removed copy.
+    const lockedRun = el.closest?.("details.locked-run");
+    if (lockedRun && lockedRun.dataset.lockedRun && lockedRun.firstElementChild === el) {
+      return { kind: "locked-run", key: lockedRun.dataset.lockedRun };
+    }
     const commit = el.closest?.(".commit");
     if (commit?.dataset.hash) return { kind: "commit", hash: commit.dataset.hash };
     const changeRow = el.closest?.(".change-file");
@@ -102,39 +109,72 @@
   function findByData(el, key, value) {
     return [...el.querySelectorAll("[data-" + key + "]")].find((candidate) => candidate.dataset[key] === value) || null;
   }
+  function findChangeRow(identity) {
+    return [...changesEl.querySelectorAll(".change-file")]
+      .find((candidate) => candidate.dataset.path === identity.path && candidate.dataset.group === identity.group) || null;
+  }
+  // A target can exist and still refuse focus: a Continue button that became
+  // `disabled` when the rebase hit a conflict, or a control inside a collapsed
+  // `<details>`. `focus()` silently leaves focus on <body> in that case, so the
+  // restore path has to reject those targets before calling focus and verify
+  // afterwards that the focus actually moved.
+  function isFocusableTarget(el) {
+    if (!el || typeof el.focus !== "function") return false;
+    if (el.disabled === true) return false;
+    if (el.closest?.("fieldset[disabled]")) return false;
+    if (el.getAttribute?.("tabindex") === "-1") return false;
+    if (el.closest?.(".hidden")) return false;
+    const details = el.closest?.("details");
+    if (details && !details.open && details.firstElementChild !== el) return false;
+    return true;
+  }
+  function focusIfVerified(target) {
+    if (!isFocusableTarget(target)) return false;
+    // `preventScroll` keeps a restored row where the user left it; the browser
+    // already scrolled it into view when it first received focus.
+    target.focus({ preventScroll: true });
+    return document.activeElement === target;
+  }
   function focusTargetFor(identity) {
-    if (identity.kind === "commit") return [...listEl.querySelectorAll(".commit")].find((row) => row.dataset.hash === identity.hash) || null;
-    if (identity.kind === "banner") return bannerEl.hasAttribute("tabindex") ? bannerEl : null;
-    if (identity.kind === "banner-action") return findByData(bannerEl, "action", identity.action);
-    if (identity.kind === "change-row" || identity.kind === "change-action") {
-      const row = [...changesEl.querySelectorAll(".change-file")]
-        .find((candidate) => candidate.dataset.path === identity.path && candidate.dataset.group === identity.group);
+    let target = null;
+    if (identity.kind === "commit") target = [...listEl.querySelectorAll(".commit")].find((row) => row.dataset.hash === identity.hash) || null;
+    else if (identity.kind === "banner") target = bannerEl.hasAttribute("tabindex") ? bannerEl : null;
+    else if (identity.kind === "banner-action") target = findByData(bannerEl, "action", identity.action);
+    else if (identity.kind === "locked-run") {
+      const details = [...listEl.querySelectorAll("details.locked-run")].find((candidate) => candidate.dataset.lockedRun === identity.key);
+      target = details ? details.firstElementChild : null;
+    } else if (identity.kind === "change-row" || identity.kind === "change-action") {
+      const row = findChangeRow(identity);
       if (!row) return null;
-      if (identity.kind === "change-row") return row;
-      return findByData(row, "action", identity.action);
+      target = identity.kind === "change-row" ? row : findByData(row, "action", identity.action);
+    } else if (identity.kind === "action") {
+      target = findByData(document, "action", identity.action);
     }
-    if (identity.kind === "action") {
-      const found = findByData(document, "action", identity.action);
-      if (found) return found;
-      // A group-level change action (stage/discard all) has no row scope.
-      return null;
+    return isFocusableTarget(target) ? target : null;
+  }
+  function fallbackFocus(identity) {
+    // Prefer the same region: another action in the change row, another banner
+    // button, another locked run. Then the list's search control. Focus is
+    // verified for each candidate because existence is not focusability.
+    const candidates = [];
+    if (identity.kind === "change-action" || identity.kind === "change-row") {
+      const row = findChangeRow(identity);
+      if (row) candidates.push(row, ...row.querySelectorAll("button"));
+      candidates.push(changesEl.querySelector(".changes-more > summary"));
+    } else if (identity.kind === "banner" || identity.kind === "banner-action") {
+      candidates.push(...bannerEl.querySelectorAll("button"));
+    } else if (identity.kind === "locked-run") {
+      candidates.push(...listEl.querySelectorAll(".locked-run > summary"));
     }
-    return null;
+    candidates.push(listEl.querySelector(".commit-search"));
+    return candidates.find((candidate) => focusIfVerified(candidate)) || null;
   }
   function restoreFocusIdentity(identity) {
     if (!identity) return;
-    const target = focusTargetFor(identity);
-    if (target) {
-      // `preventScroll` keeps a restored row where the user left it; the browser
-      // already scrolled it into view when it first received focus.
-      target.focus?.({ preventScroll: true });
-      return;
-    }
-    // The target no longer exists (the row was deleted or filtered out). Land
-    // on the list's own search control when one is rendered; otherwise leave
-    // focus wherever the rebuild put it (body) rather than throwing.
-    const fallback = listEl.querySelector(".commit-search");
-    fallback?.focus?.({ preventScroll: true });
+    // `focusIfVerified` covers both "target disappeared" and "target exists but
+    // is disabled/hidden inside a closed <details>".
+    if (focusIfVerified(focusTargetFor(identity))) return;
+    fallbackFocus(identity);
   }
   // utf-8 JSON of the host state. Used to prove that an identical poll is a
   // no-op: rebuilding the same DOM is both wasted work and a live-region churn.
@@ -653,6 +693,8 @@
 
   function lockedRunRow(commits) {
     const key = lockedRunKey(commits); const details = document.createElement("details"); details.className = "locked-run"; details.open = expandedLockedRuns.has(key);
+    // Stable identity for the focusable <summary> across list rebuilds.
+    details.dataset.lockedRun = key;
     details.addEventListener("toggle", () => { if (details.open) expandedLockedRuns.add(key); else expandedLockedRuns.delete(key); persistUi(); });
     const summary = document.createElement("summary"); summary.textContent = runSummary(commits); summary.title = runSummaryAria(commits);
     summary.setAttribute("aria-label", `${runSummaryAria(commits)}；拖入上半部插入 run 前，拖入下半部插入 run 后`);
