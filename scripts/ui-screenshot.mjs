@@ -21,7 +21,7 @@
  *
  * Usage:
  *   node scripts/ui-screenshot.mjs [--out DIR] [--theme a,b] [--only name,name]
- *                                  [--width N] [--audit] [--debug-style]
+ *                                  [--width N] [--height N] [--audit] [--debug-style]
  *
  * Defaults to `D:\tmp\grv-ui-shots` so a render never dirties the working tree.
  */
@@ -49,6 +49,9 @@ const surface = flag("surface", "sidebar");
 const portBase = Number(flag("port", String(9000 + Math.floor(Math.random() * 900))));
 // VS Code's default sidebar is 300px; 340 leaves room for a wider panel.
 const viewportWidth = Number(flag("width", "340"));
+// The height matters to the banner bound (`45vh`) and to whether a scrolled
+// action stays inside both the banner's scrollport and the window.
+const viewportHeight = Number(flag("height", "720"));
 
 /**
  * The theme JSONs and the workbench bundle are the only authoritative sources
@@ -364,6 +367,31 @@ const LONG_CONFLICT_FILES = Array.from({ length: 30 }, (_, i) =>
 );
 
 /**
+ * C5 state shared by the resting and hovered scenarios. `pendingHashes` marks
+ * the commits a paused replay has not applied yet; the list draws the boundary
+ * row and the `*（待重放）` meta suffix from it. The stop is parked on a replayed
+ * commit so every pending row keeps the plain list background at rest.
+ */
+const pendingState = {
+  ...baseState,
+  // The changes section is unrelated to C5 and would push the pending rows
+  // below the fold; keep the surface compact so the screenshot shows the
+  // normal and pending rows side by side.
+  changes: [],
+  hasStaged: false,
+  hasUnstaged: false,
+  stagedCount: 0,
+  unstagedCount: 0,
+  rebaseInProgress: true,
+  conflictCount: 0,
+  pausedReason: "edit",
+  stoppedAt: commits[2].hash,
+  totalSteps: 8,
+  completedSteps: 3,
+  pendingHashes: [commits[3].hash, commits[4].hash, commits[5].hash],
+};
+
+/**
  * Each scenario drives the webview through the same entry points the host uses
  * (`postMessage`) or the same events the user generates, then the caller
  * screenshots whatever is on screen. Nothing here reaches into internal state.
@@ -393,24 +421,22 @@ const scenarios = {
    * plain list background, which is the surface the opacity is measured on.
    */
   pending: async (page) => {
-    await page.render({
-      ...baseState,
-      // The changes section is unrelated to C5 and would push the pending rows
-      // below the fold; keep the surface compact so the screenshot shows the
-      // normal and pending rows side by side.
-      changes: [],
-      hasStaged: false,
-      hasUnstaged: false,
-      stagedCount: 0,
-      unstagedCount: 0,
-      rebaseInProgress: true,
-      conflictCount: 0,
-      pausedReason: "edit",
-      stoppedAt: commits[2].hash,
-      totalSteps: 8,
-      completedSteps: 3,
-      pendingHashes: [commits[3].hash, commits[4].hash, commits[5].hash],
-    });
+    await page.render(pendingState);
+    await page.wait(150);
+  },
+
+  /**
+   * C5's adjacent state: the hovered pending row. `.commit:hover` paints
+   * `list-hoverBackground`, which is lighter than the resting row; at the
+   * resting pending opacity the meta line falls below AA there. A real CDP
+   * pointer move is required because a synthetic `mouseenter` does not make
+   * `:hover` match.
+   */
+  "pending-hover": async (page) => {
+    await page.render(pendingState);
+    const rect = await page.rowRect(4);
+    if (!rect) throw new Error("pending row 4 missing");
+    await page.mouseMove(rect.x, rect.y);
     await page.wait(150);
   },
 
@@ -743,7 +769,10 @@ const AUDIT_PROBE = `(() => {
     const opacity = cumulativeOpacity(el);
     const effectiveFg = blend({ ...fg, a: fg.a * opacity }, bg);
     // A scroll container is asked to clip by the stylesheet; only unrequested
-    // overflow is a layout defect, matching the ellipsis exemption below.
+    // overflow is a layout defect, matching the ellipsis exemption below. This
+    // deliberately covers every scroll container, including the pre-existing
+    // tip-msg box (max-height 26vh; overflow-y:auto), not only the banner that
+    // C4 bounded; both are purposeful overflow rather than a clipped label.
     const scrolls = ["auto", "scroll"].includes(style.overflowY) || ["auto", "scroll"].includes(style.overflowX);
     found.push({
       label: label(el),
@@ -934,14 +963,34 @@ const LAYOUT_PROBE = `(() => {
   const list = document.getElementById("list");
   const visible = banner && !banner.classList.contains("hidden");
   const actions = visible ? [...banner.querySelectorAll(".banner-actions .btn, .edit-actions .btn")] : [];
-  const actionState = () => actions.map((button) => {
-    const box = rect(button);
-    return {
-      text: button.textContent.trim(),
-      rect: box,
-      inViewport: !!box && box.top >= 0 && box.bottom <= viewport.height && box.left >= 0 && box.right <= viewport.width,
+  const contains = (outer, box) => !!box && box.top >= outer.top - 0.5 && box.bottom <= outer.bottom + 0.5 && box.left >= outer.left - 0.5 && box.right <= outer.right + 0.5;
+  const actionState = () => {
+    const bannerBox = banner.getBoundingClientRect();
+    const style = getComputedStyle(banner);
+    // The scrollport is the padding box, so trim the border before intersecting.
+    const scrollport = {
+      top: bannerBox.top + (parseFloat(style.borderTopWidth) || 0),
+      bottom: bannerBox.bottom - (parseFloat(style.borderBottomWidth) || 0),
+      left: bannerBox.left + (parseFloat(style.borderLeftWidth) || 0),
+      right: bannerBox.right - (parseFloat(style.borderRightWidth) || 0),
     };
-  });
+    const viewportBox = { top: 0, bottom: viewport.height, left: 0, right: viewport.width };
+    return actions.map((button) => {
+      const box = rect(button);
+      const inScrollport = contains(scrollport, box);
+      const inWindow = contains(viewportBox, box);
+      return {
+        text: button.textContent.trim(),
+        rect: box,
+        // A button is reachable only when it is fully inside BOTH the banner's
+        // scrollport and the window; testing the window alone hid the 7px that
+        // the scroll container had clipped at 340x300.
+        inScrollport,
+        inWindow,
+        inViewport: inScrollport && inWindow,
+      };
+    });
+  };
   let atTop = null, atBottom = null;
   if (visible) {
     banner.scrollTop = 0;
@@ -1278,7 +1327,7 @@ async function renderTheme(themeName, chromePort, profile, defaults) {
     await cdp.send("Emulation.setDeviceMetricsOverride", {
       // The compose panel opens as an editor and gets the editor's width.
       width: isCompose ? 900 : viewportWidth,
-      height: 720,
+      height: isCompose ? 720 : viewportHeight,
       deviceScaleFactor: 2,
       mobile: false,
     });
@@ -1363,10 +1412,16 @@ const main = async () => {
     fs.writeFileSync(path.join(outDir, "audit.json"), JSON.stringify(auditResults, null, 2));
     const all = auditResults.flatMap((shot) => shot.elements.map((el) => ({ ...el, theme: shot.theme, scenario: shot.scenario })));
     // WCAG AA: 4.5:1 for body text, 3:1 for large text (>=18.66px bold or >=24px).
-    const below = all.filter((el) => el.contrast < (el.fontSize >= 24 ? 3 : 4.5));
+    const threshold = (el) => el.fontSize >= 24 ? 3 : 4.5;
+    const below = all.filter((el) => el.contrast < threshold(el));
+    // Text inside an opacity group is only as readable as its effective
+    // contrast. Report that separately: the raw field above ignores ancestor
+    // opacity, so an opacity regression can hide in a stable raw count.
+    const effectiveBelow = all.filter((el) => el.effectiveContrast < threshold(el));
     const clipped = all.filter((el) => el.clipped);
     const overflowing = all.filter((el) => el.overflowsViewport);
-    console.log(`\nAudit: ${all.length} text nodes · ${below.length} below AA · ${clipped.length} clipped · ${overflowing.length} overflowing the panel`);
+    console.log(`\nAudit: ${all.length} text nodes · ${below.length} below AA raw · ${effectiveBelow.length} below AA effective (ancestor opacity) · ${clipped.length} clipped · ${overflowing.length} overflowing the panel`);
+    console.log("Contrast verdicts must read effectiveContrast: contrast ignores ancestor opacity (C5).");
   }
   console.log(`\nWrote screenshots to ${outDir}`);
 };
