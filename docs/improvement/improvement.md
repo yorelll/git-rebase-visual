@@ -413,6 +413,8 @@
 
 * **\[ ] P2 —— `.danger-btn` hover 对比度不足（batch 2 评审发现，未修）。** `Abort` / `Skip（丢弃 patch）` 使用 `--vscode-errorForeground` 配 secondary 按钮背景。这个配对在改造前就不达标：Light Modern 基态 **2.66:1**；batch 2 把 `.btn:hover` 从 `opacity: 0.9` 换成 `--vscode-button-secondaryHoverBackground` 后，hover 降到 **2.09:1**（Dark Modern 3.88 → 3.29:1），均低于 WCAG AA 4.5:1 与 UI 组件 3:1 的下限。**不改的原因**：达标需要改 danger 的红字颜色或引入专用的危险色 token，属视觉决策，应由实际体验验收后定；仅换 hover 背景无法达标（该红色在白底上也只有约 3.1:1）。**改动位置**：`media/style.css` 的 `.btn:hover:not(:disabled)` 与 `.danger-btn`，以及 `media/main.js` 中 `renderBanner()` 的两个按钮。**若后续决定修**，需同时复核 Light/Dark/High Contrast 三套主题与 disabled 态。
 
+* **\[ ] P2 —— 右键菜单在默认侧边栏宽度下溢出（视觉评审第一轮发现，未修）。** 菜单宽度由内容决定，实测 **322px**；VS Code 默认侧边栏约 300px，`.menu` 只有 `min-width: 200px` 而没有 `max-width`，菜单是 `position: fixed` 且位于 webview 内部，无法逃出面板边界，于是右侧的快捷键提示（`Enter` / `Delete`）与长标签尾部被裁掉。**证据**：`scripts/ui-screenshot.mjs --only menu --width 300 --debug-style` 输出 `{"innerWidth":300,"menuWidth":322,"left":4,"right":326,"overflows":true}`。**修法方向**：`max-width: calc(100vw - 8px)` + 让 `.menu .item` 的标签部分 `min-width: 0` / `text-overflow: ellipsis`（`kbd` 保持右对齐不被压缩）；需要同时确认截断后的 `aria-label`/`title` 仍能表达完整动作名。**影响面**：`media/style.css` 的 `.menu` 与 `.menu .item`，无 JS 改动。
+
 ## 验收原则
 所有后续历史改写功能应满足：
 

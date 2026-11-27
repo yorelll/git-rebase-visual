@@ -287,3 +287,33 @@ npm test
 | 第 3 步 | P1-6/P1-14/P1-15（按压、抓取态、把手） | 纯 CSS |
 | 第 4 步 | P1-7~P1-13（菜单/tooltip/toast/banner） | 需 4.5 的 JS 补丁，改动 3 处 |
 | 第 5 步 | P2-17/P2-18 | 死代码删除建议单独提交，便于回滚 |
+
+## 8. 视觉验证管线（`scripts/ui-screenshot.mjs`）
+
+jsdom 只能断言"类名/文本变了"，计算样式只能证明"某个颜色是 X"。两者都回答不了"看起来对不对"。这个脚本补上这一环：用 headless Chrome 渲染**真实的 webview**，每个场景输出一张 PNG。
+
+```bash
+node scripts/ui-screenshot.mjs                       # dark_modern + light_modern × 全部场景
+node scripts/ui-screenshot.mjs --theme hc_black --only menu
+node scripts/ui-screenshot.mjs --width 300 --only drag   # 默认测 340px，这里模拟窄侧栏
+```
+
+默认输出到 `D:\tmp\grv-ui-shots`（不污染工作区），可用 `--out` 改。
+
+**为什么截图是可信的**
+
+- body 标记从 `src/ui/rebaseViewProvider.ts` 里**切出来**，不是手抄；缺任一 id 直接抛错，避免渲染一个不存在的界面。
+- `media/style.css` 与 `media/main.js` 原样加载，`acquireVsCodeApi` 用桩替代，场景只通过 `postMessage` 与真实事件驱动，不触碰内部状态。
+- `--vscode-*` 变量来自**已安装 VS Code 的主题 JSON + workbench bundle 里的 color registry 默认值**（`charts.*`、`list.hoverBackground` 等都不在主题 JSON 里）。解析不到的 token 会打印告警——静默回退到 CSS fallback 会产生"假截图"。
+- 2× 像素密度，340×720 视口（侧边栏实际尺寸）。
+
+**已知局限**
+
+- 没有 VS Code 外壳（活动栏、标题栏、真实字号缩放的滚动条）。
+- High Contrast 主题的 JSON 本身很稀疏，多数颜色靠 registry 的 `null`/计算值回退，HC 截图只能作参考，不能作为对比度判定依据。
+- 拖拽是合成 pointer 事件，能验证视觉状态，验证不了真实拖拽的时序手感。
+- `gitDecoration.*`、`debugTokenExpression.*`、`terminal.ansiBright*` 等 token 仍未解析，相关颜色在截图里是 CSS fallback。
+
+**第一次跑就发现的问题**
+
+在 300px（VS Code 默认侧边栏宽度）下，右键菜单实测宽 **322px**，右侧溢出 26px，快捷键提示（`Enter` / `Delete`）与长标签尾部被裁掉。菜单是 `position: fixed` 且位于 webview 内部，无法逃出面板边界；`.menu` 只有 `min-width: 200px`，没有 `max-width`。已记录到 `docs/improvement/improvement.md`。
