@@ -657,14 +657,19 @@ async function pressKey(page, key, code, vk, modifiers = 0) {
 
 const ACTIVE_SNAPSHOT = `(() => {
   const a = document.activeElement;
+  // data-path/data-group live on the .change-file ancestor, not on the focused
+  // button; read the row so a change-action snapshot reports its real scope.
+  const changeRow = a && a.closest ? a.closest(".change-file") : null;
+  const lockedRun = a && a.closest ? a.closest("details.locked-run") : null;
   return {
     tag: a ? a.tagName : null,
     id: a ? a.id : null,
     cls: a ? (a.className || "").toString().trim().replace(/\\s+/g, ".") : null,
     hash: a && a.dataset ? (a.dataset.hash || null) : null,
-    path: a && a.dataset ? (a.dataset.path || null) : null,
-    group: a && a.dataset ? (a.dataset.group || null) : null,
+    path: changeRow ? (changeRow.dataset.path || null) : null,
+    group: changeRow ? (changeRow.dataset.group || null) : null,
     action: a && a.dataset ? (a.dataset.action || null) : null,
+    lockedRun: lockedRun ? (lockedRun.dataset.lockedRun || null) : null,
     isBody: a === document.body,
     hasFocus: document.hasFocus(),
   };
@@ -830,6 +835,39 @@ scenarios["error-keyboard"] = async (page) => {
   await page.render({ ...baseState, error: "fatal: a short failure" });
   await page.wait(200);
   await page.evaluate(`window.__probe.short = window.__probeBanner(); true`);
+};
+
+/** A collapsed run of the three locked commits at the top of `baseState`. */
+scenarios["locked-run-focus"] = async (page) => {
+  const collapsed = { ...baseState, collapseLockedRuns: true };
+  await page.render(collapsed);
+  await page.wait(150);
+  await installRecord(page);
+  await page.evaluate(`(() => { const summary = document.querySelector("details.locked-run > summary"); if (!summary) return false; summary.focus(); window.__probe.lockedRun = summary.closest("details").dataset.lockedRun; return true; })()`);
+  await page.evaluate(`window.__probeRecord("lockedRunSummaryFocused"); true`);
+  // Appending a commit rebuilds #list (and therefore the <details>/<summary>)
+  // without changing the locked run's own hash list.
+  const extra = { ...baseState.commits[7], hash: "9".repeat(40), shortHash: "9".repeat(8), subject: "chore: force a list rebuild" };
+  await page.render({ ...collapsed, commits: [...collapsed.commits, extra], canonicalOrder: [...collapsed.canonicalOrder, extra.hash] });
+  await page.wait(150);
+  await page.evaluate(`window.__probeRecord("afterListRebuild"); true`);
+  await page.evaluate(`window.__probe.summaryStillExists = !!document.querySelector("details.locked-run > summary"); true`);
+};
+
+/** Continue becomes disabled when the paused rebase gains conflicts. */
+scenarios["disabled-action-focus"] = async (page) => {
+  const editState = { ...baseState, rebaseInProgress: true, conflictCount: 0, pausedReason: "edit", stoppedAt: commits[3].hash, totalSteps: 8, completedSteps: 3 };
+  await page.render(editState);
+  await page.wait(150);
+  await installRecord(page);
+  await page.evaluate(`(() => { const b = [...document.querySelectorAll("#banner .btn")].find((el) => el.textContent.trim() === "Continue"); b.focus(); return true; })()`);
+  await page.evaluate(`window.__probeRecord("continueFocused"); true`);
+  // The same action now exists but is disabled; focus must not silently fall
+  // to <body>. A sibling banner action is the same-region fallback.
+  await page.render({ ...editState, conflictCount: 2, conflictFiles: ["src/cif/rate.ts", "src/sensor/table.ts"], pausedReason: "conflict" });
+  await page.wait(150);
+  await page.evaluate(`window.__probe.continueDisabled = (() => { const b = [...document.querySelectorAll("#banner .btn")].find((el) => el.textContent.trim() === "Continue"); return !!b && b.disabled; })(); true`);
+  await page.evaluate(`window.__probeRecord("afterContinueDisabled"); true`);
 };
 
 /**
