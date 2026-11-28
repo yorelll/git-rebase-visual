@@ -1001,6 +1001,91 @@ scenarios["error-keyboard"] = async (page) => {
   await page.evaluate(`window.__probe.short = window.__probeBanner(); true`);
 };
 
+/**
+ * batch D: the four banner variants paint the validation surfaces, and a
+ * scrollable banner is a tab stop on each of them. The shared `focusBorder` ring
+ * was below 3:1 on the dark error / info fills, so this scenario focuses every
+ * variant and records the painted outline against the fill it is drawn on. A
+ * real Tab runs first because a programmatic focus alone can leave
+ * `:focus-visible` false; the last variant (recovery) is what the screenshot
+ * shows.
+ */
+scenarios["banner-focus"] = async (page) => {
+  // The info banner's own copy is short, so a long stopped subject is what makes
+  // it scroll and therefore eligible for the tab stop under measurement.
+  const longSubject = "refactor(sensor): load and validate the register table " + "同时保留完整错误信息并逐行核对".repeat(24);
+  const infoCommits = commits.map((commit, index) => (index === 3 ? { ...commit, subject: longSubject } : commit));
+  const variants = [
+    ["error", { ...baseState, error: LONG_ERROR }],
+    ["conflict", {
+      ...baseState,
+      rebaseInProgress: true,
+      conflictCount: LONG_CONFLICT_FILES.length,
+      conflictFiles: LONG_CONFLICT_FILES,
+      totalSteps: 8,
+      completedSteps: 3,
+      pausedReason: "conflict",
+      stoppedAt: commits[4].hash,
+    }],
+    ["info", {
+      ...baseState,
+      commits: infoCommits,
+      canonicalOrder: infoCommits.map((commit) => commit.hash),
+      rebaseInProgress: true,
+      conflictCount: 0,
+      pausedReason: "edit",
+      stoppedAt: infoCommits[3].hash,
+      totalSteps: 8,
+      completedSteps: 3,
+    }],
+    ["recovery", { ...baseState, recoveryNotice: LONG_ERROR }],
+  ];
+  const measure = `(() => {
+    const banner = document.getElementById("banner");
+    const style = getComputedStyle(banner);
+    const parse = (value) => {
+      const m = value.match(/rgba?\\(([^)]+)\\)/);
+      if (!m) return null;
+      const parts = m[1].split(",").map((part) => parseFloat(part.trim()));
+      return { r: parts[0], g: parts[1], b: parts[2], a: parts.length > 3 ? parts[3] : 1 };
+    };
+    const channel = (value) => { const s = value / 255; return s <= 0.03928 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4); };
+    const luminance = (c) => 0.2126 * channel(c.r) + 0.7152 * channel(c.g) + 0.0722 * channel(c.b);
+    const ratio = (a, b) => { const l1 = luminance(a), l2 = luminance(b); return (Math.max(l1, l2) + 0.05) / (Math.min(l1, l2) + 0.05); };
+    const outline = parse(style.outlineColor);
+    const fill = parse(style.backgroundColor);
+    return {
+      className: banner.className,
+      tabIndex: banner.tabIndex,
+      scrollable: banner.scrollHeight > banner.clientHeight,
+      maxHeight: style.maxHeight,
+      overflowY: style.overflowY,
+      focusVisible: banner.matches(":focus-visible"),
+      outlineStyle: style.outlineStyle,
+      outlineWidth: style.outlineWidth,
+      outlineOffset: style.outlineOffset,
+      outlineColor: style.outlineColor,
+      background: style.backgroundColor,
+      contrast: outline && fill ? Number(ratio(outline, fill).toFixed(2)) : null,
+    };
+  })()`;
+  await page.evaluate(`window.__probe = { variants: [] }; true`);
+  for (const [variant, state] of variants) {
+    await page.render(state);
+    await page.wait(220);
+    await page.pressTab();
+    const focused = await page.evaluate(`(() => {
+      const banner = document.getElementById("banner");
+      banner.focus();
+      return document.activeElement === banner && banner.matches(":focus-visible");
+    })()`);
+    if (!focused) throw new Error(`the ${variant} banner never took keyboard focus`);
+    await page.wait(80);
+    const measured = await page.evaluate(measure);
+    await page.evaluate(`window.__probe.variants.push(${JSON.stringify({ variant, ...measured })}); true`);
+  }
+};
+
 /** A collapsed run of the three locked commits at the top of `baseState`. */
 scenarios["locked-run-focus"] = async (page) => {
   const collapsed = { ...baseState, collapseLockedRuns: true };

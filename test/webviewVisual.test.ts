@@ -30,6 +30,9 @@ interface ThemeTokens {
   focusBorder: string;
   editorInfoForeground: string;
   editorBackground: string;
+  errorBackground: string;
+  infoBackground: string;
+  warningBackground: string;
 }
 
 const themes: Record<"dark" | "light", ThemeTokens> = {
@@ -44,6 +47,11 @@ const themes: Record<"dark" | "light", ThemeTokens> = {
     focusBorder: "#0078D4",
     editorInfoForeground: "#3794FF",
     editorBackground: "#1F1F1F",
+    // The colour-registry defaults behind `inputValidation.*Background`; the
+    // default themes do not override them.
+    errorBackground: "#5A1D1D",
+    infoBackground: "#063B49",
+    warningBackground: "#352A05",
   },
   light: {
     foreground: "#3B3B3B",
@@ -58,6 +66,9 @@ const themes: Record<"dark" | "light", ThemeTokens> = {
     focusBorder: "#005FB8",
     editorInfoForeground: "#1A85FF",
     editorBackground: "#FFFFFF",
+    errorBackground: "#F2DEDE",
+    infoBackground: "#D6ECF2",
+    warningBackground: "#F6F5D2",
   },
 };
 
@@ -97,6 +108,9 @@ function tokenColor(value: string, theme: ThemeTokens): string {
     focusBorder: "focusBorder",
     "editorInfo-foreground": "editorInfoForeground",
     "editor-background": "editorBackground",
+    "inputValidation-errorBackground": "errorBackground",
+    "inputValidation-infoBackground": "infoBackground",
+    "inputValidation-warningBackground": "warningBackground",
   };
   const key = aliases[token];
   if (key) return theme[key];
@@ -191,6 +205,44 @@ test("secondary and stopped focus rings reach 3:1 against their fills", () => {
     const stoppedFill = theme.activeSelectionBackground;
     const stoppedRatio = ratio(stoppedRing, stoppedFill);
     assert.ok(stoppedRatio >= 3, `${name}: stopped focus ring ${stoppedRatio.toFixed(2)} >= 3`);
+  }
+});
+
+// ------------------------------------------------------- batch D: banner ring
+/**
+ * The painted ring colour. jsdom keeps `outline` as a shorthand, so a colour
+ * that still lives on the grouped `outline: 1px solid …` rule has to be read
+ * from the shorthand itself; otherwise the gate would only notice a colour that
+ * was moved into a longhand and miss the regression it exists to catch.
+ */
+function outlineColor(selector: string, theme: ThemeTokens): string | undefined {
+  const explicit = declaration(selector, "outline-color");
+  if (explicit) return tokenColor(explicit, theme);
+  const shorthand = declaration(selector, "outline");
+  const colour = shorthand && /(?:^|\s)(var\([^)]*\)|#[0-9a-fA-F]{3,8})\s*$/.exec(shorthand);
+  return colour ? tokenColor(colour[1], theme) : undefined;
+}
+
+test("the banner focus ring reaches 3:1 on every validation fill", () => {
+  // The colour override must not carry the ring's geometry with it: the shared
+  // rule is still the only place that sets the inset 1px outline.
+  assert.equal(declaration(".banner:focus-visible", "outline-offset"), "-1px", "the ring keeps its inset offset");
+
+  const surfaces: Record<string, string> = {
+    error: ".banner.error",
+    conflict: ".banner.rebase.conflict",
+    info: ".banner.rebase",
+    recovery: ".banner.recovery",
+  };
+  for (const [name, theme] of Object.entries(themes)) {
+    const ring = outlineColor(".banner:focus-visible", theme);
+    assert.ok(ring, `${name}: the banner has a painted ring colour`);
+    for (const [variant, selector] of Object.entries(surfaces)) {
+      const background = declaration(selector, "background");
+      assert.ok(background, `${variant} banner declares its validation fill`);
+      const contrast = ratio(ring, tokenColor(background, theme));
+      assert.ok(contrast >= 3, `${name}: ${variant} banner focus ring ${contrast.toFixed(2)} >= 3`);
+    }
   }
 });
 

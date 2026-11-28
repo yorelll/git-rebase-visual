@@ -498,6 +498,21 @@ button, .grip, .dot, .lock-icon, .stopped-badge {
   outline-offset: -1px;
 }
 
+/* The banner is the one focusable surface that does not sit on the neutral
+   list/button fills: its four variants paint the validation backgrounds. The
+   shared `focusBorder` ring only reaches 2.85:1 on the dark error fill (#5A1D1D)
+   and 2.68:1 on the dark info fill (#063B49), below the 3:1 the other keyboard
+   rings hold to. Each banner's body text is already paired with that fill:
+   `.banner.error` / `.banner.recovery` name the validation foreground token,
+   which both default themes leave unset, so the text resolves to
+   `--vscode-foreground`; `.banner.rebase` inherits it. A ring in the same token
+   is therefore as visible as the text on every variant: 8.03 / 7.56 / 8.81
+   dark and 8.68 / 9.14 / 10.09 light on error/info/warning. Only the colour
+   changes; the 1px inset geometry stays on the shared rule above. */
+.banner:focus-visible {
+  outline-color: var(--vscode-foreground);
+}
+
 .commit.locked {
   border-left-color: var(--vscode-editorWarning-foreground, var(--vscode-charts-orange));
 }
